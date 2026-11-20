@@ -89,6 +89,10 @@ struct GeneratedSignal
 
 GeneratedSignal generate(const WaveformSpec &spec);
 
+// Value of a periodic waveform of unit amplitude at phase u in [0, 1) (sampled, not band-limited):
+// what generate() computes sample by sample; for sources that produce samples one at a time.
+double periodicValue(Waveform waveform, double phase, double dutyCycle = 0.5) noexcept;
+
 // Fourier series of a periodic waveform of unit amplitude, in the phase u of the generator:
 //   x(u) = dc + sum_k cosine_k cos(2 pi k u) + sine_k sin(2 pi k u),  k = 1..harmonics.
 struct FourierSeries

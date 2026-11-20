@@ -68,7 +68,10 @@ public:
     std::size_t channelCount() const noexcept override { return m_format.channels; }
     std::size_t pendingBytes() const noexcept override { return m_line.size() + m_header.size() + m_sample.size(); }
 
+    // Answers begun (a text answer counts once complete, a block from its header on).
     std::uint64_t answers() const noexcept { return m_answers; }
+    // No answer in progress: the last one is complete (a block wholly received).
+    bool betweenAnswers() const noexcept { return m_state == State::Idle; }
 
 private:
     enum class State

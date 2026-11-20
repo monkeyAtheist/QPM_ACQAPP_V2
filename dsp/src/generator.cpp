@@ -95,6 +95,12 @@ double idealValue(Waveform waveform, double u, double duty) noexcept
 }
 } // namespace
 
+double periodicValue(Waveform waveform, double phase, double dutyCycle) noexcept
+{
+    if (waveform == Waveform::Dc) return 1.0;
+    return idealValue(waveform, fraction(phase), dutyCycle);
+}
+
 GeneratedSignal generate(const WaveformSpec &spec)
 {
     GeneratedSignal out;

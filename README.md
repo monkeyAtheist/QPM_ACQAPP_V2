@@ -4,8 +4,8 @@ Outil pédagogique et utilitaire de développement : acquisition (carte à micro
 instrument SCPI, flux réseau, carte son) et traitement du signal.
 Ce dépôt est la réécriture de QtAcquisitionApp (« Architecture milestone 57 »), menée selon l'audit du 20/11/2026.
 
-**Statut : phase 0 (socle) terminée.** Le cœur de calcul, le décodage des acquisitions et leurs tests sont en
-place ; l'application Qt Quick arrive en phase 3. L'ancienne application reste utilisable d'ici là.
+**Statut : phase 2 (acquisition) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle
+de session et leurs tests sont en place ; l'application Qt Quick arrive en phase 3. L'ancienne application reste utilisable d'ici là.
 
 ## Décisions (20/11/2026)
 
@@ -39,7 +39,29 @@ io/                          qacq_io : décodage des données acquises, sans auc
   include/qacq/io/crc.h            sommes, XOR, CRC-8, CRC-16 (CCITT, XMODEM, MODBUS), CRC-32
   include/qacq/io/scpi.h           réponses d'instruments : nombres ASCII, blocs IEEE 488.2, SYST:ERR?
   include/qacq/io/spsc_ring.h      tampon circulaire sans verrou entre le thread d'acquisition et l'interface
-tests/                       qacq_tests : un exécutable, un groupe CTest par étiquette
+model/                       qacq_model : la session, sans aucune dépendance Qt
+  include/qacq/model/signal.h       signal à voies, fréquence, unités, origine ; échantillons partagés
+  include/qacq/model/document.h     liste des signaux avec annuler/rétablir (historique borné en mémoire)
+  include/qacq/model/session_file.h fichier de session .qacq : en-tête JSON lisible + échantillons binaires
+  include/qacq/model/csv.h          import et export CSV (virgule décimale, colonne de temps, en-tête)
+  include/qacq/model/wav.h          import et export WAV (PCM 8 à 32 bits, flottant, multivoie)
+  include/qacq/model/json.h         JSON sans Qt (ordre des membres gardé, nombres exacts)
+acquisition/                 qacq_acquisition : logique d'acquisition, sans aucune dépendance Qt
+  include/qacq/acquisition/settings.h        réglages des sources (série, TCP, UDP, SCPI, carte son, simulateur), JSON
+  include/qacq/acquisition/recorder.h        tuyau sans verrou vers l'interface, mémoire de l'acquisition en cours
+  include/qacq/acquisition/rate_estimator.h  fréquence d'échantillonnage mesurée sur le flux
+  include/qacq/acquisition/trigger.h         déclenchement logiciel (seuil, front, hystérésis, pré-déclenchement)
+  include/qacq/acquisition/simulator.h       appareil simulé : texte, binaire, trames, instrument SCPI, défauts
+  include/qacq/acquisition/firmware_example.h exemple de programme pour la carte (Arduino ou C portable)
+  include/qacq/acquisition/stream_writer.h   enregistrement continu sur disque (CSV, WAV)
+app/                         qacq_app : couche applicative sur QtCore (sans fenêtre, testable)
+  include/qacq/app/signal_list_model.h liste des signaux pour QML, annuler/rétablir
+  include/qacq/app/session.h        nouveau, ouvrir, enregistrer, importer, exporter, réglages des modules
+  include/qacq/app/app_settings.h   réglages mémorisés : fichiers récents, dernier dossier, préréglages
+  include/qacq/app/acquisition_source.h  les sources, chacune sur son thread : série, TCP, UDP, SCPI, carte son, simulateur
+  include/qacq/app/acquisition_controller.h  démarrer, arrêter, statistiques, déclenchement, enregistrement continu
+  include/qacq/app/serial_port_list.h  ports série présents, carte reconnue (Arduino, STM32, ESP32…), branchement détecté
+tests/                       qacq_tests (cœurs) et qacq_app_tests (couche Qt) : un groupe CTest par étiquette
   fixtures/scipy_reference.inc     résultats SciPy (générés, ne pas éditer)
   signals.h                        signaux d'essai déterministes, identiques en C++ et en Python
 tools/reference/             make_scipy_reference.py : régénère les références SciPy
@@ -128,6 +150,63 @@ marque les ruptures (données perdues, nouvel enregistrement) pour que l'afficha
 - **SCPI** : nombres ASCII ou blocs `#<n><longueur><données>` ; avec plusieurs voies, les valeurs sont
   entrelacées. Une réponse de deux trames ou plus (une forme d'onde) forme un enregistrement à part.
 
+## Session
+
+Un signal est une valeur partagée et non modifiable : renommer un signal de dix millions d'échantillons ne
+copie que quelques chaînes, et annuler cinquante étapes ne coûte que les échantillons qui ont vraiment
+changé. L'historique garde des états complets (annulation exacte quelle que soit l'opération) et oublie les
+plus anciens au-delà de 1 Gio d'échantillons conservés pour lui seul ou de 200 étapes. Les réglages qu'on fait
+glisser (curseur) se fondent en une seule étape.
+
+Le fichier de session `.qacq` commence par `QACQSESS`, puis un en-tête JSON lisible dans un éditeur de texte
+(signaux, voies, unités, ruptures, provenance, réglages des modules), puis les échantillons en petit boutisme,
+voie après voie. Une voie dont toutes les valeurs sont exactement des float32 (points de convertisseur) est
+stockée sur 4 octets, sans perte. Chaque voie a son CRC-32 : un fichier abîmé est signalé, jamais relu avec
+de fausses valeurs. L'enregistrement passe par un fichier temporaire : un échec ne détruit pas la session
+précédente. 24 Mo s'écrivent et se relisent en moins de 0,1 s.
+
+## Acquisition
+
+**Les sources** (couche Qt) tournent chacune dans son propre thread, pour qu'un appareil lent ou un réseau
+bloqué ne fige jamais l'interface :
+- **Port série** : vitesse, bits, parité, contrôle de flux, DTR ; une carte débranchée arrête l'acquisition
+  proprement en gardant ce qui a été reçu. La liste des ports reconnaît la carte (Arduino, STM32 ST-Link,
+  ESP32, Pico, Teensy, CH340, CP210x, FTDI…) et signale un port qui apparaît.
+- **TCP** (client) et **UDP** (écoute sur toutes les interfaces ou seulement ce PC, multidiffusion).
+- **Instrument SCPI sur le réseau** (port 5025) : `*IDN?`, commandes de préparation, lecture de `SYST:ERR?`,
+  puis la requête répétée ; la suivante part une fois la réponse entière reçue, une réponse en retard est
+  redemandée. Une forme d'onde (`:WAV:DATA?`) devient un enregistrement marqué par une rupture. L'USB (VISA)
+  viendra ensuite.
+- **Carte son** : entrée choisie par son nom, format vérifié avant de démarrer.
+- **Simulateur** : une carte imaginaire, au rythme réel.
+
+**Le contrôleur** démarre et arrête, publie les statistiques (octets, trames, rejets, erreurs de CRC, trames
+perdues, fréquence mesurée, mémoire), déclenche, enregistre en continu ; à l'arrêt, ce qui a été reçu devient un
+signal de la session (annulable), avec sa provenance : réglages, statistiques, identité de l'instrument.
+Ses essais n'ont besoin d'aucun matériel : le programme de test lance lui-même un serveur TCP, un émetteur UDP
+et un faux instrument SCPI.
+
+Sans Qt, déjà là et testé :
+- **Réglages** de chaque source et du décodage, en JSON (préréglages, provenance du signal acquis), avec
+  vérification et messages en français. La carte son donne toujours des échantillons bruts, un instrument
+  toujours des réponses SCPI.
+- **Tuyau sans verrou** du thread d'acquisition vers l'interface : si l'interface prend du retard, des trames
+  entières sont abandonnées, comptées et marquées comme rupture, jamais coupées en deux.
+- **Mémoire de l'acquisition** par blocs de 64 Ki échantillons : arrêt à la limite (512 Mio par défaut, ou une
+  durée) ou fenêtre glissante qui garde les dernières minutes.
+- **Fréquence mesurée** par régression sur 5 s d'arrivées : une horloge de carte décalée de 0,1 % est mesurée
+  à 0,02 % près malgré des lectures par paquets toutes les 8 à 24 ms.
+- **Déclenchement** comme un oscilloscope : seuil, front montant ou descendant, hystérésis, pré-déclenchement,
+  modes automatique, normal et unique ; instant interpolé au millième d'échantillon.
+- **Simulateur** : les mêmes octets qu'une carte (texte, binaire, trames avec compteur et CRC) ou qu'un
+  instrument SCPI (`*IDN?`, `MEAS?`, `:WAV:DATA?`, `SYST:ERR?`), avec octets abîmés, trames perdues et horloge
+  décalée à volonté : toute la chaîne se teste sans matériel.
+- **Exemple de programme pour la carte** : croquis Arduino ou C portable (STM32, ESP32, PIC) qui envoie
+  exactement le format réglé, CRC compris. Vérifié ici : le C généré compile sans avertissement
+  (`-std=c99 -Wall -Wextra -Wconversion -pedantic`) pour 18 combinaisons de format, et ses trames sont décodées
+  sans une erreur.
+- **Enregistrement continu** sur disque en CSV ou WAV ; un WAV interrompu (plantage) se relit quand même.
+
 ## Méthode de l'analyse de tonalité
 
 1. f0 approchée : pic d'un spectre de Hann (2^20 points au plus), interpolation gaussienne.
@@ -144,9 +223,11 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
 0. **Socle** (fait) : dépôt, CMake, CI, cœurs sans Qt et banc de références : FFT, fenêtres, spectres,
    tonalité, filtres, générateur, modulations, canal et taux d'erreur, décodeurs d'acquisition (texte,
    trames binaires, SCPI), tampon sans verrou.
-1. Modèle et session : signal typé, dépôt avec annuler/rétablir, fichier de session, réglages mémorisés.
-2. Acquisition sur un thread dédié : sources série, TCP, UDP, SCPI, carte son ; tampon sans verrou ;
-   enregistrement continu ; liste des ports ; déclenchement.
+1. **Modèle et session** (fait) : sans Qt : signal, liste avec annuler/rétablir, fichier de session, CSV, WAV ;
+   couche Qt : modèle de liste pour QML, session (ouvrir, enregistrer, importer, exporter), réglages mémorisés.
+2. **Acquisition** (en cours) : fait : réglages, tuyau, mémoire, fréquence mesurée, déclenchement, simulateur,
+   exemples de programme, enregistrement continu ; sources Qt sur leur thread (série, TCP, UDP, SCPI sur le
+   réseau, carte son, simulateur), liste des ports, contrôleur d'acquisition. Reste : VISA pour l'USB.
 3. Coquille Qt Quick reprise de QTsignalApp V2 et moteur de tracé unique.
 4. Modules : oscilloscope, analyse, générateur, filtres, modulations.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.

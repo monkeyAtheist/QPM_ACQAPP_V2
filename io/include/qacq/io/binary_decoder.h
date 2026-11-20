@@ -88,9 +88,13 @@ enum class CounterField
     UInt16
 };
 
+inline constexpr std::uint8_t kDefaultSync[2] = {0xAA, 0x55};
+
 struct FrameFormat
 {
-    std::vector<std::uint8_t> sync{0xAA, 0x55};
+    // From an array rather than {0xAA, 0x55}: GCC 13 (MinGW) warns "may be used uninitialized" about the
+    // hidden array of an initializer list in a default member initializer.
+    std::vector<std::uint8_t> sync = std::vector<std::uint8_t>(kDefaultSync, kDefaultSync + 2);
     CounterField counter = CounterField::UInt8;
     SampleFormat sample;
     std::size_t channels = 1;
@@ -124,7 +128,7 @@ public:
 private:
     bool syncAt(std::size_t position) const noexcept;
     bool checksumOk(std::size_t position) noexcept;
-    void emit(std::size_t position, SampleBlock &out);
+    void produce(std::size_t position, SampleBlock &out); // not "emit": a Qt macro
 
     FrameFormat m_format;
     std::string m_error;

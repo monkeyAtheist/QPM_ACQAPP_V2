@@ -523,6 +523,21 @@ TEST_CASE("SCPI answers: polled values, ASCII and binary waveforms, text answers
         CHECK(out.discontinuities == ref.discontinuities);
         CHECK(out.values[9] == 4.0);
     }
+    // Between answers or not: a block counts from its header on, but is complete only once all its bytes came.
+    ScpiDecoder polled(format);
+    SampleBlock out;
+    CHECK(polled.betweenAnswers());
+    polled.decode(asBytes(block.substr(0, 4)), out);
+    CHECK(polled.answers() == 1);
+    CHECK(!polled.betweenAnswers());
+    polled.decode(asBytes(block.substr(4)), out);
+    CHECK(polled.betweenAnswers());
+    polled.decode(asBytes("+1.5E+00"), out); // a value whose newline has not come yet
+    CHECK(!polled.betweenAnswers());
+    CHECK(polled.answers() == 1);
+    polled.decode(asBytes("\n"), out);
+    CHECK(polled.betweenAnswers());
+    CHECK(polled.answers() == 2);
 }
 
 TEST_CASE("SCPI: multi-channel answers, odd block sizes, huge headers refused", "[scpi]")

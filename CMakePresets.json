@@ -52,6 +52,6 @@
     { "name": "all", "displayName": "All tests", "configurePreset": "release", "output": { "outputOnFailure": true } },
     { "name": "ci", "configurePreset": "ci", "output": { "outputOnFailure": true } },
     { "name": "sanitize", "configurePreset": "sanitize", "output": { "outputOnFailure": true } },
-    { "name": "tsan", "configurePreset": "tsan", "output": { "outputOnFailure": true }, "filter": { "include": { "name": "ring" } } }
+    { "name": "tsan", "configurePreset": "tsan", "output": { "outputOnFailure": true }, "filter": { "include": { "name": "ring|acquisition" } } }
   ]
 }

@@ -124,7 +124,7 @@ void RawBinaryDecoder::decode(std::span<const std::uint8_t> bytes, SampleBlock &
         out.clear();
         out.channelCount = m_channels;
     }
-    auto emit = [&](const std::uint8_t *p) {
+    auto produce = [&](const std::uint8_t *p) {
         for (std::size_t c = 0; c < m_channels; ++c) out.values.push_back(readSample(p + c * size, m_format));
         ++m_statistics.frames;
     };
@@ -134,11 +134,11 @@ void RawBinaryDecoder::decode(std::span<const std::uint8_t> bytes, SampleBlock &
         const std::size_t take = std::min(frame - m_pending.size(), bytes.size());
         for (; i < take; ++i) m_pending.push_back(bytes[i]); // a few bytes: completes the cut frame
         if (m_pending.size() < frame) return;
-        emit(m_pending.data());
+        produce(m_pending.data());
         m_pending.clear();
     }
     out.values.reserve(out.values.size() + (bytes.size() - i) / size);
-    for (; i + frame <= bytes.size(); i += frame) emit(bytes.data() + i);
+    for (; i + frame <= bytes.size(); i += frame) produce(bytes.data() + i);
     m_pending.assign(bytes.begin() + static_cast<std::ptrdiff_t>(i), bytes.end());
 }
 
@@ -215,7 +215,7 @@ bool FramedBinaryDecoder::checksumOk(std::size_t position) noexcept
     return computed == stored;
 }
 
-void FramedBinaryDecoder::emit(std::size_t position, SampleBlock &out)
+void FramedBinaryDecoder::produce(std::size_t position, SampleBlock &out)
 {
     const std::uint8_t *p = m_pending.data() + position + m_format.sync.size();
     if (m_counterSize)
@@ -302,7 +302,7 @@ void FramedBinaryDecoder::decode(std::span<const std::uint8_t> bytes, SampleBloc
             }
         }
         m_locked = true;
-        emit(m_read, out);
+        produce(m_read, out);
         m_read += m_frameSize;
     }
     if (m_read == m_pending.size())

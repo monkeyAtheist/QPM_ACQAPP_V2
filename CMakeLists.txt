@@ -20,24 +20,35 @@ option(QACQ_BUILD_APP "Build the Qt Quick application (needs Qt 6.8 or later)" O
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 
-# Layer 1 - signal-processing core and acquisition decoding (no Qt, ever). Phase 0.
+# Layer 1 - signal processing, acquisition decoding, session model, acquisition logic (no Qt, ever).
 add_subdirectory(dsp)
 add_subdirectory(io)
+add_subdirectory(model)
+add_subdirectory(acquisition)
 
-# Layer 2 - application logic (QtCore) and layer 3 - Qt Quick interface: phases 1 to 3.
-# Without Qt (CI runners, core-only work) the core and its tests still build.
+# Layer 2 - application logic (QtCore, phase 1) and layer 3 - Qt Quick interface (phase 3).
+# Without Qt (CI runners, core-only work) the core libraries and their tests still build.
 if(QACQ_BUILD_APP AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app/CMakeLists.txt")
-    find_package(Qt6 6.8 QUIET COMPONENTS Core Gui Concurrent Qml Quick QuickControls2 SerialPort Network)
+    # The application layer: sockets, serial ports and the sound card for the acquisition.
+    set(_qacq_qt_components Core Network SerialPort Multimedia)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ui/CMakeLists.txt")
+        list(APPEND _qacq_qt_components Gui Concurrent Qml Quick QuickControls2)
+    endif()
+    find_package(Qt6 6.8 QUIET COMPONENTS ${_qacq_qt_components})
     if(Qt6_FOUND)
         qt_standard_project_setup(REQUIRES 6.8)
         add_subdirectory(app)
-        add_subdirectory(ui)
-        message(STATUS "QTacquisitionApp: Qt ${Qt6_VERSION} found, building the application")
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ui/CMakeLists.txt")
+            add_subdirectory(ui)
+            message(STATUS "QTacquisitionApp: Qt ${Qt6_VERSION} found, building the application")
+        else()
+            message(STATUS "QTacquisitionApp: Qt ${Qt6_VERSION} found, building the application layer (no interface yet)")
+        endif()
     else()
-        message(STATUS "QTacquisitionApp: Qt 6.8+ not found, building the core and tests only")
+        message(STATUS "QTacquisitionApp: Qt 6.8+ (Core, Network, SerialPort, Multimedia) not found, building the core libraries and their tests only")
     endif()
 else()
-    message(STATUS "QTacquisitionApp: phase 0, building the core libraries and their tests")
+    message(STATUS "QTacquisitionApp: building the core libraries and their tests")
 endif()
 
 if(QACQ_BUILD_TESTS)
