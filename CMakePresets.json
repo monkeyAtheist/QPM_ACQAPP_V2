@@ -27,18 +27,31 @@
         "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined",
         "QACQ_BUILD_APP": "OFF"
       }
+    },
+    {
+      "name": "tsan",
+      "displayName": "Debug + ThreadSanitizer (gcc/clang): the lock-free buffer and the threads",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-O1 -g -fsanitize=thread",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+        "QACQ_BUILD_APP": "OFF"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "ci", "configurePreset": "ci" },
-    { "name": "sanitize", "configurePreset": "sanitize" }
+    { "name": "sanitize", "configurePreset": "sanitize" },
+    { "name": "tsan", "configurePreset": "tsan" }
   ],
   "testPresets": [
     { "name": "fast", "displayName": "Fast tests (seconds)", "configurePreset": "release", "output": { "outputOnFailure": true }, "filter": { "include": { "label": "fast" } } },
     { "name": "all", "displayName": "All tests", "configurePreset": "release", "output": { "outputOnFailure": true } },
     { "name": "ci", "configurePreset": "ci", "output": { "outputOnFailure": true } },
-    { "name": "sanitize", "configurePreset": "sanitize", "output": { "outputOnFailure": true } }
+    { "name": "sanitize", "configurePreset": "sanitize", "output": { "outputOnFailure": true } },
+    { "name": "tsan", "configurePreset": "tsan", "output": { "outputOnFailure": true }, "filter": { "include": { "name": "ring" } } }
   ]
 }

@@ -1,8 +1,12 @@
 # qacq_dsp: the signal-processing core. Pure C++20, no Qt dependency, ever.
 add_library(qacq_dsp STATIC
+    src/channel.cpp
     src/fft.cpp
     src/filter_design.cpp
     src/filtering.cpp
+    src/generator.cpp
+    src/modulation.cpp
+    src/receiver.cpp
     src/spectrum.cpp
     src/tone.cpp
     src/window.cpp
