@@ -1,0 +1,9 @@
+build/
+out/
+dist/
+.qpm/
+.vscode/*.log
+compile_commands.json
+CMakeUserPresets.json
+*.user
+__pycache__/
