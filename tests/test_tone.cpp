@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 
 using namespace qacq::dsp;
 
@@ -154,4 +155,49 @@ TEST_CASE("Harmonic fit is exact on a non-integer number of periods", "[tone]")
     CHECK_NEAR(std::arg(fit.coefficients[1]), -1.1, 0, 1e-10);
     CHECK(std::abs(fit.coefficients[2]) < 1e-11);
     CHECK(fit.residualMeanSquare < 1e-20);
+}
+
+TEST_CASE("A few periods only: the frequency of least residual (40 samples, 2.5 periods)", "[tone]")
+{
+    // The "Quelques points" signal of the test session: before, 6.2545 Hz and a THD of 0.07 % for a pure sine.
+    std::vector<double> x(40);
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(kTwoPi * static_cast<double>(i) / 16.0);
+    const ToneAnalysis r = analyzeTone(x, 100.0);
+    REQUIRE(r.detected);
+    CHECK_NEAR(r.fundamentalHz, 6.25, 1e-8, 0.0);
+    CHECK_NEAR(r.fundamentalAmplitude, 1.0, 1e-7, 0.0);
+    CHECK(r.thdDb < -140.0);
+    CHECK(r.snrDb > 140.0);
+
+    // With noise, still the right frequency to well within a bin (2.5 Hz).
+    std::vector<double> noisy(64);
+    const std::vector<double> noise = qacq::test::lcgNoise(noisy.size(), 99u);
+    for (std::size_t i = 0; i < noisy.size(); ++i)
+        noisy[i] = 0.8 * std::cos(kTwoPi * 7.3 * static_cast<double>(i) / 100.0 + 0.4) + 0.01 * noise[i];
+    const ToneAnalysis n = analyzeTone(noisy, 100.0);
+    REQUIRE(n.detected);
+    CHECK_NEAR(n.fundamentalHz, 7.3, 2e-3, 0.0);
+    CHECK_NEAR(n.fundamentalAmplitude, 0.8, 5e-3, 0.0);
+}
+
+TEST_CASE("A long record with a slow wave: found on the whole record (0.1 Hz over ten million samples)", "[tone][audit]")
+{
+    // The 4th test file: 208 s at 48 kHz. Its first 2^20 samples (21.8 s) hold 2.2 periods, inside their DC
+    // lobe: before, 0.1305 Hz was read on the slope of the peak, amplitude 0.0133 instead of 0.3, SNR -27 dB.
+    const double fs = 48000.0;
+    const std::size_t n = 10000000;
+    std::vector<double> x(n);
+    std::uint32_t state = 5u;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        state = 1664525u * state + 1013904223u;
+        const double uniform = static_cast<double>(state) / 4294967296.0 - 0.5;
+        x[i] = 0.3 * std::sin(kTwoPi * 0.1 * static_cast<double>(i) / fs) + 0.05 * std::sqrt(12.0) * uniform;
+    }
+    const ToneAnalysis r = analyzeTone(x, fs);
+    REQUIRE(r.detected);
+    CHECK_NEAR(r.fundamentalHz, 0.1, 1e-4, 0.0);
+    CHECK_NEAR(r.fundamentalAmplitude, 0.3, 1e-3, 0.0);
+    // Signal 0.045, noise 0.0025: 12.55 dB.
+    CHECK_NEAR(r.snrDb, 12.55, 0.0, 0.1);
 }

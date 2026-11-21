@@ -4,13 +4,15 @@ import QtQuick.Layouts
 import Qacq.App
 
 // Right panel, two tabs: the settings of the module on screen (the session for "Signaux", the source and
-// the format for "Acquisition"), and the properties of the selected signal.
+// the format for "Acquisition", the computation and the measurements for "Analyse"), and the properties
+// of the selected signal.
 Rectangle {
     id: root
     required property var session
     required property var acquisition
     required property var serialPorts
     required property var appSettings
+    required property var analysis
     property int module: 0
     property var signalId: 0
     property int tab: 0
@@ -41,7 +43,7 @@ Rectangle {
                 id: tabs
                 Layout.fillWidth: true
                 onCurrentIndexChanged: if (currentIndex !== root.tab) root.tabSelected(currentIndex)
-                TabButton { text: root.module === 1 ? qsTr("Acquisition") : qsTr("Session") }
+                TabButton { text: root.module === 1 ? qsTr("Acquisition") : root.module === 2 ? qsTr("Analyse") : qsTr("Session") }
                 TabButton { text: qsTr("Signal") }
             }
             // The tab follows the shell (a signal chosen opens "Signal"); a click on a tab tells the shell.
@@ -67,7 +69,7 @@ Rectangle {
             ScrollView {
                 id: sessionPage
                 anchors.fill: parent
-                visible: root.tab === 0 && root.module !== 1
+                visible: root.tab === 0 && root.module !== 1 && root.module !== 2
                 contentWidth: availableWidth
                 clip: true
                 ColumnLayout {
@@ -134,6 +136,13 @@ Rectangle {
                 serialPorts: root.serialPorts
                 appSettings: root.appSettings
                 onFirmwareRequested: root.firmwareRequested()
+            }
+
+            AnalysisPanel {
+                anchors.fill: parent
+                visible: root.tab === 0 && root.module === 2
+                analysis: root.analysis
+                appSettings: root.appSettings
             }
 
             SignalProperties {

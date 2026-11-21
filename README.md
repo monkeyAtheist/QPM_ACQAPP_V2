@@ -4,10 +4,10 @@ Outil pédagogique et utilitaire de développement : acquisition (carte à micro
 instrument SCPI, flux réseau, carte son) et traitement du signal.
 Ce dépôt est la réécriture de QtAcquisitionApp (« Architecture milestone 57 »), menée selon l'audit du 20/11/2026.
 
-**Statut : phase 3 (l'application) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle de
+**Statut : phase 4 (les modules) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle de
 session, l'acquisition sur ses threads et leurs tests sont en place. La fenêtre Qt Quick existe, sur la coquille
-de QTsignalApp V2 : modules Signaux (visualiser) et Acquisition ; Analyse, Générateur, Filtres et Modulations
-arrivent en phase 4. L'ancienne application reste utilisable d'ici là.
+de QTsignalApp V2 : modules Signaux (visualiser), Acquisition et Analyse (spectre et mesures) ; Générateur,
+Filtres et Modulations arrivent ensuite. L'ancienne application reste utilisable d'ici là.
 
 ## Décisions (20/11/2026)
 
@@ -64,11 +64,19 @@ app/                         qacq_app : couche applicative sur QtCore (sans fen�
   include/qacq/app/acquisition_controller.h  démarrer, arrêter, statistiques, déclenchement, enregistrement continu
   include/qacq/app/serial_port_list.h  ports série présents, carte reconnue (Arduino, STM32, ESP32…), branchement détecté
   include/qacq/app/units.h          quantités pour les champs de QML : « 48 kHz » affiché, « 44,1 kHz » saisi
+  include/qacq/app/analysis_controller.h  module Analyse : calcul sur son thread, mesures mises en forme, export
+  include/qacq/app/curves_controller.h    courbes ajoutées : liste (session), courbes du temps sur un thread
 plot/                        qacq_plot : le moteur de tracé de toutes les vues, sans aucune dépendance Qt
   include/qacq/plot/axis.h          graduations 1-2-5 et log, un préfixe par axe, quantités affichées et saisies
   include/qacq/plot/trace.h         tracé à tout zoom : extrêmes par colonne de pixels, pyramide min/max, ruptures
+analysis/                    qacq_analysis : le module Analyse sans Qt (spectre d'une zone, mesures, CSV)
+  include/qacq/analysis/analysis.h  spectre d'amplitude ou densité (Welch), réel ou I/Q, niveaux en dB, mesures
+  include/qacq/analysis/measures.h  statistiques A-B, mesures d'oscilloscope, pics, bande à −3 dB
+  include/qacq/analysis/calculus.h  intégrale, dérivée, valeurs par période, courbe calculée (nouveau signal)
+  include/qacq/analysis/curves.h    courbes ajoutées : sortes, noms, unités, liste en JSON, calcul, « Garder »
 ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille de QTsignalApp V2)
   signal_plot.h                    le tracé (QQuickPaintedItem) : signal de la session, défilement, captures
+  spectrum_plot.h                  le spectre : fréquences linéaires ou log, niveaux en dB ou linéaires, harmoniques
   qml/Main.qml                     fenêtre, barre des modules, ruban, liste des signaux, propriétés
   qml/AcquisitionView.qml          module Acquisition : tracé en direct, ruban, état et chiffres de la liaison
   qml/AcquisitionSettings.qml      réglages de la source, du format, de la cadence, des voies ; préréglages
@@ -240,11 +248,91 @@ dessiner ce qu'il calcule.
 - **En direct** : défilement des dernières secondes, ou dernière capture du déclenchement (t = 0 à l'instant du
   déclenchement, niveau marqué), « Figer » pour lire pendant que les données continuent d'arriver.
 
+## L'analyse
+
+Le module Analyse montre en haut le signal choisi ; dessous, **seulement les courbes qu'on ajoute**
+(Courbes ▸ Ajouter…). Sans courbe, le signal prend toute la hauteur.
+- **Graphe du temps** : la voie elle-même (pour superposer), son intégrale, sa dérivée, sa moyenne, sa valeur
+  efficace ou sa fréquence par période ; sur tout le signal ou entre A et B. Il suit le zoom et les curseurs
+  du signal. Superposées, deux unités ont chacune leur échelle (gauche et droite) ; au-delà, une bande par
+  unité.
+- **Graphe des fréquences** : le spectre (amplitude ou densité) des voies choisies, seules calculées.
+- Les voies du signal, en haut, se superposent aussi (groupe « Voies du signal »).
+- Les courbes sont des vues du signal choisi, recalculées quand il change, enregistrées dans la session ;
+  « Garder » fait un signal de la session des courbes du temps affichées. Une étiquette par courbe : un clic
+  la masque, la croix la retire.
+- **Zone analysée** (spectres et mesures) : tout le signal (par défaut : le zoom ne change rien), la partie
+  visible, ou entre les curseurs A et B. Un signal dont la fréquence change (balayage) a bien un spectre
+  différent selon la partie regardée.
+- **Spectre d'amplitude** : une FFT de toute la zone ; une sinusoïde se lit à son amplitude crête (0 dBV pour
+  1 V). Fenêtres de Hann, à sommet plat (amplitude exacte), Blackman-Harris (−92 dB), Blackman, Hamming,
+  Kaiser (β réglable), rectangulaire ; zéros ajoutés × 2, 4 ou 8. Au-delà de 65 536 échantillons, la FFT
+  passe à la puissance de 2 suivante (zéros ajoutés, tous les échantillons utilisés, c'est indiqué) ; limite
+  2^24 points, au-delà le module propose la densité ou un zoom.
+- **Densité spectrale** (Welch) : moyenne de segments qui se recouvrent (256 à 65 536 échantillons, 0 à 75 %),
+  en unité/√Hz ou en dB ; une paire I/Q a aussi sa densité (moyenne des spectres complexes).
+- **Paire I/Q** : spectre de −fs/2 à +fs/2 (fréquences négatives).
+- **Composante continue** : retirée par la moyenne pondérée par la fenêtre (Σ w x / Σ w), segment par segment
+  en densité. La moyenne simple d'une zone qui ne tient pas un nombre entier de périodes n'est pas la
+  composante continue : la retirer laissait un faux palier à 0 Hz et sur la première raie (−42 dB sur
+  l'essai à 440 Hz), qui changeait avec le zoom ; il ne reste plus que la fuite propre de la fenêtre.
+- **Mesures de chaque voie** sur la même zone : moyenne, efficace, efficace sans la moyenne, minimum, maximum,
+  crête à crête, facteur de crête, première et dernière valeur, intégrale (aire, en V·s) ; tonalité : fréquence, amplitude, THD, SINAD, rapport signal/bruit, SFDR,
+  bits effectifs, tableau des harmoniques. Une harmonique est repérée (H2, H3…) sur le spectre quand elle
+  dépasse d'environ 10 dB la médiane des raies de part et d'autre d'elle (hors de son lobe) ; les autres
+  restent dans le tableau, en gris.
+- **Tracé** : fréquences linéaires ou logarithmiques, niveaux en dB (dBV, dB re 1 A…) ou linéaires ; mêmes
+  gestes que le tracé du temps ; la lecture donne le plus haut point sous le pointeur (fréquence, niveau, et
+  la valeur en dB). Le calcul tourne sur son propre thread : zoomer pendant un calcul le relance avec la
+  dernière zone ; changer dB/linéaire ou l'échelle des fréquences ne recalcule rien.
+- **Export** du spectre en CSV (fréquence, niveau en dB et en valeur, virgule décimale).
+- **Mesures temporelles** de chaque voie (comme un oscilloscope) : niveaux haut et bas (modes de
+  l'histogramme, ou extrêmes), période et fréquence par les fronts (hystérésis de 10 %), rapport cyclique,
+  montée et descente 10-90 % ou 20-80 % (réglage), dépassements, moyenne et efficace sur les périodes entières
+  (sans le biais d'une période coupée au bord de la zone), temps d'établissement à ±1 % et ±0,1 % après le
+  dernier front (vers un niveau plat seulement : carré, échelon). **Pics du spectre** : les 8 plus hauts, un
+  par lobe, et la bande à −3 dB autour du maximum (passe-bas, passe-haut ou bande : coupures, largeur, centre).
+- **Calculs des courbes du temps** : intégrale cumulée (trapèzes, moyenne retirée au choix), dérivée
+  (différences centrées), moyenne, efficace et fréquence par période (une valeur par période, d'un front
+  montant au suivant, vide hors des périodes entières).
+
+## Outils des tracés
+
+- **Curseurs A et B** (Signaux, Acquisition figée ou déclenchée, Analyse) : on les glisse, ou Ctrl + clic
+  place A et Maj + clic place B. Sur le temps : Δt, 1/Δt, valeur de chaque voie sous A et sous B, et entre A
+  et B min, max, moyenne, efficace, crête à crête et intégrale (V·s). Sur le spectre : Δf, niveaux et écart en
+  dB, valeur efficace de la bande A-B (somme de la densité sur la bande).
+- **Se déplacer** : glisser le tracé avec le bouton gauche déplace ce que le geste suit surtout : à
+  l'horizontale le temps (ou les fréquences), à la verticale les valeurs, en biais les deux (le sens se décide
+  après 6 pixels, pour qu'un défilement dans le temps un peu de travers ne touche pas à l'échelle). Glisser une
+  échelle ne déplace que ses valeurs (deux unités superposées : l'une sans l'autre), glisser l'axe du temps
+  que le temps. Aussi : Maj + molette, défilement horizontal (pavé tactile, molette inclinable), flèches ← →
+  (Maj : une demi-vue), ↑ ↓ pour les valeurs de la voie sous le pointeur, Début / Fin, + / − pour zoomer
+  (après un clic sur le tracé), et une barre de défilement sous le tracé dès qu'il est zoomé. En acquisition
+  qui défile, seules les valeurs se déplacent.
+- **Échelles des valeurs** : la molette sur une échelle (ou Ctrl + molette sur le tracé) la zoome autour du
+  pointeur ; un double clic sur une échelle la rend automatique, « Échelle verticale automatique » (clic
+  droit) les rend toutes automatiques sans toucher au temps, un double clic sur le tracé remet tout.
+- **Clic droit** (sans glisser ; glisser zoome toujours) : le menu du tracé, avec une case par voie ou par
+  courbe à afficher, « Superposées », Tout afficher, Échelle verticale automatique, Tout voir, et pour les
+  courbes : Ajouter, Garder, Retirer les courbes masquées. Superposées, deux unités ont chacune leur échelle
+  (dans la couleur de leur voie quand elle est seule de son côté). Le bouton « Superposées » du ruban fait de
+  même (une bande par voie quand il est éteint).
+- **Marqueur de pic** (Analyse) : sur le plus haut pic, puis le suivant (clic droit : le précédent).
+- **Vue précédente** : chaque zoom, déplacement ou « tout voir » du temps (ou des fréquences et des niveaux du
+  spectre) se défait (50 pas) ; les échelles des valeurs du temps reviennent par le double clic.
+- **Image** : le graphique copié dans le presse-papiers ou enregistré en PNG, tel qu'à l'écran.
+
 ## Méthode de l'analyse de tonalité
 
-1. f0 approchée : pic d'un spectre de Hann (2^20 points au plus), interpolation gaussienne.
+1. f0 approchée : pic d'un spectre de Hann (2^20 points au plus), interpolation gaussienne. Un enregistrement
+   plus long est aussi regardé en entier, moyenné par blocs : une onde lente que ses 2^20 premiers points ne
+   séparent pas de la composante continue (0,1 Hz sur 10 millions de points à 48 kHz) y est trouvée.
 2. Affinage : ajustement aux moindres carrés de la fondamentale et de ses harmoniques sur les deux moitiés
    d'une portion croissante de l'enregistrement ; la dérive de phase entre les moitiés donne l'erreur de fréquence.
+   Un enregistrement de moins de quatre périodes (pas de dérive mesurable) prend la fréquence qui laisse le
+   plus petit résidu, cherchée à moins d'une raie (section dorée) : 40 points d'une sinusoïde, 2,5 périodes,
+   donnent 6,25 Hz à 2×10⁻⁹ près au lieu de 6,2545 Hz (et une distorsion fictive de −63 dB).
 3. Amplitudes : un seul ajustement de la composante continue et de toutes les harmoniques sur tout
    l'enregistrement (matrice normale en forme fermée, coût O(N K)).
 
@@ -261,10 +349,13 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
 2. **Acquisition** (fait, sauf VISA) : réglages, tuyau, mémoire, fréquence mesurée, déclenchement, simulateur,
    exemples de programme, enregistrement continu ; sources Qt sur leur thread (série, TCP, UDP, SCPI sur le
    réseau, carte son, simulateur), liste des ports, contrôleur d'acquisition. Reste : VISA pour l'USB.
-3. **L'application** (en cours) : moteur de tracé unique (sans Qt, testé), coquille Qt Quick reprise de
+3. **L'application** (faite) : moteur de tracé unique (sans Qt, testé), coquille Qt Quick reprise de
    QTsignalApp V2 (barre des modules, ruban, liste des signaux, propriétés, thème clair ou sombre), modules
    Signaux et Acquisition ; glisser-déposer de fichiers, préréglages, réglages retenus d'une fois sur l'autre ;
    import d'un fichier texte avec aperçu et reconnaissance de sa forme (virgule décimale, titres, colonne de
    temps en s, ms ou µs).
-4. Modules : oscilloscope, analyse, générateur, filtres, modulations.
+4. **Modules** (en cours) : analyse (spectre, densité, mesures, courbes ajoutées : fait) ; ensuite la fusion
+   de Signaux et Analyse en un module (audit du 21/11), spectrogramme, générateur, filtres, modulations ; VISA
+   pour les instruments en USB. À étudier : réponse en fréquence entre deux voies (gain, phase, marges),
+   distorsion pondérée A.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.

@@ -5,9 +5,13 @@
 // Correction of the audit's defect 1 (20/11/2026): the old code estimated f0 on the FFT of the last
 // 65 536 samples and then projected the amplitudes over the whole record, so on 10 s at 48 kHz the
 // THD read 1.1 % instead of 11.2 %. Here f0 and every amplitude come from the SAME samples:
-//   1. coarse f0: peak of a Hann spectrum (on at most 2^20 samples), Gaussian interpolation;
+//   1. coarse f0: peak of a Hann spectrum (on at most 2^20 samples), Gaussian interpolation; a longer
+//      record is also looked at whole, averaged by blocks, for a stronger tone too slow for its first
+//      2^20 samples (0,1 Hz in ten million samples at 48 kHz);
 //   2. refinement: least-squares fit of the fundamental and its harmonics on the two halves of a
 //      growing part of the record; the phase drift between the halves gives the frequency error;
+//      a record too short for that (fewer than four periods) gets the frequency of least residual
+//      within one bin;
 //   3. amplitudes: one joint least-squares fit of DC + all harmonics (cos and sin) on the whole record.
 // The fit is exact for any record length (no leakage between harmonics), and costs O(N K).
 

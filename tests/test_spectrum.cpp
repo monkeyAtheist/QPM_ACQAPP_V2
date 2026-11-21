@@ -216,3 +216,35 @@ TEST_CASE("Spectrogram follows a frequency step and spreads its frames over the 
     CHECK_NEAR(peakFrequency(1), 500.0, 0, 32.0);
     CHECK_NEAR(peakFrequency(s.frames - 2), 1500.0, 0, 32.0);
 }
+
+TEST_CASE("chosen FFT length: zeros after the record, amplitudes and density unchanged", "[spectrum]")
+{
+    // 3000 samples at 3 kHz: 750 Hz is a bin centre on both grids (bin 750 of 3000, bin 1024 of 4096).
+    const std::vector<double> x = tone(3000, 3000.0, 750.0, 1.5, 0.0);
+    SpectrumOptions exact;
+    SpectrumOptions padded;
+    padded.fftSize = 4096;
+    const Spectrum a = spectrum(x, 3000.0, exact);
+    const Spectrum b = spectrum(x, 3000.0, padded);
+    REQUIRE(a.fftSize == 3000);
+    REQUIRE(b.fftSize == 4096);
+    CHECK(b.amplitude.size() == 2049);
+    CHECK_NEAR(b.binWidthHz, 3000.0 / 4096.0, 1e-12, 0.0);
+    CHECK_NEAR(a.amplitude[750], 1.5, 1e-9, 0.0);
+    CHECK_NEAR(b.amplitude[1024], 1.5, 1e-9, 0.0);
+    CHECK_NEAR(b.enbwHz, a.enbwHz, 1e-12, 0.0);
+    CHECK(b.samplesUsed == 3000);
+    // Mean square from the density, on both grids.
+    double sa = 0.0, sb = 0.0;
+    for (double v : a.psd) sa += v * a.binWidthHz;
+    for (double v : b.psd) sb += v * b.binWidthHz;
+    CHECK_NEAR(sb, sa, 1e-9, 0.0);
+    // Shorter than the record: the record length (no truncation).
+    SpectrumOptions shorter;
+    shorter.fftSize = 1000;
+    CHECK(spectrum(x, 3000.0, shorter).fftSize == 3000);
+    // The complex spectrum takes it as well.
+    const ComplexSpectrum c = complexSpectrum(x, std::vector<double>(3000, 0.0), 3000.0, padded);
+    CHECK(c.fftSize == 4096);
+    CHECK(c.amplitude.size() == 4096);
+}

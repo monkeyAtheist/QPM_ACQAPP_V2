@@ -245,7 +245,19 @@ bool takesPrefix(std::string_view unit)
         "s", "Hz", "V", "A", "W", "J", "N", "C", "F", "H", "T", "S", "Pa", "m", "g", "l", "L", "K", "mol", "cd",
         "Wb", "lx", "lm", "Gy", "Sv", "Bq", "eV", "bar", "Wh", "VA", "var", "Ah", "o", "B", "bit",
         "\xCE\xA9", "ohm", "m/s", "V/m", "A/m"};
-    return std::find(kPrefixable.begin(), kPrefixable.end(), unit) != kPrefixable.end();
+    // A spectral density takes the prefix of its unit: "µV/√Hz", "nA/√Hz".
+    constexpr std::string_view kPerRootHertz = "/\xE2\x88\x9AHz";
+    if (unit.size() > kPerRootHertz.size() && unit.ends_with(kPerRootHertz))
+        unit.remove_suffix(kPerRootHertz.size());
+    const auto listed = [](std::string_view u) {
+        return std::find(kPrefixable.begin(), kPrefixable.end(), u) != kPrefixable.end();
+    };
+    if (listed(unit)) return true;
+    // A compound unit takes the prefix of its first symbol: "mV·s", "kV/s", "µA·s", "km/s²".
+    const std::size_t dot = unit.find("\xC2\xB7");
+    const std::size_t slash = unit.find('/');
+    const std::size_t cut = std::min(dot, slash);
+    return cut != std::string_view::npos && cut > 0 && listed(unit.substr(0, cut));
 }
 
 int significantFor(double value, double resolution, int minimum, int maximum)
@@ -335,9 +347,23 @@ std::string formatQuantity(double value, std::string_view unit, int significant,
     significant = std::clamp(significant, 1, 15);
     if (value == 0.0) return withUnit("0", "", unit);
     const double magnitude = std::abs(value);
+    // Beyond the prefixes (below pico, above tera) or far below 1 for a unit without prefix: a power of ten
+    // ("9,039×10⁻¹⁷ A" rather than "0,00009039 pA").
+    const auto scientific = [&] {
+        int e = decade(magnitude);
+        double mantissa = value / pow10(e);
+        const int decimals = significant - 1;
+        if (std::abs(roundTo(mantissa, decimals)) >= 10.0)
+        {
+            ++e;
+            mantissa = value / pow10(e);
+        }
+        return withUnit(formatFixed(mantissa, decimals, decimal) + "\xC3\x97" "10" + superscript(e), "", unit);
+    };
     if (takesPrefix(unit))
     {
         const int largest = largestFor(unit);
+        if (magnitude < 0.9995e-12 || (largest >= 4 && magnitude >= 1e15)) return scientific();
         Prefix p = engineeringPrefix(magnitude, largest);
         double mantissa = value / p.factor;
         int decimals = decimalsFor(mantissa, significant);
@@ -362,6 +388,7 @@ std::string formatQuantity(double value, std::string_view unit, int significant,
         }
         return formatFixed(mantissa, decimals, decimal) + "\xC3\x97" "10" + superscript(e);
     }
+    if (magnitude < 1e-5 || magnitude >= 1e12) return scientific();
     return withUnit(formatFixed(value, decimalsFor(value, significant), decimal), "", unit);
 }
 

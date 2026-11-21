@@ -22,6 +22,8 @@ Item {
     signal unfoldRight()
     signal firmwareRequested()
     signal settingsRequested()
+    signal infoMessage(string text)
+    signal errorMessage(string text)
 
     readonly property bool running: acquisition.running
     readonly property var settings: acquisition.settings
@@ -284,22 +286,16 @@ Item {
                 minimum: 0.0001
                 maximum: 3600
                 value: plot.rollSeconds
-                tip: qsTr("Durée visible en défilement (aussi la molette sur le tracé)")
+                tip: root.running ? qsTr("Durée visible en défilement (aussi la molette sur le tracé)")
+                                  : qsTr("Durée visible de l'enregistrement : glissez le tracé, la barre dessous ou les flèches ← → pour le parcourir")
                 onEdited: (v) => plot.rollSeconds = v
-            }
-            RibbonButton {
-                glyph: "stack"
-                text: qsTr("Séparées")
-                checked: plot.stacked
-                tip: qsTr("Une bande par voie, chacune à son échelle")
-                onClicked: plot.stacked = true
             }
             RibbonButton {
                 glyph: "overlay"
                 text: qsTr("Superposées")
                 checked: !plot.stacked
-                tip: qsTr("Toutes les voies sur un même axe")
-                onClicked: plot.stacked = false
+                tip: qsTr("Les voies sur un même tracé (une échelle par unité, à gauche et à droite), ou une bande chacune ; clic droit sur le tracé : choisir les voies")
+                onClicked: plot.stacked = !plot.stacked
             }
             RibbonButton {
                 glyph: "fit"
@@ -308,6 +304,31 @@ Item {
                 tip: qsTr("Échelles automatiques et tout voir (double clic sur le tracé)")
                 onClicked: plot.showAll()
             }
+        }
+        RibbonGroup {
+            title: qsTr("Mesurer")
+            RibbonButton {
+                glyph: "cursors"
+                text: qsTr("Curseurs")
+                checked: plot.cursorsVisible
+                enabled: plot.cursorsAvailable
+                tip: plot.cursorsAvailable ? qsTr("Deux curseurs A et B : Δt, 1/Δt, valeurs et statistiques entre eux")
+                                           : qsTr("Figez le tracé ou déclenchez pour poser des curseurs")
+                onClicked: plot.cursorsVisible = !plot.cursorsVisible
+            }
+            RibbonButton {
+                glyph: "back"
+                text: qsTr("Précédente")
+                enabled: plot.canGoBack
+                tip: qsTr("Revenir à la vue d'avant")
+                onClicked: plot.goBack()
+            }
+        }
+        ImageActions {
+            target: plotArea
+            baseName: "acquisition"
+            onDone: (m) => root.infoMessage(m)
+            onFailed: (m) => root.errorMessage(m)
         }
 
         RibbonGroup {
@@ -346,11 +367,19 @@ Item {
                 anchors.fill: parent
                 color: Theme.canvas
             }
-            SignalPlot {
-                id: plot
+            // What the "Image" tools take: the plot and its readouts.
+            Rectangle {
+                id: plotArea
                 anchors.fill: parent
                 anchors.leftMargin: root.leftFolded ? 22 : 0
                 anchors.rightMargin: root.rightFolded ? 22 : 0
+                color: Theme.canvas
+            }
+            SignalPlot {
+                id: plot
+                parent: plotArea
+                anchors.fill: parent
+                anchors.bottomMargin: scrollBar.height
                 session: root.session
                 signalId: root.signalId
                 acquisition: root.acquisition
@@ -363,6 +392,28 @@ Item {
                 panelColor: Theme.panel
                 channelColors: Theme.channelColors
                 emptyText: qsTr("Choisissez la source dans le panneau de droite (le simulateur ne demande aucun matériel), puis Démarrer.\nUne fois arrêtée, l'acquisition devient un signal de la session.")
+                onContextMenuRequested: (x, y) => plotMenu.openAt(plot, x, y)
+            }
+            ViewScrollBar {
+                id: scrollBar
+                parent: plotArea
+                view: plot
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.leftMargin: 62
+                anchors.rightMargin: 14
+                anchors.bottomMargin: 2
+                height: implicitHeight
+            }
+            CursorReadout {
+                parent: plotArea
+                view: plot
+            }
+            PlotMenu {
+                id: plotMenu
+                view: plot
+                mode: "channels"
             }
             PlotToolbar {
                 view: plot

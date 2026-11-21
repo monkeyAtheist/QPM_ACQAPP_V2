@@ -1,8 +1,10 @@
 #include "qacq/app/signal_list_model.h"
+#include "qacq/analysis/calculus.h"
 
 #include "qacq/app/format.h"
 #include "qacq/app/qt_convert.h"
 
+#include <QDateTime>
 #include <QStringList>
 #include <QVariantList>
 
@@ -212,6 +214,49 @@ bool SignalListModel::setTiming(qint64 id, double sampleRateHz, double startSeco
     const quint64 mergeKey = (static_cast<quint64>(id) << 8) | 0x01u;
     return replaceSignal(id, std::move(copy), QStringLiteral("Modifier l'échantillonnage de « %1 »").arg(toQString(current->name)),
                          mergeKey);
+}
+
+qint64 SignalListModel::deriveSignal(qint64 sourceId, const QVariantMap &options)
+{
+    const model::SignalPtr source = signalById(sourceId);
+    if (!source)
+    {
+        fail("Ce signal n'existe plus.");
+        return 0;
+    }
+    analysis::DeriveOptions o;
+    if (!analysis::operationFromKey(toUtf8(options.value(QStringLiteral("operation")).toString()), o.operation))
+    {
+        fail("Calcul inconnu.");
+        return 0;
+    }
+    const qint64 first = options.value(QStringLiteral("firstFrame"), 0).toLongLong();
+    const qint64 count = options.value(QStringLiteral("frameCount"), -1).toLongLong();
+    o.firstFrame = static_cast<std::size_t>(std::max<qint64>(0, first));
+    if (count >= 0) o.frameCount = static_cast<std::size_t>(count);
+    for (const QVariant &c : options.value(QStringLiteral("channels")).toList())
+    {
+        const int index = c.toInt();
+        if (index >= 0) o.channels.push_back(static_cast<std::size_t>(index));
+    }
+    o.keepSource = options.value(QStringLiteral("keepSource"), true).toBool();
+    o.removeMean = options.value(QStringLiteral("removeMean"), false).toBool();
+    analysis::Derived derived = analysis::derive(*source, o);
+    if (!derived.ok())
+    {
+        fail(derived.error);
+        return 0;
+    }
+    model::Signal &signal = derived.signal;
+    signal.name = m_document.uniqueName(signal.name);
+    signal.createdUtc = toUtf8(QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    const QString label = QStringLiteral("Calculer « %1 »").arg(toQString(signal.name));
+    const std::optional<std::size_t> after = m_document.indexOf(source->id);
+    std::string why;
+    const std::uint64_t id = m_document.add(std::move(signal), toUtf8(label),
+                                            after ? std::optional<std::size_t>(*after + 1) : std::nullopt, &why);
+    if (id == 0) fail(why);
+    return static_cast<qint64>(id);
 }
 
 void SignalListModel::endMerge()

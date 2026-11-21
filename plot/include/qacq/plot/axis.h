@@ -37,8 +37,9 @@ struct Prefix
 // The engineering prefix of a magnitude (factor 1e-12 to 1e12). `largest`: highest power of a thousand
 // allowed (0 for seconds: "1 000 s", never "1 ks").
 Prefix engineeringPrefix(double magnitude, int largest = 4);
-// Units written with a prefix: SI ones ("s", "Hz", "V", "A", "Pa", "m", "Ω"...). The others keep their unit
-// as written: none, already prefixed ("hPa", "kHz", "mA"), decibels, "%", "°C", "rpm", "ppm"...
+// Units written with a prefix: SI ones ("s", "Hz", "V", "A", "Pa", "m", "Ω"...), and compound units whose
+// first symbol is one ("V·s", "V/s", "m/s²"). The others keep their unit as written: none, already
+// prefixed ("hPa", "kHz", "mA"), decibels, "%", "°C", "rpm", "ppm", "1/s"...
 bool takesPrefix(std::string_view unit);
 // Significant digits that show `value` down to `resolution` (a fraction of the range on screen), within
 // [minimum, maximum]: 2,4 GHz read to the hertz needs ten.

@@ -16,7 +16,15 @@ struct SpectrumOptions
     Window window = Window::Hann;
     double kaiserBeta = 8.6;
     std::size_t zeroPadFactor = 1; // FFT length = factor x record length, exactly (any length)
+    // FFT length chosen by the caller instead (at least the record length, zeros after it): a power of two
+    // keeps a long record fast (Bluestein's algorithm needs four times the memory). 0: zeroPadFactor.
+    std::size_t fftSize = 0;
     bool removeMean = false;
+    // With removeMean: subtract the mean weighted by the window, sum(w x) / sum(w), rather than the plain
+    // mean. A record that does not hold a whole number of periods has a plain mean that is not its DC
+    // part; removing it leaves a step the window turns into a false line at DC and in the first bins.
+    // The weighted mean leaves nothing at DC (bin 0 exactly zero) and nothing beside it.
+    bool windowedMean = false;
 };
 
 // One-sided spectrum of a real record.
@@ -72,6 +80,7 @@ struct WelchOptions
     std::size_t segmentLength = 4096;
     double overlap = 0.5; // fraction of a segment, [0, 0.95]
     bool removeSegmentMean = true;
+    bool windowedMean = false; // as SpectrumOptions::windowedMean, segment by segment (not SciPy's)
 };
 
 struct WelchResult
@@ -98,6 +107,7 @@ struct SpectrogramOptions
     double overlap = 0.75;
     std::size_t maximumFrames = 2000;
     bool removeSegmentMean = false;
+    bool windowedMean = false; // as SpectrumOptions::windowedMean, frame by frame
 };
 
 struct Spectrogram

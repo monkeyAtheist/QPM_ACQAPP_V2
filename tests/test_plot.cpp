@@ -140,6 +140,12 @@ TEST_CASE("Quantities as shown: significant digits, prefixes, minus sign, comma"
     CHECK(!takesPrefix("\xC2\xB0" "C"));
     CHECK(!takesPrefix("rpm"));
     CHECK(!takesPrefix("ppm"));
+    CHECK(takesPrefix("V\xC2\xB7s"));
+    CHECK(takesPrefix("V/s"));
+    CHECK(takesPrefix("m/s\xC2\xB2"));
+    CHECK(!takesPrefix("1/s"));
+    CHECK(!takesPrefix("dB/Hz"));
+    CHECK(!takesPrefix("hPa/s"));
     CHECK(formatQuantity(1013.25, "hPa") == "1013 hPa");
     CHECK(formatQuantity(0.12, "A") == "120,0 mA");
     CHECK(axisLabels(linearTicks(1009.0, 1014.0, 300.0, 30.0), "hPa").unit == "hPa");
@@ -354,9 +360,37 @@ TEST_CASE("Value axes: linear and log mapping, padded and steady automatic range
     const Range narrow = clampRange({5.0, 5.000001}, {0.0, 10.0}, 0.01);
     CHECK(near(narrow.span(), 0.01));
     CHECK(near(0.5 * (narrow.low + narrow.high), 5.0000005));
+    const Range up = shiftRange({-1.0, 3.0}, 0.25);
+    CHECK(near(up.low, 0.0));
+    CHECK(near(up.high, 4.0));
+    const Range down = shiftRange({-1.0, 3.0}, -0.5);
+    CHECK(near(down.low, -3.0));
+    CHECK(near(down.high, 1.0));
+    CHECK(shiftRange({2.0, 5.0}, kNaN).low == 2.0);
     CHECK(nearestSample(2.4, 10) == 2);
     CHECK(nearestSample(2.6, 10) == 3);
     CHECK(nearestSample(-5.0, 10) == 0);
     CHECK(nearestSample(50.0, 10) == 9);
     CHECK(nearestSample(1.0, 0) == -1);
+}
+
+TEST_CASE("Drags: the axis they move is chosen once the pointer has gone far enough", "[plot]")
+{
+    CHECK(dragAxes(3.0, 2.0) == DragAxes::Undecided); // 3.6 px: not yet
+    CHECK(dragAxes(0.0, 0.0) == DragAxes::Undecided);
+    CHECK(dragAxes(kNaN, 50.0) == DragAxes::Undecided);
+    // Mostly sideways (a scroll in time that wanders a little): the time only.
+    CHECK(dragAxes(10.0, 2.0) == DragAxes::Horizontal);
+    CHECK(dragAxes(-10.0, 5.0) == DragAxes::Horizontal);
+    CHECK(dragAxes(40.0, -19.0) == DragAxes::Horizontal);
+    // Mostly up or down: the values only.
+    CHECK(dragAxes(2.0, 10.0) == DragAxes::Vertical);
+    CHECK(dragAxes(-4.0, -10.0) == DragAxes::Vertical);
+    // In between: both.
+    CHECK(dragAxes(8.0, 8.0) == DragAxes::Both);
+    CHECK(dragAxes(10.0, -6.0) == DragAxes::Both);
+    CHECK(dragAxes(-6.0, 10.0) == DragAxes::Both);
+    // Another threshold.
+    CHECK(dragAxes(3.0, 0.0, 2.0) == DragAxes::Horizontal);
+    CHECK(dragAxes(3.0, 0.0, 4.0) == DragAxes::Undecided);
 }

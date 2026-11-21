@@ -54,6 +54,11 @@ ColumnLayout {
         onEditingFinished: {
             if (readOnly)
                 return
+            // Left untouched: nothing to do (reading back the rounded text would change the value).
+            if (text === root.shown()) {
+                invalid = false
+                return
+            }
             const r = Units.parse(text, root.unit, Units.shownFactor(root.value, root.unit))
             if (!r.ok) {
                 invalid = true

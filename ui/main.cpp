@@ -1,10 +1,13 @@
 // QTacquisitionApp: the window (Qt Quick) over the application layer (qacq_app).
 #include "qacq/app/acquisition_controller.h"
+#include "qacq/app/analysis_controller.h"
 #include "qacq/app/app_settings.h"
+#include "qacq/app/curves_controller.h"
 #include "qacq/app/serial_port_list.h"
 #include "qacq/app/session.h"
 #include "qacq/app/signal_list_model.h"
 #include "qacq/app/units.h"
+#include "image_tools.h"
 
 #include <QGuiApplication>
 #include <QLoggingCategory>
@@ -33,19 +36,27 @@ int main(int argc, char *argv[])
     qmlRegisterUncreatableType<qacq::app::Session>("Qacq.App", 1, 0, "Session", made);
     qmlRegisterUncreatableType<qacq::app::SignalListModel>("Qacq.App", 1, 0, "SignalListModel", made);
     qmlRegisterUncreatableType<qacq::app::AcquisitionController>("Qacq.App", 1, 0, "AcquisitionController", made);
+    qmlRegisterUncreatableType<qacq::app::AnalysisController>("Qacq.App", 1, 0, "AnalysisController", made);
+    qmlRegisterUncreatableType<qacq::app::CurvesController>("Qacq.App", 1, 0, "CurvesController", made);
     qmlRegisterUncreatableType<qacq::app::SerialPortList>("Qacq.App", 1, 0, "SerialPortList", made);
     qmlRegisterUncreatableType<qacq::app::AppSettings>("Qacq.App", 1, 0, "AppSettings", made);
     qmlRegisterSingletonType<qacq::app::Units>("Qacq.App", 1, 0, "Units",
                                                [](QQmlEngine *, QJSEngine *) -> QObject * { return new qacq::app::Units; });
+    qmlRegisterSingletonType<ImageTools>("Qacq.App", 1, 0, "ImageTools",
+                                         [](QQmlEngine *, QJSEngine *) -> QObject * { return new ImageTools; });
 
     qacq::app::AppSettings settings;
     qacq::app::Session session(&settings);
     qacq::app::AcquisitionController acquisition(&session);
+    qacq::app::AnalysisController analysis(&session);
+    qacq::app::CurvesController curves(&session, &analysis);
     qacq::app::SerialPortList serialPorts;
 
     QQmlApplicationEngine engine;
     engine.setInitialProperties({{QStringLiteral("session"), QVariant::fromValue(&session)},
                                  {QStringLiteral("acquisition"), QVariant::fromValue(&acquisition)},
+                                 {QStringLiteral("analysis"), QVariant::fromValue(&analysis)},
+                                 {QStringLiteral("curves"), QVariant::fromValue(&curves)},
                                  {QStringLiteral("serialPorts"), QVariant::fromValue(&serialPorts)},
                                  {QStringLiteral("appSettings"), QVariant::fromValue(&settings)}});
     QObject::connect(

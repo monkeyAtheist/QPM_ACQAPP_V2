@@ -11,9 +11,12 @@ add_executable(qacq_tests
     test_model.cpp
     test_acquisition.cpp
     test_plot.cpp
+    test_analysis.cpp
+    test_calculus.cpp
+    test_curves.cpp
     qt_keywords_check.cpp
 )
-target_link_libraries(qacq_tests PRIVATE qacq::dsp qacq::io qacq::model qacq::acquisition qacq::plot)
+target_link_libraries(qacq_tests PRIVATE qacq::dsp qacq::io qacq::model qacq::acquisition qacq::plot qacq::analysis)
 target_include_directories(qacq_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 qacq_set_warnings(qacq_tests)
 
@@ -40,6 +43,7 @@ qacq_add_test_group(model      "[model]"      fast)
 qacq_add_test_group(session    "[session]"    fast)
 qacq_add_test_group(csv        "[csv]"        fast)
 qacq_add_test_group(plot       "[plot]"       fast)
+qacq_add_test_group(analysis   "[analysis]"   fast)
 qacq_add_test_group(wav        "[wav]"        fast)
 qacq_add_test_group(acquisition "[acquisition]" fast)
 qacq_add_test_group(ber        "[ber]"        slow)
@@ -47,7 +51,7 @@ qacq_add_test_group(audit      "[audit]"      slow)
 
 # Application layer (needs Qt): signal list model, session files, remembered settings.
 if(TARGET qacq_app)
-    add_executable(qacq_app_tests app_main.cpp test_app.cpp test_acquisition_app.cpp)
+    add_executable(qacq_app_tests app_main.cpp test_app.cpp test_acquisition_app.cpp test_analysis_app.cpp)
     target_link_libraries(qacq_app_tests PRIVATE qacq_app)
     target_include_directories(qacq_app_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     qacq_set_warnings(qacq_app_tests)

@@ -13,6 +13,8 @@ namespace qacq::dsp
 namespace
 {
 constexpr std::size_t kCoarseLength = std::size_t{1} << 20;
+// Records up to this length get the residual search of step 2b (each trial is one fit: O(N K)).
+constexpr std::size_t kResidualSearchUpTo = std::size_t{1} << 18;
 constexpr std::size_t kResync = 256; // the phasor recurrence is re-anchored every kResync samples
 
 // exp(j 2 pi ratio n) for a large integer n, with the phase reduced exactly enough (ratio = f / fs).
@@ -94,6 +96,77 @@ std::vector<double> evaluateModel(const HarmonicFit &fit, double ratio, std::siz
     }
     return y;
 }
+struct Coarse
+{
+    bool found = false;
+    double frequencyHz = 0.0;
+    double amplitude = 0.0; // of a sinusoid at the peak (Hann coherent gain compensated)
+    double prominenceDb = 0.0;
+};
+
+// Peak of a Hann spectrum `data` (already transformed, nfft points, of m windowed samples at `rate`):
+// between minimumHz and maximumHz, above the DC lobe, Gaussian interpolation.
+Coarse peakOf(const std::vector<Complex> &data, std::size_t nfft, std::size_t m, double windowSum, double rate,
+              double minimumHz, double maximumHz, std::size_t *lowestBin = nullptr)
+{
+    Coarse c;
+    const double binWidth = rate / static_cast<double>(nfft);
+    const std::size_t guard =
+        static_cast<std::size_t>(std::ceil(2.0 * static_cast<double>(nfft) / static_cast<double>(m))) + 1;
+    const std::size_t kMin =
+        std::max(guard, static_cast<std::size_t>(std::ceil(std::max(0.0, minimumHz) / binWidth)));
+    if (lowestBin) *lowestBin = kMin;
+    const std::size_t kMax = std::min(nfft / 2 - 1, static_cast<std::size_t>(std::floor(maximumHz / binWidth)));
+    if (kMin + 2 > kMax) return c;
+    std::vector<double> magnitude(kMax + 2);
+    for (std::size_t k = 0; k < magnitude.size(); ++k) magnitude[k] = std::abs(data[k]);
+    std::size_t peak = kMin;
+    for (std::size_t k = kMin; k <= kMax; ++k)
+        if (magnitude[k] > magnitude[peak]) peak = k;
+    std::vector<double> band(magnitude.begin() + static_cast<std::ptrdiff_t>(kMin),
+                             magnitude.begin() + static_cast<std::ptrdiff_t>(kMax) + 1);
+    std::nth_element(band.begin(), band.begin() + static_cast<std::ptrdiff_t>(band.size() / 2), band.end());
+    const double median = band[band.size() / 2];
+    c.prominenceDb = median > 0.0 ? 20.0 * std::log10(magnitude[peak] / median) : 300.0;
+    double f = static_cast<double>(peak) * binWidth;
+    const double a0 = magnitude[peak - 1], a1 = magnitude[peak], a2 = magnitude[peak + 1];
+    if (a0 > 0.0 && a1 > 0.0 && a2 > 0.0)
+    {
+        const double l0 = std::log(a0), l1 = std::log(a1), l2 = std::log(a2);
+        const double denominator = l0 - 2.0 * l1 + l2;
+        if (denominator < 0.0) f += std::clamp(0.5 * (l0 - l2) / denominator, -0.5, 0.5) * binWidth;
+    }
+    c.found = true;
+    c.frequencyHz = f;
+    c.amplitude = windowSum > 0.0 ? 2.0 * magnitude[peak] / windowSum : 0.0;
+    return c;
+}
+
+// Peak of the WHOLE record averaged by blocks of `block` samples (a low-pass and a decimation in one): a
+// slow wave of a few periods over a long record, that the first 2^20 samples cannot tell from DC (ten
+// million samples at 48 kHz carrying 0,1 Hz: 2,2 periods in the first 2^20 samples, inside their DC lobe).
+Coarse coarseOfWholeRecord(std::span<const double> x, double dc, double fs, std::size_t block, double minimumHz,
+                           double maximumHz)
+{
+    const std::size_t m = x.size() / block;
+    if (m < 16) return {};
+    const std::vector<double> w = makeWindow(Window::Hann, m);
+    const std::size_t nfft = m < kCoarseLength / 2 ? 2 * nextPowerOfTwo(m) : nextPowerOfTwo(m);
+    std::vector<Complex> data(nfft, Complex(0.0, 0.0));
+    double windowSum = 0.0;
+    for (std::size_t i = 0; i < m; ++i)
+    {
+        double sum = 0.0;
+        for (std::size_t j = i * block; j < (i + 1) * block; ++j) sum += x[j];
+        data[i] = Complex((sum / static_cast<double>(block) - dc) * w[i], 0.0);
+        windowSum += w[i];
+    }
+    FftPlan(nfft).forward(data);
+    const double rate = fs / static_cast<double>(block);
+    // Below 0,4 of the reduced rate: block averaging attenuates and folds what lies above.
+    return peakOf(data, nfft, m, windowSum, rate, minimumHz, std::min(maximumHz, 0.4 * rate));
+}
+
 } // namespace
 
 bool fitHarmonics(std::span<const double> x, double fs, double f, std::size_t harmonics, HarmonicFit &fit,
@@ -216,42 +289,36 @@ ToneAnalysis analyzeTone(std::span<const double> x, double fs, const ToneOptions
     const std::size_t guard =
         static_cast<std::size_t>(std::ceil(2.0 * static_cast<double>(nfft) / static_cast<double>(coarseLength))) + 1;
     const double upper = options.maximumFrequencyHz > 0.0 ? std::min(options.maximumFrequencyHz, 0.5 * fs) : 0.5 * fs;
-    const std::size_t kMin =
-        std::max(guard, static_cast<std::size_t>(std::ceil(std::max(0.0, options.minimumFrequencyHz) / binWidth)));
-    const std::size_t kMax = std::min(nfft / 2 - 1, static_cast<std::size_t>(std::floor(upper / binWidth)));
-    if (kMin + 2 > kMax) return result;
-
-    std::vector<double> magnitude(nfft / 2 + 1);
-    for (std::size_t k = 0; k < magnitude.size(); ++k) magnitude[k] = std::abs(data[k]);
-    std::size_t peak = kMin;
-    for (std::size_t k = kMin; k <= kMax; ++k)
-        if (magnitude[k] > magnitude[peak]) peak = k;
-    std::vector<double> band(magnitude.begin() + static_cast<std::ptrdiff_t>(kMin),
-                             magnitude.begin() + static_cast<std::ptrdiff_t>(kMax) + 1);
-    std::nth_element(band.begin(), band.begin() + static_cast<std::ptrdiff_t>(band.size() / 2), band.end());
-    const double median = band[band.size() / 2];
-    result.prominenceDb = median > 0.0 ? 20.0 * std::log10(magnitude[peak] / median) : 300.0;
-    if (result.prominenceDb < options.minimumProminenceDb) return result;
-
-    double f = static_cast<double>(peak) * binWidth;
+    double windowSum = 0.0;
+    for (double v : w) windowSum += v;
+    std::size_t kMin = guard;
+    const Coarse head = peakOf(data, nfft, coarseLength, windowSum, fs, options.minimumFrequencyHz, upper, &kMin);
+    Coarse chosen = head;
+    // 1b. A long record: a stronger tone below what its first 2^20 samples resolve is looked for on the whole
+    // record (block averages). It wins only below their lowest frequency and when it is the larger.
+    if (n > kCoarseLength)
     {
-        const double a0 = magnitude[peak - 1], a1 = magnitude[peak], a2 = magnitude[peak + 1];
-        if (a0 > 0.0 && a1 > 0.0 && a2 > 0.0)
-        {
-            const double l0 = std::log(a0), l1 = std::log(a1), l2 = std::log(a2);
-            const double denominator = l0 - 2.0 * l1 + l2;
-            if (denominator < 0.0) f += std::clamp(0.5 * (l0 - l2) / denominator, -0.5, 0.5) * binWidth;
-        }
+        const double lowest = static_cast<double>(kMin) * binWidth;
+        const std::size_t block = (n + kCoarseLength - 1) / kCoarseLength;
+        const Coarse whole = coarseOfWholeRecord(x, result.dc, fs, block, options.minimumFrequencyHz, upper);
+        if (whole.found && whole.frequencyHz < lowest && (!head.found || whole.amplitude > head.amplitude))
+            chosen = whole;
     }
+    if (!chosen.found) return result;
+    result.prominenceDb = chosen.prominenceDb;
+    if (result.prominenceDb < options.minimumProminenceDb) return result;
+    double f = chosen.frequencyHz;
 
     // 2. Refinement from the phase drift between the two halves of a growing part of the record.
     const std::size_t refineHarmonics = std::min<std::size_t>(std::max<std::size_t>(1, options.harmonicCount), 10);
+    bool driftOnWhole = false; // the drift was measured on the whole record at least once
     for (std::size_t length = coarseLength;; length = std::min(n, 4 * length))
     {
         const std::size_t half = length / 2;
         for (int iteration = 0; iteration < 4; ++iteration)
         {
             if (static_cast<double>(half) * f / fs < 2.0) break; // fewer than 2 periods per half
+            if (length == n) driftOnWhole = true;
             HarmonicFit first, second;
             if (!fitHarmonics(x.first(half), fs, f, refineHarmonics, first, 0)) break;
             if (!fitHarmonics(x.subspan(half, length - half), fs, f, refineHarmonics, second, half)) break;
@@ -263,6 +330,45 @@ ToneAnalysis analyzeTone(std::span<const double> x, double fs, const ToneOptions
             if (std::abs(delta) < 1e-13 * f) break;
         }
         if (length == n) break;
+    }
+
+    // 2b. A short record (fewer than four periods: no drift to measure): the frequency that leaves the
+    // smallest residual to the fit of the fundamental and its harmonics, searched within one bin of the record
+    // (golden section). A pure sine of 40 samples, 2,5 periods, then reads its frequency to 1e-9.
+    if (n <= kResidualSearchUpTo && !driftOnWhole)
+    {
+        const auto residual = [&](double frequency) {
+            HarmonicFit trial;
+            if (!(frequency > 0.0) || !fitHarmonics(x, fs, frequency, refineHarmonics, trial, 0))
+                return std::numeric_limits<double>::infinity();
+            return trial.residualMeanSquare;
+        };
+        const double bin = fs / static_cast<double>(n);
+        double a = std::max(f - bin, 0.5 * f), b = std::min(f + bin, 0.5 * fs);
+        const double g = 0.5 * (std::sqrt(5.0) - 1.0);
+        double c = b - g * (b - a), d = a + g * (b - a);
+        double fc = residual(c), fd = residual(d);
+        for (int iteration = 0; iteration < 80 && b - a > 1e-15 * f; ++iteration)
+        {
+            if (fc < fd)
+            {
+                b = d;
+                d = c;
+                fd = fc;
+                c = b - g * (b - a);
+                fc = residual(c);
+            }
+            else
+            {
+                a = c;
+                c = d;
+                fc = fd;
+                d = a + g * (b - a);
+                fd = residual(d);
+            }
+        }
+        const double best = 0.5 * (a + b);
+        if (residual(best) <= residual(f)) f = best;
     }
 
     // 3. Joint least-squares fit on the whole record.

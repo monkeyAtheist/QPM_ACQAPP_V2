@@ -14,7 +14,7 @@ Rectangle {
     readonly property var modules: [
         { icon: "signals", label: qsTr("Signaux"), ready: true, tip: "" },
         { icon: "acquire", label: qsTr("Acqui-\nsition"), ready: true, tip: "" },
-        { icon: "analysis", label: qsTr("Analyse"), ready: false, tip: qsTr("Spectre, mesures, tonalité : phase 4 de la refonte") },
+        { icon: "analysis", label: qsTr("Analyse"), ready: true, tip: "" },
         { icon: "generator", label: qsTr("Généra-\nteur"), ready: false, tip: qsTr("Formes d'onde et bruit : phase 4 de la refonte") },
         { icon: "filter", label: qsTr("Filtres"), ready: false, tip: qsTr("Filtres RIF et RII : phase 4 de la refonte") },
         { icon: "modulation", label: qsTr("Modula-\ntions"), ready: false, tip: qsTr("Modulations numériques et analogiques : phase 4 de la refonte") }

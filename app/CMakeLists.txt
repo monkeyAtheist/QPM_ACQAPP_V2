@@ -4,6 +4,8 @@
 # controller; quantities for the fields (Units). Testable without any window.
 qt_add_library(qacq_app STATIC
     include/qacq/app/acquisition_controller.h
+    include/qacq/app/analysis_controller.h
+    include/qacq/app/curves_controller.h
     include/qacq/app/acquisition_source.h
     include/qacq/app/app_settings.h
     include/qacq/app/audio_format.h
@@ -14,6 +16,8 @@ qt_add_library(qacq_app STATIC
     include/qacq/app/signal_list_model.h
     include/qacq/app/units.h
     src/acquisition_controller.cpp
+    src/analysis_controller.cpp
+    src/curves_controller.cpp
     src/acquisition_source.cpp
     src/app_settings.cpp
     src/audio_format.cpp
@@ -26,7 +30,7 @@ qt_add_library(qacq_app STATIC
 )
 target_include_directories(qacq_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(qacq_app PUBLIC
-    qacq::acquisition qacq::model qacq::dsp qacq::plot
+    qacq::acquisition qacq::analysis qacq::model qacq::dsp qacq::plot
     Qt6::Core Qt6::Network Qt6::SerialPort Qt6::Multimedia)
 target_compile_definitions(qacq_app PRIVATE QACQ_VERSION="${PROJECT_VERSION}")
 qacq_set_warnings(qacq_app)

@@ -268,8 +268,123 @@ Canvas {
             line([3, 4, 3, 20], false)
             line([21, 4, 21, 20], false)
             break
+        // ---- Analysis ----
+        case "spectrum":
+            line([3, 21, 21, 21], false)
+            line([6, 21, 6, 9], false)
+            line([10, 21, 10, 16], false)
+            line([14, 21, 14, 4], false)
+            line([18, 21, 18, 17], false)
+            break
+        case "density":
+            line([3, 21, 21, 21], false)
+            line([3, 7, 5, 9, 7, 8, 9, 12, 11, 11, 13, 14, 15, 13, 17, 16, 19, 15, 21, 17], false)
+            break
+        case "decibel":
+            c.font = "bold 11px sans-serif"
+            c.fillText("dB", 3, 16)
+            break
+        case "linear":
+            line([3, 21, 21, 21], false)
+            line([3, 21, 3, 3], false)
+            line([5, 19, 20, 5], false)
+            break
+        case "logscale":
+            line([3, 16, 21, 16], false)
+            for (const x of [4, 10.5, 14.3, 17, 19.1, 20.8])
+                line([x, 13, x, 19], false)
+            c.font = "8px sans-serif"
+            c.fillText("log", 4, 9)
+            break
+        case "harmonics":
+            line([3, 21, 21, 21], false)
+            line([6, 21, 6, 8], false)
+            line([12, 21, 12, 13], false)
+            line([18, 21, 18, 17], false)
+            line([10, 7, 12, 10, 14, 7], true)
+            line([16, 11, 18, 14, 20, 11], true)
+            break
+        // ---- Measuring ----
+        case "cursors":
+            for (const x of [8, 16]) {
+                for (let y = 3; y < 21; y += 4)
+                    line([x, y, x, y + 2], false)
+            }
+            line([8, 12, 16, 12], false)
+            line([10, 10, 8, 12, 10, 14], false)
+            line([14, 10, 16, 12, 14, 14], false)
+            break
+        case "peak":
+            line([3, 21, 21, 21], false)
+            line([4, 20, 9, 18, 11, 9, 13, 18, 20, 20], false)
+            line([11, 2, 14, 5, 11, 8, 8, 5], true)
+            break
+        case "nextpeak":
+            line([3, 21, 21, 21], false)
+            line([3, 20, 6, 10, 9, 20, 13, 15, 16, 20], false)
+            line([15, 5, 21, 5], false)
+            line([18.5, 2.5, 21, 5, 18.5, 7.5], false)
+            break
+        case "back":
+            line([9, 5, 4, 10, 9, 15], false)
+            c.beginPath()
+            c.moveTo(4, 10)
+            c.lineTo(14, 10)
+            c.arc(14, 15, 5, -Math.PI / 2, Math.PI / 2, false)
+            c.lineTo(9, 20)
+            c.stroke()
+            break
+        case "copy":
+            box(8, 8, 12, 13)
+            line([5, 16, 4, 16, 4, 3, 15, 3, 15, 5], false)
+            break
+        case "image":
+            box(3, 4, 18, 16)
+            line([3, 17, 9, 11, 13, 15, 16, 12, 21, 17], false)
+            circle(15.5, 8.5, 1.6, false)
+            break
         case "check":
             line([4, 12.5, 9.5, 18, 20, 6], false)
+            break
+        case "integral":
+            c.beginPath()
+            c.moveTo(12.5, 4.5)
+            c.bezierCurveTo(11.5, 2, 8, 2.5, 8, 7)
+            c.lineTo(8, 17)
+            c.bezierCurveTo(8, 21.5, 4.5, 22, 3.5, 19.5)
+            c.stroke()
+            line([13, 20, 22, 20], false)
+            line([13, 20, 13, 13, 15.5, 10, 18.5, 12, 22, 7, 22, 20], false)
+            break
+        case "addcurve":
+            wave(2, 15, 13, 4, 2)
+            line([18.5, 4, 18.5, 12], false)
+            line([14.5, 8, 22.5, 8], false)
+            line([2, 21, 22, 21], false)
+            break
+        case "keep":
+            wave(3, 21, 6, 2.5, 2)
+            line([12, 10, 12, 17], false)
+            line([9, 14.5, 12, 17.5, 15, 14.5], false)
+            line([4, 18, 4, 21, 20, 21, 20, 18], false)
+            break
+        case "zoneview":
+            line([5, 5, 2.5, 5, 2.5, 19, 5, 19], false)
+            line([19, 5, 21.5, 5, 21.5, 19, 19, 19], false)
+            wave(6, 18, 12, 4, 3)
+            break
+        case "zonecursors":
+            for (const x of [6, 18]) {
+                for (let y = 3; y < 21; y += 4)
+                    line([x, y, x, y + 2], false)
+            }
+            wave(6, 18, 12, 4, 2)
+            break
+        case "zoneall":
+            wave(4, 20, 10, 4, 3)
+            line([3, 19, 21, 19], false)
+            line([6, 16.5, 3, 19, 6, 21.5], false)
+            line([18, 16.5, 21, 19, 18, 21.5], false)
             break
         case "caret":
             c.beginPath()

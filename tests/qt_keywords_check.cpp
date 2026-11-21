@@ -35,6 +35,9 @@
 #include "qacq/model/session_file.h"
 #include "qacq/model/signal.h"
 #include "qacq/model/wav.h"
+#include "qacq/analysis/analysis.h"
+#include "qacq/analysis/calculus.h"
+#include "qacq/analysis/curves.h"
 #include "qacq/plot/axis.h"
 #include "qacq/plot/trace.h"
 #undef signals

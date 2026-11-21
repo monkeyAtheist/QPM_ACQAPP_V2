@@ -92,10 +92,16 @@ Rectangle {
             }
             ToolTip.visible: helpArea.containsMouse
             ToolTip.text: qsTr("Molette : zoom du temps autour du pointeur (en direct : largeur de la fenêtre)\n"
-                               + "Ctrl + molette : zoom des valeurs de la voie sous le pointeur\n"
-                               + "Maj + molette ou glisser : déplacer dans le temps\n"
-                               + "Clic droit glissé : zoom sur l'intervalle choisi\n"
-                               + "Double clic : tout voir")
+                               + "Molette sur une échelle, ou Ctrl + molette : zoom des valeurs de la voie\n"
+                               + "    (deux unités superposées avec Ctrl : moitié droite pour l'échelle de droite)\n"
+                               + "Glisser le tracé : à l'horizontale le temps, à la verticale les valeurs, en biais les deux\n"
+                               + "    (en direct : les valeurs) ; glisser une échelle : ses valeurs seulement\n"
+                               + "Se déplacer dans le temps : aussi Maj + molette, défilement horizontal du pavé tactile,\n"
+                               + "    flèches ← → (Maj : une demi-vue), Début / Fin, ou la barre sous le tracé zoomé\n"
+                               + "Flèches ↑ ↓ : les valeurs de la voie sous le pointeur (Maj : une demi-hauteur)\n"
+                               + "+ / − : zoom ; clic droit glissé : zoom sur l'intervalle choisi\n"
+                               + "Clic droit : voies affichées, superposées ou non, échelle verticale automatique\n"
+                               + "Double clic : tout voir ; sur une échelle : cette échelle automatique")
         }
     }
 }

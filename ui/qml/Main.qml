@@ -13,6 +13,8 @@ ApplicationWindow {
     id: window
     required property var session
     required property var acquisition
+    required property var analysis
+    required property var curves
     required property var serialPorts
     required property var appSettings
 
@@ -31,7 +33,7 @@ ApplicationWindow {
     Material.background: Theme.window
     color: Theme.window
 
-    // 0 Signaux, 1 Acquisition (the other modules come in phase 4).
+    // 0 Signaux, 1 Acquisition, 2 Analyse (the other modules come next).
     property int module: 1
     property var selectedId: 0
     property int inspectorTab: 0 // 0 settings of the module, 1 the selected signal
@@ -80,7 +82,8 @@ ApplicationWindow {
     }
     function selectSignal(id) {
         selectedId = id
-        if (id > 0)
+        // In "Analyse", the panel keeps the measurements of the signal chosen.
+        if (id > 0 && module !== 2)
             inspectorTab = 1
     }
     function selectAfterChange() {
@@ -93,7 +96,7 @@ ApplicationWindow {
         if (index === module)
             return
         module = index
-        inspectorTab = index === 1 ? 0 : (selectedId > 0 ? 1 : 0)
+        inspectorTab = index === 1 || index === 2 ? 0 : (selectedId > 0 ? 1 : 0)
     }
     // Runs `action` once the session is saved or its changes given up (asks when there are some).
     function confirmDiscard(action) {
@@ -292,6 +295,20 @@ ApplicationWindow {
                 window.showInfo(qsTr("Signal exporté : %1").arg(decodeURIComponent(selectedFile.toString().split("/").pop())))
         }
     }
+    FileDialog {
+        id: spectrumDialog
+        title: qsTr("Exporter le spectre")
+        fileMode: FileDialog.SaveFile
+        currentFolder: window.folderOf(window.appSettings.lastDirectory)
+        defaultSuffix: "csv"
+        nameFilters: [qsTr("Tableau CSV (*.csv)")]
+        onAccepted: {
+            if (window.analysis.exportSpectrum(selectedFile))
+                window.showInfo(qsTr("Spectre exporté : %1").arg(decodeURIComponent(selectedFile.toString().split("/").pop())))
+            else
+                window.showError(window.analysis.lastError)
+        }
+    }
 
     header: ToolBar {
         Material.background: Theme.panel
@@ -439,6 +456,8 @@ ApplicationWindow {
                         onImportRequested: importDialog.open()
                         onExportRequested: exportAction.trigger()
                         onRenameRequested: signalsPanel.renameSelected()
+                        onInfoMessage: (text) => window.showInfo(text)
+                        onErrorMessage: (text) => window.showError(text)
                     }
                     AcquisitionView {
                         id: acquisitionView
@@ -458,6 +477,30 @@ ApplicationWindow {
                             window.inspectorOpen = true
                             window.inspectorTab = 0
                         }
+                        onInfoMessage: (text) => window.showInfo(text)
+                        onErrorMessage: (text) => window.showError(text)
+                    }
+                    AnalysisView {
+                        id: analysisView
+                        anchors.fill: parent
+                        visible: window.module === 2
+                        ribbonHost: moduleRibbon
+                        session: window.session
+                        analysis: window.analysis
+                        curves: window.curves
+                        signalId: window.selectedId
+                        leftFolded: !window.signalsPanelOpen
+                        rightFolded: !window.inspectorOpen
+                        onUnfoldLeft: window.signalsPanelOpen = true
+                        onUnfoldRight: window.inspectorOpen = true
+                        onExportRequested: spectrumDialog.open()
+                        onCurveRequested: (view) => curveDialog.openFor(window.selectedId, view)
+                        onInfoMessage: (text) => window.showInfo(text)
+                        onErrorMessage: (text) => window.showError(text)
+                        onSettingsRequested: {
+                            window.inspectorOpen = true
+                            window.inspectorTab = 0
+                        }
                     }
                 }
 
@@ -469,6 +512,7 @@ ApplicationWindow {
                     acquisition: window.acquisition
                     serialPorts: window.serialPorts
                     appSettings: window.appSettings
+                    analysis: window.analysis
                     module: window.module
                     signalId: window.selectedId
                     tab: window.inspectorTab
@@ -502,6 +546,12 @@ ApplicationWindow {
     FirmwareDialog {
         id: firmwareDialog
         acquisition: window.acquisition
+    }
+    CurveDialog {
+        id: curveDialog
+        session: window.session
+        curves: window.curves
+        onAdded: (count) => { if (count === 0) window.showInfo(qsTr("Ces courbes sont déjà affichées.")) }
     }
     ImportDialog {
         id: importOptions

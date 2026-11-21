@@ -1,15 +1,21 @@
 #include "signal_plot.h"
 
 #include "qacq/acquisition/recorder.h"
+#include "qacq/analysis/calculus.h"
+#include "qacq/analysis/measures.h"
 #include "qacq/acquisition/trigger.h"
 #include "qacq/app/acquisition_controller.h"
+#include "qacq/app/curves_controller.h"
+#include "qacq/app/format.h"
 #include "qacq/app/session.h"
 #include "qacq/app/signal_list_model.h"
 #include "qacq/model/signal.h"
 
 #include <QCursor>
+#include <QDateTime>
 #include <QFontMetricsF>
 #include <QHoverEvent>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -34,7 +40,9 @@ constexpr std::size_t kPyramidFrom = std::size_t{1} << 15;
 // Margins around the plotting area: value labels on the left, time labels and their title under it.
 constexpr double kLeft = 62.0;
 constexpr double kRight = 14.0;
+constexpr double kRightAxis = 62.0; // room for a scale on the right
 constexpr double kTop = 8.0;
+constexpr double kTopShared = 20.0; // one axis for every channel: its unit above it
 constexpr double kBottom = 40.0;
 constexpr double kLaneGap = 12.0;
 
@@ -76,6 +84,9 @@ SignalPlot::SignalPlot(QQuickItem *parent) : QQuickPaintedItem(parent)
                             QColor(186, 104, 200), QColor(77, 208, 225), QColor(255, 213, 79), QColor(161, 136, 127)})
         m_channelColors << QVariant::fromValue(c);
     connect(this, &SignalPlot::styleChanged, this, [this] { update(); });
+    // Whether cursors can be shown depends on the data and the mode (stopped acquisition: yes).
+    connect(this, &SignalPlot::contentChanged, this, &SignalPlot::cursorsChanged);
+    connect(this, &SignalPlot::sourceChanged, this, &SignalPlot::cursorsChanged);
 }
 
 SignalPlot::~SignalPlot() = default;
@@ -121,18 +132,50 @@ void SignalPlot::setAcquisition(QObject *acquisition)
 void SignalPlot::setLive(bool live)
 {
     if (live == m_live) return;
+    // An acquisition that stops on its rolling display: the signal it became is shown as the last
+    // window was (its end), the whole record a slide away (drag, scroll bar, arrows) rather than
+    // squeezed into the plot.
+    const bool stopping = m_live && !live && !m_showingCapture;
+    const qacq::app::AcquisitionController *acquisition = m_acquisition.data(); // one read of the QPointer
     m_live = live;
     m_viewSet = false;
     for (Channel &c : m_channels) c.range = {0.0, 0.0};
     m_overlayRange = {0.0, 0.0};
+    m_overlayRightRange = {0.0, 0.0};
     reload();
+    if (stopping && m_signal && acquisition != nullptr && acquisition->lastSignalId() == m_signalId &&
+        m_limits.span() > m_rollSeconds * 1.001)
+    {
+        m_view = {m_limits.high - m_rollSeconds, m_limits.high};
+        m_viewSet = true;
+        emit viewChanged();
+        update();
+    }
     emit sourceChanged();
+}
+
+double SignalPlot::rollSeconds() const
+{
+    // Stopped (a signal of the session on screen): the width of the view.
+    if ((m_live && !m_showingCapture) || m_channels.empty() || !m_view.valid()) return m_rollSeconds;
+    return m_view.span();
 }
 
 void SignalPlot::setRollSeconds(double seconds)
 {
     if (!std::isfinite(seconds)) return;
     seconds = std::clamp(seconds, 1e-4, 3600.0);
+    if (!m_live && !m_channels.empty() && m_view.valid())
+    {
+        // Not rolling: the view takes this width, ending where it ends (the next acquisition too).
+        m_rollSeconds = seconds;
+        if (std::abs(seconds - m_view.span()) <= 1e-12 * seconds) return;
+        rememberView();
+        const double end = std::min(m_view.high, m_limits.high);
+        setViewRange({end - seconds, end});
+        emit viewChanged();
+        return;
+    }
     if (seconds == m_rollSeconds) return;
     m_rollSeconds = seconds;
     if (m_live) refreshLive();
@@ -144,6 +187,7 @@ void SignalPlot::setFrozen(bool frozen)
 {
     if (frozen == m_frozen) return;
     m_frozen = frozen;
+    emit cursorsChanged();
     if (!m_frozen && m_live) refreshLive();
     emit viewChanged();
     update();
@@ -154,6 +198,7 @@ void SignalPlot::setStacked(bool stacked)
     if (stacked == m_stacked) return;
     m_stacked = stacked;
     emit viewChanged();
+    noteScales();
     update();
 }
 
@@ -173,11 +218,16 @@ void SignalPlot::setHiddenChannels(const QVariantList &channels)
     if (hidden == m_hidden) return;
     m_hidden = std::move(hidden);
     emit viewChanged();
+    noteScales();
+    if (m_cursorsVisible) refreshCursors();
     update();
 }
 
 bool SignalPlot::isHidden(int channel) const
 {
+    if (m_curves && channel >= 0 && static_cast<std::size_t>(channel) < m_curveVisible.size() &&
+        !m_curveVisible[static_cast<std::size_t>(channel)])
+        return true;
     return std::binary_search(m_hidden.begin(), m_hidden.end(), channel);
 }
 
@@ -216,7 +266,7 @@ void SignalPlot::connectSession()
     if (!m_session) return;
     qacq::app::SignalListModel *list = m_session->signalList();
     const auto changed = [this] {
-        if (!m_live) refreshSignal();
+        if (!m_live && !m_curves) refreshSignal();
         update();
     };
     m_sessionConnections << connect(list, &QAbstractItemModel::dataChanged, this, changed)
@@ -244,12 +294,14 @@ void SignalPlot::connectAcquisition()
 void SignalPlot::reload()
 {
     if (m_live && m_acquisition) refreshLive();
+    else if (m_curves) refreshCurves();
     else refreshSignal();
     update();
 }
 
 void SignalPlot::announce()
 {
+    noteScales(); // the channels may have changed (another signal: automatic scales)
     QString signature = QStringLiteral("%1|%2|").arg(m_showingCapture ? 1 : 0).arg(static_cast<int>(m_channels.size()));
     for (const Channel &c : m_channels) signature += c.name + QLatin1Char('|');
     if (signature == m_signature) return;
@@ -313,13 +365,141 @@ void SignalPlot::refreshSignal()
         m_view = m_limits;
         m_viewSet = true;
         m_overlayAutomatic = true;
+        m_overlayRightAutomatic = true;
     }
     else
     {
         m_view = qacq::plot::clampRange(m_view, m_limits, minimumSpan());
     }
     announce();
+    if (!sameSignal) m_history.clear();
     emit viewChanged();
+    if (m_cursorsVisible) refreshCursors();
+}
+
+QObject *SignalPlot::curves() const
+{
+    return m_curves.data();
+}
+
+void SignalPlot::setCurves(QObject *curves)
+{
+    auto *c = qobject_cast<qacq::app::CurvesController *>(curves);
+    if (c == m_curves.data()) return;
+    for (const QMetaObject::Connection &k : m_curveConnections) disconnect(k);
+    m_curveConnections.clear();
+    m_curves = c;
+    if (c)
+        m_curveConnections << connect(c, &qacq::app::CurvesController::timeCurvesChanged, this, [this] {
+            if (!m_live) refreshCurves();
+            update();
+        });
+    reload();
+    emit sourceChanged();
+}
+
+void SignalPlot::refreshCurves()
+{
+    m_showingCapture = false;
+    m_triggerChannel = -1;
+    m_buffers.clear();
+    const qacq::app::CurvesController *controller = m_curves.data(); // one read of the QPointer
+    std::shared_ptr<const qacq::analysis::TimeCurveSet> set = controller ? controller->timeCurves() : nullptr;
+    const qacq::model::SignalPtr signal = set ? set->signal : nullptr;
+    const bool sameSignal = m_signal && signal && m_signal->id == signal->id;
+    std::vector<Channel> previous = std::move(m_channels);
+    m_channels.clear();
+    m_curveVisible.clear();
+    m_curveSet = set;
+    m_signal = signal;
+    if (!signal || set->curves.empty() || signal->frameCount() == 0)
+    {
+        m_rate = 0.0;
+        m_curvePyramids.clear();
+        m_message.clear();
+        announce();
+        return;
+    }
+    m_message.clear();
+    m_rate = signal->sampleRateHz > 0.0 ? signal->sampleRateHz : 1.0;
+    m_timeOrigin = signal->startSeconds;
+    // Pyramids of the long curves, kept while the same samples are drawn.
+    std::map<const double *, qacq::plot::MinMaxPyramid> pyramids;
+    for (const qacq::analysis::TimeCurve &curve : set->curves)
+    {
+        if (curve.values.size() < kPyramidFrom) continue;
+        const double *key = curve.values.data();
+        if (pyramids.count(key)) continue;
+        const auto old = m_curvePyramids.find(key);
+        if (old != m_curvePyramids.end()) pyramids.emplace(key, std::move(old->second));
+        else pyramids[key].build(curve.values);
+    }
+    m_curvePyramids = std::move(pyramids);
+    const std::vector<std::size_t> noBreaks;
+    const std::vector<std::size_t> &breaks = signal->data ? signal->data->discontinuities : noBreaks;
+    for (std::size_t k = 0; k < set->curves.size(); ++k)
+    {
+        const qacq::analysis::TimeCurve &curve = set->curves[k];
+        Channel ch;
+        ch.name = text(curve.name);
+        ch.unit = text(curve.unit);
+        ch.values = curve.values;
+        ch.frameOffset = static_cast<double>(curve.firstFrame);
+        for (std::size_t b : breaks)
+        {
+            if (b > curve.firstFrame && b < curve.firstFrame + curve.values.size()) ch.breaks.push_back(b - curve.firstFrame);
+        }
+        const auto pyramid = m_curvePyramids.find(curve.values.data());
+        ch.pyramid = pyramid != m_curvePyramids.end() && !curve.values.empty() ? &pyramid->second : nullptr;
+        if (sameSignal && k < previous.size() && previous[k].name == ch.name)
+        {
+            ch.range = previous[k].range;
+            ch.automatic = previous[k].automatic;
+        }
+        m_channels.push_back(std::move(ch));
+        m_curveVisible.push_back(curve.visible);
+    }
+    m_limits = {m_timeOrigin, m_timeOrigin + static_cast<double>(signal->frameCount()) / m_rate};
+    if (!sameSignal || !m_viewSet)
+    {
+        m_view = m_limits;
+        m_viewSet = true;
+        m_overlayAutomatic = true;
+        m_overlayRightAutomatic = true;
+    }
+    else
+    {
+        m_view = qacq::plot::clampRange(m_view, m_limits, minimumSpan());
+    }
+    announce();
+    if (!sameSignal) m_history.clear();
+    emit viewChanged();
+    if (m_cursorsVisible) refreshCursors();
+}
+
+void SignalPlot::setTimeView(double low, double high)
+{
+    if (!std::isfinite(low) || !std::isfinite(high) || !(high > low) || (m_live && !m_showingCapture)) return;
+    if (low == m_view.low && high == m_view.high) return;
+    setViewRange({low, high});
+}
+
+void SignalPlot::setCursorA(double time)
+{
+    if (!std::isfinite(time) || time == m_cursorA) return;
+    m_cursorA = time;
+    m_cursorsPlaced = true;
+    refreshCursors();
+    update();
+}
+
+void SignalPlot::setCursorB(double time)
+{
+    if (!std::isfinite(time) || time == m_cursorB) return;
+    m_cursorB = time;
+    m_cursorsPlaced = true;
+    refreshCursors();
+    update();
 }
 
 void SignalPlot::refreshLive()
@@ -415,6 +595,7 @@ void SignalPlot::refreshLive()
         m_channels.push_back(std::move(ch));
     }
     announce();
+    if (m_cursorsVisible) refreshCursors();
 }
 
 void SignalPlot::onFrames()
@@ -427,6 +608,22 @@ void SignalPlot::onFrames()
 double SignalPlot::minimumSpan() const
 {
     return 4.0 / (m_rate > 0.0 ? m_rate : 1.0);
+}
+
+qint64 SignalPlot::viewFirstFrame() const
+{
+    if (!m_signal || m_live || !(m_rate > 0.0)) return 0;
+    const auto frames = static_cast<double>(m_signal->frameCount());
+    const double first = std::ceil((m_view.low - m_timeOrigin) * m_rate - 1e-6);
+    return static_cast<qint64>(std::clamp(first, 0.0, frames));
+}
+
+qint64 SignalPlot::viewFrameCount() const
+{
+    if (!m_signal || m_live || !(m_rate > 0.0)) return -1;
+    const auto frames = static_cast<double>(m_signal->frameCount());
+    const double end = std::clamp(std::ceil((m_view.high - m_timeOrigin) * m_rate - 1e-6), 0.0, frames);
+    return std::max<qint64>(0, static_cast<qint64>(end) - viewFirstFrame());
 }
 
 void SignalPlot::setViewRange(const Range &range)
@@ -443,7 +640,16 @@ void SignalPlot::setViewRange(const Range &range)
 
 void SignalPlot::showAll()
 {
+    rememberView();
     m_view = m_limits;
+    resetScales();
+    emit viewChanged();
+    noteScales();
+    update();
+}
+
+void SignalPlot::resetScales()
+{
     for (Channel &c : m_channels)
     {
         c.automatic = true;
@@ -451,8 +657,154 @@ void SignalPlot::showAll()
     }
     m_overlayAutomatic = true;
     m_overlayRange = {0.0, 0.0};
-    emit viewChanged();
+    m_overlayRightAutomatic = true;
+    m_overlayRightRange = {0.0, 0.0};
+}
+
+void SignalPlot::autoScale()
+{
+    resetScales();
+    noteScales();
     update();
+}
+
+bool SignalPlot::manualScales() const
+{
+    // As layoutLanes lays them out: stacked, each channel its scale; superposed, one or two units share
+    // the scales of the overlay, more units a lane each with the scale of its channels.
+    QStringList units;
+    bool channelSetByHand = false;
+    for (int c = 0; c < static_cast<int>(m_channels.size()); ++c)
+    {
+        if (isHidden(c)) continue;
+        const Channel &ch = m_channels[static_cast<std::size_t>(c)];
+        channelSetByHand = channelSetByHand || !ch.automatic;
+        if (!units.contains(ch.unit)) units << ch.unit;
+    }
+    if (units.isEmpty()) return false;
+    if (m_stacked || units.size() > 2) return channelSetByHand;
+    return !m_overlayAutomatic || (units.size() == 2 && !m_overlayRightAutomatic);
+}
+
+void SignalPlot::noteScales()
+{
+    const bool manual = manualScales();
+    if (manual == m_manualScalesNoted) return;
+    m_manualScalesNoted = manual;
+    emit scalesChanged();
+}
+
+SignalPlot::Place SignalPlot::placeAt(const QPointF &at, int *lane) const
+{
+    *lane = -1;
+    if (m_lastLanes.empty()) return Place::None;
+    const QRectF area = plotRect();
+    const bool overArea = at.x() >= area.left() && at.x() <= area.right();
+    if (at.y() > m_lastLanes.back().rect.bottom() + kLaneGap / 2) return overArea ? Place::TimeAxis : Place::None;
+    const int index = laneAt(at.y());
+    if (index < 0) return overArea ? Place::Plot : Place::None; // above the lanes: the time only
+    *lane = index;
+    if (at.x() < area.left()) return Place::LeftScale;
+    if (at.x() > area.right())
+        return m_lastLanes[static_cast<std::size_t>(index)].rightChannels.empty() ? Place::None : Place::RightScale;
+    return Place::Plot;
+}
+
+Range SignalPlot::scaleOf(const Lane &lane, bool right) const
+{
+    if (lane.perChannel)
+    {
+        const auto c = static_cast<std::size_t>(lane.channels.front());
+        return c < m_channels.size() ? m_channels[c].range : lane.range;
+    }
+    return right ? m_overlayRightRange : m_overlayRange;
+}
+
+void SignalPlot::setLaneScale(const Lane &lane, bool right, const Range &range)
+{
+    if (!range.valid()) return;
+    if (lane.perChannel)
+    {
+        for (int c : lane.channels)
+        {
+            if (c < 0 || static_cast<std::size_t>(c) >= m_channels.size()) continue;
+            m_channels[static_cast<std::size_t>(c)].range = range;
+            m_channels[static_cast<std::size_t>(c)].automatic = false;
+        }
+    }
+    else if (right)
+    {
+        m_overlayRightRange = range;
+        m_overlayRightAutomatic = false;
+    }
+    else
+    {
+        m_overlayRange = range;
+        m_overlayAutomatic = false;
+    }
+    noteScales();
+    update();
+}
+
+void SignalPlot::autoScaleLane(const Lane &lane, bool right)
+{
+    if (lane.perChannel)
+    {
+        for (int c : lane.channels)
+        {
+            if (c < 0 || static_cast<std::size_t>(c) >= m_channels.size()) continue;
+            m_channels[static_cast<std::size_t>(c)].automatic = true;
+            m_channels[static_cast<std::size_t>(c)].range = {0.0, 0.0};
+        }
+    }
+    else if (right)
+    {
+        m_overlayRightAutomatic = true;
+        m_overlayRightRange = {0.0, 0.0};
+    }
+    else
+    {
+        m_overlayAutomatic = true;
+        m_overlayRange = {0.0, 0.0};
+    }
+    noteScales();
+    update();
+}
+
+void SignalPlot::dragValues(double dy)
+{
+    if (m_grabLane < 0 || static_cast<std::size_t>(m_grabLane) >= m_lastLanes.size()) return;
+    const Lane &lane = m_lastLanes[static_cast<std::size_t>(m_grabLane)];
+    if (!(lane.rect.height() > 0.0)) return;
+    // The curves follow the pointer: dragged down, the scale shows higher values. Both scales of two
+    // superposed units move together (the picture slides), unless one of them is the one grabbed.
+    const double fraction = dy / lane.rect.height();
+    if (m_grab != Place::RightScale) setLaneScale(lane, false, qacq::plot::shiftRange(m_pressRange, fraction));
+    if (m_grab != Place::LeftScale && !lane.rightChannels.empty())
+        setLaneScale(lane, true, qacq::plot::shiftRange(m_pressRightRange, fraction));
+}
+
+void SignalPlot::slideValues(double fraction)
+{
+    const int under = m_pointerInside ? laneAt(m_pointer.y()) : -1;
+    for (std::size_t i = 0; i < m_lastLanes.size(); ++i)
+    {
+        if (under >= 0 && static_cast<int>(i) != under) continue;
+        const Lane &lane = m_lastLanes[i];
+        setLaneScale(lane, false, qacq::plot::shiftRange(scaleOf(lane, false), fraction));
+        if (!lane.rightChannels.empty()) setLaneScale(lane, true, qacq::plot::shiftRange(scaleOf(lane, true), fraction));
+    }
+}
+
+void SignalPlot::updateCursorShape()
+{
+    int lane = -1;
+    const Place place = placeAt(m_pointer, &lane);
+    Qt::CursorShape shape = Qt::CrossCursor;
+    if (place == Place::LeftScale || place == Place::RightScale) shape = Qt::SizeVerCursor;
+    else if (m_cursorsVisible && cursorsAvailable() && cursorNear(m_pointer.x()) != 0) shape = Qt::SizeHorCursor;
+    else if (place == Place::TimeAxis && !(m_live && !m_showingCapture)) shape = Qt::SizeHorCursor;
+    setCursor(QCursor(shape));
 }
 
 void SignalPlot::zoomTime(double factor)
@@ -463,12 +815,28 @@ void SignalPlot::zoomTime(double factor)
         setRollSeconds(m_rollSeconds * factor);
         return;
     }
+    rememberView();
     setViewRange(qacq::plot::zoomRange(m_view, factor, 0.5 * (m_view.low + m_view.high)));
 }
 
 QRectF SignalPlot::plotRect() const
 {
-    return QRectF(kLeft, kTop, std::max(0.0, width() - kLeft - kRight), std::max(0.0, height() - kTop - kBottom));
+    const double top = m_stacked ? kTop : kTopShared;
+    const double right = m_rightAxisRoom || rightAxisWanted() ? kRightAxis : kRight;
+    return QRectF(kLeft, top, std::max(0.0, width() - kLeft - right), std::max(0.0, height() - top - kBottom));
+}
+
+bool SignalPlot::rightAxisWanted() const
+{
+    if (m_stacked) return false;
+    QStringList units;
+    for (int c = 0; c < static_cast<int>(m_channels.size()); ++c)
+    {
+        if (isHidden(c)) continue;
+        const QString &unit = m_channels[static_cast<std::size_t>(c)].unit;
+        if (!units.contains(unit)) units << unit;
+    }
+    return units.size() == 2;
 }
 
 double SignalPlot::timeAt(double x) const
@@ -531,29 +899,82 @@ std::vector<SignalPlot::Lane> SignalPlot::layoutLanes(const QRectF &area, const 
             lane.channels = {c};
             lane.range = ch.range;
             lane.unit = ch.unit;
+            lane.perChannel = true;
             lanes.push_back(std::move(lane));
         }
         return lanes;
     }
-    double mn = std::numeric_limits<double>::infinity(), mx = -mn;
-    QString unit = m_channels[static_cast<std::size_t>(visible.front())].unit;
+    // Superposed, grouped by unit. One or two units: one lane, the second unit on a scale of its own on
+    // the right. More: one lane per unit, its channels superposed.
+    std::vector<QString> units;
     for (int c : visible)
     {
-        const qacq::plot::Trace &t = traces[static_cast<std::size_t>(c)];
-        if (!t.empty())
+        const QString &u = m_channels[static_cast<std::size_t>(c)].unit;
+        if (std::find(units.begin(), units.end(), u) == units.end()) units.push_back(u);
+    }
+    const auto extent = [&traces](const std::vector<int> &channels) {
+        double mn = std::numeric_limits<double>::infinity(), mx = -mn;
+        for (int c : channels)
         {
+            const qacq::plot::Trace &t = traces[static_cast<std::size_t>(c)];
+            if (t.empty()) continue;
             mn = std::min(mn, t.minimum);
             mx = std::max(mx, t.maximum);
         }
-        if (m_channels[static_cast<std::size_t>(c)].unit != unit) unit.clear();
+        return std::pair<double, double>{mn, mx};
+    };
+    const auto ofUnit = [&](const QString &unit) {
+        std::vector<int> channels;
+        for (int c : visible)
+        {
+            if (m_channels[static_cast<std::size_t>(c)].unit == unit) channels.push_back(c);
+        }
+        return channels;
+    };
+    if (units.size() <= 2)
+    {
+        const std::vector<int> left = ofUnit(units.front());
+        const auto [mn, mx] = extent(left);
+        if (m_overlayAutomatic) m_overlayRange = fit(m_overlayRange, mn, mx);
+        Lane lane;
+        lane.rect = area;
+        lane.channels = visible;
+        lane.range = m_overlayRange;
+        lane.unit = units.front();
+        if (units.size() == 2)
+        {
+            lane.rightChannels = ofUnit(units.back());
+            const auto [rmn, rmx] = extent(lane.rightChannels);
+            if (m_overlayRightAutomatic) m_overlayRightRange = fit(m_overlayRightRange, rmn, rmx);
+            lane.rightRange = m_overlayRightRange;
+            lane.rightUnit = units.back();
+        }
+        lanes.push_back(std::move(lane));
+        return lanes;
     }
-    if (m_overlayAutomatic) m_overlayRange = fit(m_overlayRange, mn, mx);
-    Lane lane;
-    lane.rect = area;
-    lane.channels = visible;
-    lane.range = m_overlayRange;
-    lane.unit = unit;
-    lanes.push_back(std::move(lane));
+    const auto n = static_cast<double>(units.size());
+    const double h = std::max(10.0, (area.height() - kLaneGap * (n - 1.0)) / n);
+    for (std::size_t k = 0; k < units.size(); ++k)
+    {
+        const std::vector<int> channels = ofUnit(units[k]);
+        // One scale for the channels of the lane (a zoom of the values applies to them all).
+        bool automatic = true;
+        for (int c : channels) automatic = automatic && m_channels[static_cast<std::size_t>(c)].automatic;
+        Range range = m_channels[static_cast<std::size_t>(channels.front())].range;
+        if (automatic)
+        {
+            const auto [mn, mx] = extent(channels);
+            range = fit(range, mn, mx);
+        }
+        for (int c : channels) m_channels[static_cast<std::size_t>(c)].range = range;
+        Lane lane;
+        lane.rect = QRectF(area.left(), area.top() + static_cast<double>(k) * (h + kLaneGap), area.width(), h);
+        lane.channels = channels;
+        lane.range = range;
+        lane.unit = units[k];
+        lane.perChannel = true;
+        lanes.push_back(std::move(lane));
+    }
     return lanes;
 }
 
@@ -640,6 +1061,36 @@ void SignalPlot::paint(QPainter *painter)
         const qacq::plot::YMap map{lane.range.low, lane.range.high, r.top(), r.height(), false};
         const qacq::plot::Ticks yTicks = qacq::plot::linearTicks(lane.range.low, lane.range.high, r.height(), 28.0);
         const qacq::plot::AxisLabels yLabels = qacq::plot::axisLabels(yTicks, utf8(lane.unit));
+        const bool hasRight = !lane.rightChannels.empty();
+        const qacq::plot::YMap rightMap{lane.rightRange.low, lane.rightRange.high, r.top(), r.height(), false};
+        const qacq::plot::Ticks rightTicks = hasRight ? qacq::plot::linearTicks(lane.rightRange.low, lane.rightRange.high, r.height(), 28.0)
+                                                      : qacq::plot::Ticks{};
+        const qacq::plot::AxisLabels rightLabels = qacq::plot::axisLabels(rightTicks, utf8(lane.rightUnit));
+        // Two scales: each in the colour of its channel when it has only one, so that the eye pairs them.
+        QColor leftTint = m_muted, rightTint = m_muted;
+        if (hasRight)
+        {
+            const auto leftCount = std::count_if(lane.channels.begin(), lane.channels.end(), [&lane](int c) { return !lane.onRight(c); });
+            if (leftCount == 1)
+            {
+                for (int c : lane.channels)
+                {
+                    if (!lane.onRight(c)) leftTint = channelColour(c);
+                }
+            }
+            if (lane.rightChannels.size() == 1) rightTint = channelColour(lane.rightChannels.front());
+        }
+        // The scale on the right: graduations outside the frame, no grid of its own.
+        for (std::size_t i = 0; i < rightTicks.major.size(); ++i)
+        {
+            const double y = std::round(rightMap.toPixel(rightTicks.major[i])) + 0.5;
+            if (y < r.top() || y > r.bottom()) continue;
+            p.setPen(QPen(m_grid, 1.0));
+            p.drawLine(QPointF(r.right(), y), QPointF(r.right() + 4.0, y));
+            p.setPen(rightTint);
+            p.drawText(QRectF(r.right() + 7.0, y - metrics.height() / 2.0, std::max(0.0, width() - r.right() - 9.0), metrics.height()),
+                       Qt::AlignLeft | Qt::AlignVCenter, text(rightLabels.text[i]));
+        }
         p.setRenderHint(QPainter::Antialiasing, false);
         p.setPen(QPen(m_grid, 1.0));
         p.setBrush(Qt::NoBrush);
@@ -651,7 +1102,7 @@ void SignalPlot::paint(QPainter *painter)
             p.setPen(QPen(yTicks.major[i] == 0.0 ? faded(m_muted, 0.55) : m_grid, 1.0));
             p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y));
             const QString label = text(yLabels.text[i]);
-            p.setPen(m_muted);
+            p.setPen(leftTint);
             p.drawText(QRectF(0.0, y - metrics.height() / 2.0, r.left() - 6.0, metrics.height()),
                        Qt::AlignRight | Qt::AlignVCenter, label);
         }
@@ -695,9 +1146,10 @@ void SignalPlot::paint(QPainter *painter)
             const qacq::plot::Trace &trace = traces[static_cast<std::size_t>(c)];
             if (trace.columns.empty() && trace.points.empty()) continue;
             const QColor colour = channelColour(c);
+            const qacq::plot::YMap &scale = lane.onRight(c) ? rightMap : map;
             p.setRenderHint(QPainter::Antialiasing, !trace.dense);
             p.setPen(QPen(colour, trace.dense ? 1.0 : 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            for (const std::vector<qacq::plot::PixelPoint> &line : qacq::plot::traceLines(trace, map))
+            for (const std::vector<qacq::plot::PixelPoint> &line : qacq::plot::traceLines(trace, scale))
             {
                 if (line.size() == 1)
                 {
@@ -716,7 +1168,7 @@ void SignalPlot::paint(QPainter *painter)
                 p.setBrush(colour);
                 for (const qacq::plot::TracePoint &pt : trace.points)
                 {
-                    const double y = map.toPixel(pt.value);
+                    const double y = scale.toPixel(pt.value);
                     if (std::isfinite(y)) p.drawEllipse(QPointF(area.left() + pt.x, y), 2.2, 2.2);
                 }
                 p.setBrush(Qt::NoBrush);
@@ -732,7 +1184,9 @@ void SignalPlot::paint(QPainter *painter)
         {
             const Channel &ch = m_channels[static_cast<std::size_t>(c)];
             QString name = ch.name;
-            if (m_stacked && !yLabels.unit.empty()) name += QStringLiteral(" (%1)").arg(text(yLabels.unit));
+            // The unit of its scale beside each name, unless the lane has a single scale titled above it.
+            const std::string &unitShown = lane.onRight(c) ? rightLabels.unit : yLabels.unit;
+            if ((lane.perChannel || hasRight) && !unitShown.empty()) name += QStringLiteral(" (%1)").arg(text(unitShown));
             const double w = metrics.horizontalAdvance(name) + 18.0;
             p.setPen(Qt::NoPen);
             p.setBrush(faded(m_panel, 0.85));
@@ -744,11 +1198,17 @@ void SignalPlot::paint(QPainter *painter)
             p.drawText(QPointF(x + 15.0, y + metrics.ascent()), name);
             x += w + 8.0;
         }
-        if (!m_stacked && !yLabels.unit.empty())
+        if (!lane.perChannel && !yLabels.unit.empty())
         {
-            p.setPen(m_muted);
-            p.drawText(QRectF(0.0, r.top() - 2.0, r.left() - 6.0, metrics.height()), Qt::AlignRight | Qt::AlignTop,
-                       text(yLabels.unit));
+            p.setPen(leftTint);
+            p.drawText(QRectF(0.0, r.top() - metrics.height() - 3.0, r.left() - 6.0, metrics.height()),
+                       Qt::AlignRight | Qt::AlignTop, text(yLabels.unit));
+        }
+        if (hasRight && !rightLabels.unit.empty())
+        {
+            p.setPen(rightTint);
+            p.drawText(QRectF(r.right() + 7.0, r.top() - metrics.height() - 3.0, std::max(0.0, width() - r.right() - 9.0), metrics.height()),
+                       Qt::AlignLeft | Qt::AlignTop, text(rightLabels.unit));
         }
     }
 
@@ -763,7 +1223,8 @@ void SignalPlot::paint(QPainter *painter)
         p.setBrush(Qt::NoBrush);
     }
     m_lastLanes = lanes;
-    if (m_pointerInside && !m_panning && !m_selecting && area.contains(m_pointer)) drawReadout(p, lanes);
+    drawCursors(p, lanes);
+    if (m_pointerInside && !m_panning && !m_selecting && m_dragging == 0 && area.contains(m_pointer)) drawReadout(p, lanes);
 }
 
 void SignalPlot::drawReadout(QPainter &p, const std::vector<Lane> &lanes) const
@@ -778,9 +1239,10 @@ void SignalPlot::drawReadout(QPainter &p, const std::vector<Lane> &lanes) const
     p.setRenderHint(QPainter::Antialiasing, true);
     for (const Lane &lane : lanes)
     {
-        const qacq::plot::YMap map{lane.range.low, lane.range.high, lane.rect.top(), lane.rect.height(), false};
         for (int c : lane.channels)
         {
+            const Range &range = lane.rangeOf(c);
+            const qacq::plot::YMap map{range.low, range.high, lane.rect.top(), lane.rect.height(), false};
             const Channel &ch = m_channels[static_cast<std::size_t>(c)];
             const std::ptrdiff_t i = qacq::plot::nearestSample((t - m_timeOrigin) * rate - ch.frameOffset, ch.values.size());
             if (i < 0) continue;
@@ -801,7 +1263,7 @@ void SignalPlot::drawReadout(QPainter &p, const std::vector<Lane> &lanes) const
                 p.drawEllipse(QPointF(x, y), 3.5, 3.5);
             }
             // As many digits as tell apart two values a thousandth of the lane apart (2,400000301 GHz).
-            const int digits = qacq::plot::significantFor(v, lane.range.span() / 1000.0);
+            const int digits = qacq::plot::significantFor(v, range.span() / 1000.0);
             lines << QStringLiteral("%1 : %2").arg(ch.name, text(qacq::plot::formatQuantity(v, utf8(ch.unit), digits)));
             colours.push_back(channelColour(c));
         }
@@ -841,6 +1303,169 @@ void SignalPlot::drawReadout(QPainter &p, const std::vector<Lane> &lanes) const
     }
 }
 
+bool SignalPlot::cursorsAvailable() const
+{
+    return !m_channels.empty() && (!m_live || m_frozen || m_showingCapture);
+}
+
+void SignalPlot::setCursorsVisible(bool visible)
+{
+    if (visible == m_cursorsVisible) return;
+    m_cursorsVisible = visible;
+    if (visible)
+    {
+        const bool inView = m_cursorA >= m_view.low && m_cursorA <= m_view.high && m_cursorB >= m_view.low &&
+                            m_cursorB <= m_view.high;
+        if (!m_cursorsPlaced || !inView) placeCursors();
+    }
+    refreshCursors();
+    update();
+}
+
+void SignalPlot::placeCursors()
+{
+    m_cursorA = m_view.low + m_view.span() / 3.0;
+    m_cursorB = m_view.low + 2.0 * m_view.span() / 3.0;
+    m_cursorsPlaced = true;
+}
+
+int SignalPlot::cursorNear(double x) const
+{
+    if (!m_cursorsVisible) return 0;
+    const double da = std::abs(x - xOf(m_cursorA)), db = std::abs(x - xOf(m_cursorB));
+    if (std::min(da, db) > 6.0) return 0;
+    return da <= db ? 1 : 2;
+}
+
+void SignalPlot::rememberView(bool coalesce)
+{
+    if ((m_live && !m_showingCapture) || !m_view.valid()) return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool sameGesture = coalesce && now - m_lastRemembered < 600;
+    m_lastRemembered = coalesce ? now : 0;
+    if (sameGesture) return;
+    if (!m_history.empty() && m_history.back().low == m_view.low && m_history.back().high == m_view.high) return;
+    m_history.push_back(m_view);
+    if (m_history.size() > 50) m_history.erase(m_history.begin());
+    emit viewChanged();
+}
+
+void SignalPlot::goBack()
+{
+    if (m_history.empty()) return;
+    const Range previous = m_history.back();
+    m_history.pop_back();
+    const Range r = qacq::plot::clampRange(previous, m_limits, minimumSpan());
+    if (r.valid()) m_view = r;
+    m_viewSet = true;
+    emit viewChanged();
+    update();
+}
+
+void SignalPlot::refreshCursors()
+{
+    QVariantMap info;
+    if (m_cursorsVisible && cursorsAvailable())
+    {
+        const double rate = m_rate > 0.0 ? m_rate : 1.0;
+        const double lo = std::min(m_cursorA, m_cursorB), hi = std::max(m_cursorA, m_cursorB);
+        const double dt = m_cursorB - m_cursorA;
+        const int digits = qacq::plot::significantFor(std::max(std::abs(m_cursorA), std::abs(m_cursorB)),
+                                                      m_view.span() / 1000.0, 4, 12);
+        const auto timeText = [&](double t) {
+            return m_rate > 0.0 ? text(qacq::plot::formatQuantity(t, "s", digits))
+                                : tr("trame %1").arg(std::llround(t));
+        };
+        info[QStringLiteral("a")] = timeText(m_cursorA);
+        info[QStringLiteral("b")] = timeText(m_cursorB);
+        info[QStringLiteral("delta")] =
+            m_rate > 0.0 ? text(qacq::plot::formatQuantity(dt, "s", qacq::plot::significantFor(dt, m_view.span() / 1000.0, 3, 9)))
+                         : tr("%1 trames").arg(std::llround(dt));
+        info[QStringLiteral("inverse")] =
+            m_rate > 0.0 && std::abs(dt) > 0.0 ? text(qacq::plot::formatQuantity(1.0 / std::abs(dt), "Hz", 4)) : QString();
+        QVariantList rows;
+        for (int c = 0; c < static_cast<int>(m_channels.size()); ++c)
+        {
+            if (isHidden(c)) continue;
+            const Channel &ch = m_channels[static_cast<std::size_t>(c)];
+            const auto at = [&](double t) {
+                const std::ptrdiff_t i = qacq::plot::nearestSample((t - m_timeOrigin) * rate - ch.frameOffset, ch.values.size());
+                return i < 0 ? std::numeric_limits<double>::quiet_NaN() : ch.values[static_cast<std::size_t>(i)];
+            };
+            const double va = at(m_cursorA), vb = at(m_cursorB);
+            const std::string unit = utf8(ch.unit);
+            const double scale = std::max(std::abs(va), std::abs(vb));
+            const int vd = qacq::plot::significantFor(scale, std::max(scale, 1e-300) * 1e-4, 4, 8);
+            // The samples between A and B (both included).
+            const auto n = static_cast<double>(ch.values.size());
+            const double first = std::clamp(std::ceil((lo - m_timeOrigin) * rate - ch.frameOffset - 1e-9), 0.0, n);
+            const double last = std::clamp(std::floor((hi - m_timeOrigin) * rate - ch.frameOffset + 1e-9) + 1.0, 0.0, n);
+            const auto span = last > first ? ch.values.subspan(static_cast<std::size_t>(first), static_cast<std::size_t>(last - first))
+                                           : std::span<const double>();
+            const qacq::analysis::SpanStatistics st = qacq::analysis::spanStatistics(span);
+            QString stats;
+            if (st.samples > 0)
+            {
+                stats = tr("min %1 · max %2 · moy %3 · eff %4 · c-c %5")
+                            .arg(text(qacq::plot::formatQuantity(st.minimum, unit, 4)),
+                                 text(qacq::plot::formatQuantity(st.maximum, unit, 4)),
+                                 text(qacq::plot::formatQuantity(st.mean, unit, 4)),
+                                 text(qacq::plot::formatQuantity(st.rms, unit, 4)),
+                                 text(qacq::plot::formatQuantity(st.peakToPeak, unit, 4)));
+                // Area between A and B (trapezoids), in unit·s.
+                if (m_rate > 0.0 && span.size() >= 2)
+                    stats += tr(" · ∫ %1").arg(text(qacq::plot::formatQuantity(
+                        qacq::analysis::integral(span, m_rate),
+                        qacq::analysis::operationUnit(qacq::analysis::Operation::Integral, unit), 4)));
+                stats += tr(" (%1 éch.)").arg(qacq::app::formatCount(static_cast<qint64>(st.samples)));
+            }
+            rows << QVariantMap{{QStringLiteral("name"), ch.name},
+                                {QStringLiteral("channel"), c},
+                                {QStringLiteral("a"), text(qacq::plot::formatQuantity(va, unit, vd))},
+                                {QStringLiteral("b"), text(qacq::plot::formatQuantity(vb, unit, vd))},
+                                {QStringLiteral("delta"), text(qacq::plot::formatQuantity(vb - va, unit, vd))},
+                                {QStringLiteral("stats"), stats}};
+        }
+        info[QStringLiteral("rows")] = rows;
+    }
+    m_cursorInfo = info;
+    emit cursorsChanged();
+}
+
+void SignalPlot::drawCursors(QPainter &p, const std::vector<Lane> &lanes) const
+{
+    if (!m_cursorsVisible || !cursorsAvailable() || lanes.empty()) return;
+    const double top = lanes.front().rect.top(), bottom = lanes.back().rect.bottom();
+    const QRectF area = plotRect();
+    const double xa = xOf(m_cursorA), xb = xOf(m_cursorB);
+    p.save();
+    p.setClipRect(QRectF(area.left(), area.top() - 20.0, area.width(), area.height() + 20.0));
+    p.setRenderHint(QPainter::Antialiasing, false);
+    const double x0 = std::clamp(std::min(xa, xb), area.left(), area.right());
+    const double x1 = std::clamp(std::max(xa, xb), area.left(), area.right());
+    if (x1 > x0) p.fillRect(QRectF(x0, top, x1 - x0, bottom - top), faded(m_accent, 0.07));
+    const QColor colours[2] = {m_accent, QColor(229, 115, 115)};
+    const double xs[2] = {xa, xb};
+    const QString names[2] = {QStringLiteral("A"), QStringLiteral("B")};
+    const QFontMetricsF metrics(p.font());
+    for (int k = 0; k < 2; ++k)
+    {
+        if (xs[k] < area.left() - 1.0 || xs[k] > area.right() + 1.0) continue;
+        const double x = std::round(xs[k]) + 0.5;
+        p.setPen(QPen(colours[k], 1.0, Qt::DashLine));
+        p.drawLine(QPointF(x, top), QPointF(x, bottom));
+        const double w = metrics.horizontalAdvance(names[k]) + 8.0;
+        const QRectF tag(x - w / 2.0, top - metrics.height() - 2.0, w, metrics.height() + 2.0);
+        p.setPen(Qt::NoPen);
+        p.setBrush(colours[k]);
+        p.drawRoundedRect(tag, 3.0, 3.0);
+        p.setBrush(Qt::NoBrush);
+        p.setPen(m_background);
+        p.drawText(tag, Qt::AlignCenter, names[k]);
+    }
+    p.restore();
+}
+
 void SignalPlot::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry)
 {
     QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
@@ -849,37 +1474,39 @@ void SignalPlot::geometryChange(const QRectF &newGeometry, const QRectF &oldGeom
 
 void SignalPlot::wheelEvent(QWheelEvent *event)
 {
-    const double steps = event->angleDelta().y() / 120.0;
-    if (steps == 0.0 || m_channels.empty())
+    const QPoint delta = event->angleDelta();
+    if (m_channels.empty() || (delta.x() == 0 && delta.y() == 0))
     {
         event->ignore();
         return;
     }
+    // Sideways (touchpad swipe, tilting wheel): slide in time.
+    if (std::abs(delta.x()) > std::abs(delta.y()))
+    {
+        event->accept();
+        if (m_live && !m_showingCapture) return;
+        rememberView(true);
+        scrollBy(-0.1 * delta.x() / 120.0);
+        return;
+    }
+    const double steps = delta.y() / 120.0;
     event->accept();
     const double factor = std::pow(0.8, steps); // away from the user: zoom in
     const QPointF at = event->position();
-    if (event->modifiers() & Qt::ControlModifier)
+    int laneIndex = -1;
+    const Place place = placeAt(at, &laneIndex);
+    const bool onScale = place == Place::LeftScale || place == Place::RightScale;
+    if ((event->modifiers() & Qt::ControlModifier) || onScale)
     {
-        const int laneIndex = laneAt(at.y());
         if (laneIndex < 0) return;
         const Lane &lane = m_lastLanes[static_cast<std::size_t>(laneIndex)];
-        const qacq::plot::YMap map{lane.range.low, lane.range.high, lane.rect.top(), lane.rect.height(), false};
-        const Range r = qacq::plot::zoomRange(lane.range, factor, map.toValue(at.y()));
-        if (!r.valid()) return;
-        if (m_stacked)
-        {
-            for (int c : lane.channels)
-            {
-                m_channels[static_cast<std::size_t>(c)].range = r;
-                m_channels[static_cast<std::size_t>(c)].automatic = false;
-            }
-        }
-        else
-        {
-            m_overlayRange = r;
-            m_overlayAutomatic = false;
-        }
-        update();
+        // Two scales: the one under the pointer, or with Ctrl on the plot, the right half of the lane for
+        // the one on the right.
+        const bool right = !lane.rightChannels.empty() &&
+                           (onScale ? place == Place::RightScale : at.x() > lane.rect.center().x());
+        const Range current = scaleOf(lane, right);
+        const qacq::plot::YMap map{current.low, current.high, lane.rect.top(), lane.rect.height(), false};
+        setLaneScale(lane, right, qacq::plot::zoomRange(current, factor, map.toValue(at.y())));
         return;
     }
     if (m_live && !m_showingCapture)
@@ -887,13 +1514,87 @@ void SignalPlot::wheelEvent(QWheelEvent *event)
         setRollSeconds(m_rollSeconds * factor);
         return;
     }
+    rememberView(true);
     if (event->modifiers() & Qt::ShiftModifier)
     {
-        const double shift = -0.1 * steps * m_view.span();
-        setViewRange({m_view.low + shift, m_view.high + shift});
+        scrollBy(-0.1 * steps);
         return;
     }
     setViewRange(qacq::plot::zoomRange(m_view, factor, timeAt(at.x())));
+}
+
+void SignalPlot::keyPressEvent(QKeyEvent *event)
+{
+    const bool shift = event->modifiers() & Qt::ShiftModifier;
+    // ↑ ↓: the values (also while the acquisition rolls); up shows higher values.
+    if (!m_channels.empty() && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down))
+    {
+        slideValues((event->key() == Qt::Key_Up ? 1.0 : -1.0) * (shift ? 0.5 : 0.1));
+        event->accept();
+        return;
+    }
+    if (m_channels.empty() || (m_live && !m_showingCapture))
+    {
+        event->ignore();
+        return;
+    }
+    switch (event->key())
+    {
+    case Qt::Key_Left: rememberView(true); scrollBy(shift ? -0.5 : -0.1); break;
+    case Qt::Key_Right: rememberView(true); scrollBy(shift ? 0.5 : 0.1); break;
+    case Qt::Key_Home: rememberView(); setViewRange({m_limits.low, m_limits.low + m_view.span()}); break;
+    case Qt::Key_End: rememberView(); setViewRange({m_limits.high - m_view.span(), m_limits.high}); break;
+    case Qt::Key_Plus:
+    case Qt::Key_Equal: zoomTime(0.8); break;
+    case Qt::Key_Minus: zoomTime(1.25); break;
+    default: event->ignore(); return;
+    }
+    event->accept();
+}
+
+double SignalPlot::viewStart() const
+{
+    if (!zoomed() || !(m_limits.span() > 0.0)) return 0.0;
+    return std::clamp((m_view.low - m_limits.low) / m_limits.span(), 0.0, 1.0);
+}
+
+double SignalPlot::viewSize() const
+{
+    if (!zoomed() || !(m_limits.span() > 0.0)) return 1.0;
+    return std::clamp(m_view.span() / m_limits.span(), 0.0, 1.0);
+}
+
+void SignalPlot::scrollTo(double start)
+{
+    if (!std::isfinite(start) || !m_limits.valid()) return;
+    rememberView(true);
+    const double low = m_limits.low + start * m_limits.span();
+    setViewRange({low, low + m_view.span()});
+}
+
+void SignalPlot::scrollBy(double viewFraction)
+{
+    if (!std::isfinite(viewFraction)) return;
+    rememberView(true);
+    const double shift = viewFraction * m_view.span();
+    setViewRange({m_view.low + shift, m_view.high + shift});
+}
+
+qint64 SignalPlot::cursorFirstFrame() const
+{
+    if (!m_signal || m_live || !(m_rate > 0.0) || !m_cursorsVisible) return 0;
+    const auto frames = static_cast<double>(m_signal->frameCount());
+    const double lo = std::min(m_cursorA, m_cursorB);
+    return static_cast<qint64>(std::clamp(std::ceil((lo - m_timeOrigin) * m_rate - 1e-9), 0.0, frames));
+}
+
+qint64 SignalPlot::cursorFrameCount() const
+{
+    if (!m_signal || m_live || !(m_rate > 0.0) || !m_cursorsVisible) return -1;
+    const auto frames = static_cast<double>(m_signal->frameCount());
+    const double hi = std::max(m_cursorA, m_cursorB);
+    const double end = std::clamp(std::floor((hi - m_timeOrigin) * m_rate + 1e-9) + 1.0, 0.0, frames);
+    return std::max<qint64>(0, static_cast<qint64>(end) - cursorFirstFrame());
 }
 
 void SignalPlot::mousePressEvent(QMouseEvent *event)
@@ -903,23 +1604,84 @@ void SignalPlot::mousePressEvent(QMouseEvent *event)
     m_pressAt = event->position();
     m_pointer = m_pressAt;
     m_pressView = m_view;
-    if (event->button() == Qt::RightButton && !(m_live && !m_showingCapture)) m_selecting = true;
-    else if (event->button() == Qt::LeftButton && !(m_live && !m_showingCapture)) m_panning = true;
     event->accept();
+    m_rightPress = event->button() == Qt::RightButton;
+    const bool rolling = m_live && !m_showingCapture;
+    int laneIndex = -1;
+    const Place place = placeAt(m_pressAt, &laneIndex);
+    const bool onScale = place == Place::LeftScale || place == Place::RightScale;
+    if (m_cursorsVisible && cursorsAvailable() && event->button() == Qt::LeftButton && !onScale)
+    {
+        // Ctrl + click places A, Shift + click B; a press on a cursor drags it.
+        const Range limits = m_limits.valid() ? m_limits : m_view;
+        const double t = std::clamp(timeAt(m_pressAt.x()), limits.low, limits.high);
+        if (event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+        {
+            (event->modifiers() & Qt::ControlModifier ? m_cursorA : m_cursorB) = t;
+            m_dragging = event->modifiers() & Qt::ControlModifier ? 1 : 2;
+            refreshCursors();
+            update();
+            return;
+        }
+        m_dragging = cursorNear(m_pressAt.x());
+        if (m_dragging != 0)
+        {
+            update();
+            return;
+        }
+    }
+    if (event->button() == Qt::RightButton && !rolling && (place == Place::Plot || place == Place::TimeAxis))
+        m_selecting = true;
+    else if (event->button() == Qt::LeftButton && place != Place::None && !(rolling && place == Place::TimeAxis))
+    {
+        // The plot: the time, the values or both, as the drag goes (qacq::plot::dragAxes); a scale: its
+        // values; the time axis: the time. While the acquisition rolls, only the values move.
+        m_grab = place;
+        m_grabLane = laneIndex;
+        m_dragAxes = place == Place::Plot       ? qacq::plot::DragAxes::Undecided
+                     : place == Place::TimeAxis ? qacq::plot::DragAxes::Horizontal
+                                                : qacq::plot::DragAxes::Vertical;
+        if (laneIndex >= 0)
+        {
+            const Lane &lane = m_lastLanes[static_cast<std::size_t>(laneIndex)];
+            m_pressRange = scaleOf(lane, false);
+            m_pressRightRange = scaleOf(lane, true);
+        }
+        // A step of the history, taken back at the release if the time did not move.
+        m_pressRemembered = !rolling && m_view.valid() &&
+                            (m_history.empty() || m_history.back().low != m_view.low || m_history.back().high != m_view.high);
+        if (!rolling) rememberView();
+        m_panning = true;
+    }
     update();
 }
 
 void SignalPlot::mouseMoveEvent(QMouseEvent *event)
 {
     m_pointer = event->position();
-    if (m_panning)
+    if (m_dragging != 0)
     {
-        const QRectF area = plotRect();
-        if (area.width() > 0.0)
+        const Range limits = m_limits.valid() ? m_limits : m_view;
+        (m_dragging == 1 ? m_cursorA : m_cursorB) = std::clamp(timeAt(m_pointer.x()), limits.low, limits.high);
+        refreshCursors();
+    }
+    else if (m_panning)
+    {
+        using qacq::plot::DragAxes;
+        const double dx = m_pointer.x() - m_pressAt.x(), dy = m_pointer.y() - m_pressAt.y();
+        if (m_dragAxes == DragAxes::Undecided)
         {
-            const double dt = -(m_pointer.x() - m_pressAt.x()) / area.width() * m_pressView.span();
+            m_dragAxes = qacq::plot::dragAxes(dx, dy);
+            if (m_dragAxes != DragAxes::Undecided) setCursor(QCursor(Qt::ClosedHandCursor));
+        }
+        const bool rolling = m_live && !m_showingCapture;
+        const QRectF area = plotRect();
+        if (!rolling && (m_dragAxes == DragAxes::Horizontal || m_dragAxes == DragAxes::Both) && area.width() > 0.0)
+        {
+            const double dt = -dx / area.width() * m_pressView.span();
             setViewRange({m_pressView.low + dt, m_pressView.high + dt});
         }
+        if (m_dragAxes == DragAxes::Vertical || m_dragAxes == DragAxes::Both) dragValues(dy);
     }
     update();
 }
@@ -927,20 +1689,45 @@ void SignalPlot::mouseMoveEvent(QMouseEvent *event)
 void SignalPlot::mouseReleaseEvent(QMouseEvent *event)
 {
     m_pointer = event->position();
+    if (m_rightPress && std::abs(m_pointer.x() - m_pressAt.x()) <= 4.0 && std::abs(m_pointer.y() - m_pressAt.y()) <= 4.0)
+        emit contextMenuRequested(m_pointer.x(), m_pointer.y());
+    m_rightPress = false;
     if (m_selecting && std::abs(m_pointer.x() - m_pressAt.x()) > 4.0)
     {
         const double t0 = timeAt(std::min(m_pressAt.x(), m_pointer.x()));
         const double t1 = timeAt(std::max(m_pressAt.x(), m_pointer.x()));
+        rememberView();
         setViewRange({t0, t1});
+    }
+    // A click, or a drag of the values only, leaves no step to go back to.
+    if (m_panning && m_pressRemembered && !m_history.empty() && m_view.low == m_pressView.low &&
+        m_view.high == m_pressView.high && m_history.back().low == m_view.low && m_history.back().high == m_view.high)
+    {
+        m_history.pop_back();
+        emit viewChanged();
     }
     m_selecting = false;
     m_panning = false;
+    m_pressRemembered = false;
+    m_grab = Place::None;
+    m_grabLane = -1;
+    m_dragAxes = qacq::plot::DragAxes::Undecided;
+    m_dragging = 0;
+    updateCursorShape();
     update();
 }
 
 void SignalPlot::mouseDoubleClickEvent(QMouseEvent *event)
 {
     event->accept();
+    // On a scale: that one automatic again; elsewhere everything on screen.
+    int laneIndex = -1;
+    const Place place = placeAt(event->position(), &laneIndex);
+    if ((place == Place::LeftScale || place == Place::RightScale) && laneIndex >= 0)
+    {
+        autoScaleLane(m_lastLanes[static_cast<std::size_t>(laneIndex)], place == Place::RightScale);
+        return;
+    }
     showAll();
 }
 
@@ -948,6 +1735,7 @@ void SignalPlot::hoverMoveEvent(QHoverEvent *event)
 {
     m_pointer = event->position();
     m_pointerInside = true;
+    updateCursorShape();
     update();
 }
 

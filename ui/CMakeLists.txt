@@ -32,9 +32,21 @@ qt_add_qml_module(QTacquisitionApp
         qml/StatusStrip.qml
         qml/FirmwareDialog.qml
         qml/ImportDialog.qml
+        qml/AnalysisView.qml
+        qml/AnalysisPanel.qml
+        qml/CursorReadout.qml
+        qml/ImageActions.qml
+        qml/ViewScrollBar.qml
+        qml/CurveDialog.qml
+        qml/CurveChips.qml
+        qml/PlotMenu.qml
     SOURCES
         signal_plot.h
         signal_plot.cpp
+        spectrum_plot.h
+        spectrum_plot.cpp
+        image_tools.h
+        image_tools.cpp
 )
 target_link_libraries(QTacquisitionApp PRIVATE qacq_app Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Qml)
 # Qt's generated QML-cache loader trips GCC's -Wnull-dereference inside qhash.h (inlined Qt code):

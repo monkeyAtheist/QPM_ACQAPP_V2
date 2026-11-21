@@ -87,7 +87,20 @@ struct Trace
     bool empty() const noexcept { return !(minimum <= maximum); }
 };
 
-Trace buildTrace(const ChannelView &channel, const XWindow &window);
+// What a column holding many samples shows: its extremes (a time signal: no peak lost, no dip either), or
+// its highest value only (a spectrum, as an analyser's peak detector: the lines between the peaks of a
+// spectrum are not filled down to its deepest notch).
+enum class Columns
+{
+    Extremes,
+    Peaks
+};
+Trace buildTrace(const ChannelView &channel, const XWindow &window, Columns columns = Columns::Extremes);
+// The same on an axis that is not linear in frames (frequencies on a log scale): `edges` holds the frame
+// position of each pixel boundary, increasing, width + 1 values (column c spans edges[c] to edges[c + 1]).
+// A column holding more than two samples becomes a vertical stroke at its centre (first, extremes, last);
+// otherwise its samples sit at their own place. The result is always points (Trace::dense false).
+Trace buildTraceEdges(const ChannelView &channel, std::span<const double> edges, Columns columns = Columns::Extremes);
 
 // Value axis of a lane: `high` at pixel `top`, `low` at `top + height`; log10 scale if asked (values
 // <= 0 are then not drawn).
@@ -126,6 +139,21 @@ Range steadyRange(const Range &current, double minimum, double maximum, double s
 Range zoomRange(const Range &range, double factor, double anchor);
 // Kept inside `limits` (moved, then cut) and at least `minimumSpan` wide.
 Range clampRange(const Range &range, const Range &limits, double minimumSpan);
+// The range moved by a fraction of its span (positive: towards higher values), same width.
+Range shiftRange(const Range &range, double fraction) noexcept;
+
+// What a drag of a plot moves, decided once the pointer has gone `threshold` pixels from where it was
+// pressed: mostly sideways, the horizontal axis only; mostly up or down, the vertical one only; in between
+// (from about 27° to 63° from the horizontal), both. A scroll in time that wanders a little up or down
+// leaves the scale of the values alone.
+enum class DragAxes
+{
+    Undecided,
+    Horizontal,
+    Vertical,
+    Both
+};
+DragAxes dragAxes(double dx, double dy, double threshold = 6.0) noexcept;
 // The nearest sample to a frame position, clamped to [0, count); -1 when count is 0.
 std::ptrdiff_t nearestSample(double frame, std::size_t count) noexcept;
 } // namespace qacq::plot

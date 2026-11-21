@@ -28,6 +28,19 @@ double mean(std::span<const double> x) noexcept
     return x.empty() ? 0.0 : sum / static_cast<double>(x.size());
 }
 
+// Mean of x weighted by the window (plain mean when `weighted` is false or the window sums to zero).
+double offsetOf(std::span<const double> x, std::span<const double> w, bool weighted) noexcept
+{
+    if (!weighted || w.size() < x.size()) return mean(x);
+    double sum = 0.0, weights = 0.0;
+    for (std::size_t i = 0; i < x.size(); ++i)
+    {
+        sum += w[i] * x[i];
+        weights += w[i];
+    }
+    return weights != 0.0 ? sum / weights : mean(x);
+}
+
 std::size_t overlapSamples(double overlap, std::size_t segment) noexcept
 {
     const double clamped = std::clamp(overlap, 0.0, 0.95);
@@ -37,10 +50,10 @@ std::size_t overlapSamples(double overlap, std::size_t segment) noexcept
 
 // Windowed one-sided periodogram of one segment, accumulated into psd (unit^2/Hz).
 void accumulatePsd(std::span<const double> segment, std::span<const double> window, bool removeMean,
-                   const FftPlan &plan, double fs, double windowSquares, std::vector<Complex> &work,
-                   std::vector<double> &psd)
+                   bool windowedMean, const FftPlan &plan, double fs, double windowSquares,
+                   std::vector<Complex> &work, std::vector<double> &psd)
 {
-    const double offset = removeMean ? mean(segment) : 0.0;
+    const double offset = removeMean ? offsetOf(segment, window, windowedMean) : 0.0;
     const std::size_t nfft = plan.size();
     std::fill(work.begin(), work.end(), Complex(0.0, 0.0));
     for (std::size_t i = 0; i < segment.size(); ++i) work[i] = Complex((segment[i] - offset) * window[i], 0.0);
@@ -49,6 +62,11 @@ void accumulatePsd(std::span<const double> segment, std::span<const double> wind
     for (std::size_t k = 0; k < psd.size(); ++k)
         psd[k] += std::norm(work[k]) * scale * (doubledBin(k, nfft) ? 2.0 : 1.0);
 }
+std::size_t fftLength(std::size_t n, const SpectrumOptions &options) noexcept
+{
+    return options.fftSize >= n ? options.fftSize : n * std::max<std::size_t>(1, options.zeroPadFactor);
+}
+
 } // namespace
 
 Spectrum spectrum(std::span<const double> x, double fs, const SpectrumOptions &options)
@@ -57,7 +75,7 @@ Spectrum spectrum(std::span<const double> x, double fs, const SpectrumOptions &o
     if (x.size() < 2 || !validRate(fs)) return result;
 
     const std::size_t n = x.size();
-    const std::size_t nfft = n * std::max<std::size_t>(1, options.zeroPadFactor);
+    const std::size_t nfft = fftLength(n, options);
     const std::vector<double> w = makeWindow(options.window, n, WindowSymmetry::Periodic, options.kaiserBeta);
     double sum = 0.0, squares = 0.0;
     for (double v : w)
@@ -65,7 +83,7 @@ Spectrum spectrum(std::span<const double> x, double fs, const SpectrumOptions &o
         sum += v;
         squares += v * v;
     }
-    const double offset = options.removeMean ? mean(x) : 0.0;
+    const double offset = options.removeMean ? offsetOf(x, w, options.windowedMean) : 0.0;
 
     std::vector<Complex> data(nfft, Complex(0.0, 0.0));
     for (std::size_t i = 0; i < n; ++i) data[i] = Complex((x[i] - offset) * w[i], 0.0);
@@ -100,7 +118,7 @@ ComplexSpectrum complexSpectrum(std::span<const double> inPhase, std::span<const
     const std::size_t n = std::min(inPhase.size(), quadrature.size());
     if (n < 2 || !validRate(fs)) return result;
 
-    const std::size_t nfft = n * std::max<std::size_t>(1, options.zeroPadFactor);
+    const std::size_t nfft = fftLength(n, options);
     const std::vector<double> w = makeWindow(options.window, n, WindowSymmetry::Periodic, options.kaiserBeta);
     double sum = 0.0, squares = 0.0;
     for (double v : w)
@@ -111,8 +129,8 @@ ComplexSpectrum complexSpectrum(std::span<const double> inPhase, std::span<const
     double meanI = 0.0, meanQ = 0.0;
     if (options.removeMean)
     {
-        meanI = mean(inPhase.first(n));
-        meanQ = mean(quadrature.first(n));
+        meanI = offsetOf(inPhase.first(n), w, options.windowedMean);
+        meanQ = offsetOf(quadrature.first(n), w, options.windowedMean);
     }
     std::vector<Complex> data(nfft, Complex(0.0, 0.0));
     for (std::size_t i = 0; i < n; ++i) data[i] = Complex(inPhase[i] - meanI, quadrature[i] - meanQ) * w[i];
@@ -162,7 +180,8 @@ WelchResult welch(std::span<const double> x, double fs, const WelchOptions &opti
     std::size_t count = 0;
     for (std::size_t start = 0; start + segment <= x.size(); start += hop)
     {
-        accumulatePsd(x.subspan(start, segment), w, options.removeSegmentMean, plan, fs, squares, work, psd);
+        accumulatePsd(x.subspan(start, segment), w, options.removeSegmentMean, options.windowedMean, plan, fs, squares,
+                      work, psd);
         ++count;
     }
     for (double &v : psd) v /= static_cast<double>(count);
@@ -206,7 +225,7 @@ Spectrogram spectrogram(std::span<const double> x, double fs, const SpectrogramO
     for (std::size_t start = 0; start + segment <= x.size(); start += hop)
     {
         const auto part = x.subspan(start, segment);
-        const double offset = options.removeSegmentMean ? mean(part) : 0.0;
+        const double offset = options.removeSegmentMean ? offsetOf(part, w, options.windowedMean) : 0.0;
         for (std::size_t i = 0; i < segment; ++i) work[i] = Complex((part[i] - offset) * w[i], 0.0);
         plan.forward(work);
         for (std::size_t k = 0; k < bins; ++k)

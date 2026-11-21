@@ -171,7 +171,7 @@ bool MinMaxPyramid::extremes(std::span<const double> values, std::size_t first, 
     return true;
 }
 
-Trace buildTrace(const ChannelView &channel, const XWindow &window)
+Trace buildTrace(const ChannelView &channel, const XWindow &window, Columns columns)
 {
     Trace trace;
     const std::span<const double> values = channel.values;
@@ -207,15 +207,16 @@ Trace buildTrace(const ChannelView &channel, const XWindow &window)
                 previous = false;
                 continue;
             }
-            column.minimum = mn;
+            const bool peaks = columns == Columns::Peaks;
+            column.minimum = peaks ? mx : mn;
             column.maximum = mx;
-            column.first = firstNumber(values, a, b, mn);
-            column.last = lastNumber(values, a, b, mx);
+            column.first = peaks ? mx : firstNumber(values, a, b, mn);
+            column.last = peaks ? mx : lastNumber(values, a, b, mx);
             column.valid = true;
             column.joined = previous && !isBreak(channel.breaks, a) && std::isfinite(values[a]) && a > 0 &&
                             std::isfinite(values[a - 1]);
             previous = true;
-            include(trace, mn, mx);
+            include(trace, column.minimum, mx);
         }
         return trace;
     }
@@ -238,6 +239,78 @@ Trace buildTrace(const ChannelView &channel, const XWindow &window)
         previous = true;
         if (x >= -0.5 && x <= static_cast<double>(width) + 0.5) include(trace, v, v);
     }
+    return trace;
+}
+
+Trace buildTraceEdges(const ChannelView &channel, std::span<const double> edges, Columns columns)
+{
+    Trace trace;
+    const std::span<const double> values = channel.values;
+    const std::size_t n = values.size();
+    if (edges.size() < 2 || n == 0) return trace;
+    for (double e : edges)
+    {
+        if (!std::isfinite(e)) return trace;
+    }
+    const std::size_t width = edges.size() - 1;
+    const auto index = [&](double frame) { return frame - channel.firstFrame; };
+    // Pixel position of sample i, from the scale of column c (outside the view: the first or last column).
+    const auto xOf = [&](std::size_t i, std::size_t c) {
+        const double span = edges[c + 1] - edges[c];
+        const double frame = channel.firstFrame + static_cast<double>(i);
+        return static_cast<double>(c) + (span > 0.0 ? (frame - edges[c]) / span : 0.5);
+    };
+    bool previous = false;
+    const auto push = [&](std::size_t i, double x, bool inView) {
+        const double v = values[i];
+        if (!std::isfinite(v))
+        {
+            previous = false;
+            return;
+        }
+        trace.points.push_back({x, v, previous && !isBreak(channel.breaks, i)});
+        previous = true;
+        if (inView) include(trace, v, v);
+    };
+
+    const std::size_t start = clampIndex(std::ceil(index(edges[0])), n);
+    if (start > 0) push(start - 1, xOf(start - 1, 0), false); // the line enters the view
+    for (std::size_t c = 0; c < width; ++c)
+    {
+        const std::size_t a = clampIndex(std::ceil(index(edges[c])), n);
+        const std::size_t b = clampIndex(std::ceil(index(edges[c + 1])), n);
+        if (a >= b) continue;
+        if (b - a <= 2)
+        {
+            for (std::size_t i = a; i < b; ++i) push(i, xOf(i, c), true);
+            continue;
+        }
+        double mn = kInfinity, mx = -kInfinity;
+        const bool found = channel.pyramid ? channel.pyramid->extremes(values, a, b, mn, mx)
+                                           : (scanRaw(values, a, b, mn, mx), mn <= mx);
+        if (!found)
+        {
+            previous = false;
+            continue;
+        }
+        const double x = static_cast<double>(c) + 0.5;
+        const bool joined = previous && !isBreak(channel.breaks, a) && std::isfinite(values[a]);
+        if (columns == Columns::Peaks)
+        {
+            trace.points.push_back({x, mx, joined});
+            previous = true;
+            include(trace, mx, mx);
+            continue;
+        }
+        trace.points.push_back({x, firstNumber(values, a, b, mn), joined});
+        trace.points.push_back({x, mn, true});
+        trace.points.push_back({x, mx, true});
+        trace.points.push_back({x, lastNumber(values, a, b, mx), true});
+        previous = true;
+        include(trace, mn, mx);
+    }
+    const std::size_t end = clampIndex(std::ceil(index(edges[width])), n);
+    if (end < n && end > 0) push(end, xOf(end, width - 1), false); // and leaves it
     return trace;
 }
 
@@ -367,6 +440,22 @@ Range clampRange(const Range &range, const Range &limits, double minimumSpan)
         low = std::clamp(low, limits.low, limits.high - span);
     }
     return {low, low + span};
+}
+
+Range shiftRange(const Range &range, double fraction) noexcept
+{
+    if (!std::isfinite(fraction)) return range;
+    const double shift = fraction * range.span();
+    return {range.low + shift, range.high + shift};
+}
+
+DragAxes dragAxes(double dx, double dy, double threshold) noexcept
+{
+    const double ax = std::abs(dx), ay = std::abs(dy);
+    if (!(std::hypot(ax, ay) >= threshold)) return DragAxes::Undecided; // also NaN
+    if (ay <= 0.5 * ax) return DragAxes::Horizontal;
+    if (ax <= 0.5 * ay) return DragAxes::Vertical;
+    return DragAxes::Both;
 }
 
 std::ptrdiff_t nearestSample(double frame, std::size_t count) noexcept

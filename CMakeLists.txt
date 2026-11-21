@@ -27,6 +27,7 @@ add_subdirectory(io)
 add_subdirectory(model)
 add_subdirectory(acquisition)
 add_subdirectory(plot)
+add_subdirectory(analysis)
 
 # Layer 2 - application logic (QtCore, phase 1) and layer 3 - Qt Quick interface (phase 3).
 # Without Qt (CI runners, core-only work) the core libraries and their tests still build.

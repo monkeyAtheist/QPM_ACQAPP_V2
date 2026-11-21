@@ -85,6 +85,12 @@ public:
     Q_INVOKABLE bool setChannel(qint64 id, int channel, const QString &name, const QString &unit);
     // Dragged values (a spin box held down) merge into one undo step until endMerge().
     Q_INVOKABLE bool setTiming(qint64 id, double sampleRateHz, double startSeconds);
+    // A curve computed from a signal (qacq/analysis/calculus.h), added just after it as one step of the
+    // history. Options: operation ("integral", "derivative", "cycleMean", "cycleRms", "cycleFrequency"),
+    // firstFrame, frameCount (-1: up to the end), channels (indices; empty: all), keepSource (bool, the
+    // source channels first), removeMean (bool, integral). Returns the id of the new signal, 0 on failure
+    // (errorOccurred says why).
+    Q_INVOKABLE qint64 deriveSignal(qint64 sourceId, const QVariantMap &options);
     Q_INVOKABLE void endMerge();
     Q_INVOKABLE int rowOf(qint64 id) const;
     Q_INVOKABLE qint64 idAt(int row) const;

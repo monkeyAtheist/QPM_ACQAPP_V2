@@ -16,6 +16,8 @@ Item {
     signal importRequested()
     signal exportRequested()
     signal renameRequested()
+    signal infoMessage(string text)
+    signal errorMessage(string text)
     // The count is read so that this follows the list (a signal deleted, an undo).
     readonly property bool hasSignal: (session.signalList.count, signalId > 0 && session.signalList.rowOf(signalId) >= 0)
 
@@ -78,22 +80,39 @@ Item {
                 enabled: plot.hasData && plot.zoomed
                 onClicked: plot.zoomTime(2)
             }
+            RibbonButton {
+                glyph: "back"
+                text: qsTr("Précédente")
+                enabled: plot.canGoBack
+                tip: qsTr("Revenir à la vue d'avant (zoom, déplacement, tout voir)")
+                onClicked: plot.goBack()
+            }
+        }
+        RibbonGroup {
+            title: qsTr("Mesurer")
+            RibbonButton {
+                glyph: "cursors"
+                text: qsTr("Curseurs")
+                checked: plot.cursorsVisible
+                enabled: plot.hasData
+                tip: qsTr("Deux curseurs A et B : Δt, 1/Δt, valeurs sous chacun, statistiques et intégrale entre eux")
+                onClicked: plot.cursorsVisible = !plot.cursorsVisible
+            }
+        }
+        ImageActions {
+            target: plotArea
+            onDone: (m) => root.infoMessage(m)
+            onFailed: (m) => root.errorMessage(m)
         }
         RibbonGroup {
             title: qsTr("Voies")
             RibbonButton {
-                glyph: "stack"
-                text: qsTr("Séparées")
-                checked: plot.stacked
-                tip: qsTr("Une bande par voie, chacune à son échelle")
-                onClicked: plot.stacked = true
-            }
-            RibbonButton {
                 glyph: "overlay"
                 text: qsTr("Superposées")
                 checked: !plot.stacked
-                tip: qsTr("Toutes les voies sur un même axe")
-                onClicked: plot.stacked = false
+                enabled: plot.hasData
+                tip: qsTr("Les voies sur un même tracé (une échelle par unité, à gauche et à droite), ou une bande chacune ; clic droit sur le tracé : choisir les voies")
+                onClicked: plot.stacked = !plot.stacked
             }
         }
     }
@@ -102,11 +121,19 @@ Item {
         anchors.fill: parent
         color: Theme.canvas
     }
-    SignalPlot {
-        id: plot
+    // What the "Image" tools take: the plot and its readouts, on the colour of the canvas.
+    Rectangle {
+        id: plotArea
         anchors.fill: parent
         anchors.leftMargin: root.leftFolded ? 22 : 0
         anchors.rightMargin: root.rightFolded ? 22 : 0
+        color: Theme.canvas
+    }
+    SignalPlot {
+        id: plot
+        parent: plotArea
+        anchors.fill: parent
+        anchors.bottomMargin: scrollBar.height
         session: root.session
         signalId: root.signalId
         backgroundColor: Theme.canvas
@@ -119,6 +146,28 @@ Item {
         emptyText: root.session.signalList.count === 0
                    ? qsTr("La session est vide : importez un fichier CSV ou WAV (Ctrl+I), ou passez au module Acquisition.")
                    : qsTr("Choisissez un signal dans la liste de gauche.")
+        onContextMenuRequested: (x, y) => plotMenu.openAt(plot, x, y)
+    }
+    ViewScrollBar {
+        id: scrollBar
+        parent: plotArea
+        view: plot
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: 62
+        anchors.rightMargin: 14
+        anchors.bottomMargin: 2
+        height: implicitHeight
+    }
+    CursorReadout {
+        parent: plotArea
+        view: plot
+    }
+    PlotMenu {
+        id: plotMenu
+        view: plot
+        mode: "channels"
     }
     PlotToolbar {
         view: plot
