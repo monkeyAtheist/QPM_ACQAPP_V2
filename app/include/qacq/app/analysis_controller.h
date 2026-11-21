@@ -1,5 +1,5 @@
 #pragma once
-// The "Analyse" module: the spectrum and the measurements of a zone of a signal of the session.
+// The analysis of the module "Signaux": the spectra and the measurements of a zone of a signal of the session.
 //
 // The view says which signal and which zone (the part of it on screen) and the settings; the computation
 // (qacq::analysis::analyse) runs on a thread of its own, one at a time: a request that comes while one

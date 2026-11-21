@@ -8,6 +8,7 @@
 #include "qacq/model/signal.h"
 #include "qacq/model/wav.h"
 
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cstdio>
@@ -590,6 +591,49 @@ TEST_CASE("CSV: spreadsheet files, comments, irregular times, bad lines", "[csv]
     CHECK(parseColumnTitle("Température (°C)").unit == "°C");
     CHECK(parseColumnTitle("x").unit.empty());
     CHECK(parseColumnTitle("(V)").name == "(V)");
+}
+
+TEST_CASE("CSV and WAV: a long import says how far it is, and stops when asked", "[csv]")
+{
+    // About 3 MB of text: read by blocks of 1 MB, the progress after each.
+    std::string text = "t;v\n";
+    for (int i = 0; i < 300000; ++i) text += std::to_string(i) + ";" + std::to_string(i % 100) + "\n";
+    REQUIRE(text.size() > (2u << 20));
+    CsvImportOptions in;
+    in.firstColumnIsTime = true;
+    std::atomic<int> permille{0};
+    std::atomic<bool> stop{false};
+    std::stringstream whole(text);
+    const ImportResult r = readCsv(whole, "long", in, Progress{&stop, &permille});
+    REQUIRE(r.ok());
+    CHECK(!r.cancelled);
+    CHECK(r.signal.frameCount() == 300000);
+    CHECK(permille.load() == 1000);
+    // Asked to stop: nothing kept, and said so.
+    stop.store(true);
+    permille.store(0);
+    std::stringstream again(text);
+    const ImportResult s = readCsv(again, "long", in, Progress{&stop, &permille});
+    CHECK(s.cancelled);
+    CHECK(!s.ok());
+    CHECK(s.error == "Import annulé.");
+    CHECK(s.signal.data == nullptr);
+    CHECK(permille.load() < 1000);
+
+    // A WAV file the same way.
+    std::stringstream wav;
+    REQUIRE(writeWav(wav, makeSignal("son", 1, 4800, 48000.0)).empty());
+    wav.seekg(0);
+    const ImportResult x = readWav(wav, "son", Progress{&stop, nullptr});
+    CHECK(x.cancelled);
+    CHECK(x.error == "Import annulé.");
+    stop.store(false);
+    wav.clear();
+    wav.seekg(0);
+    const ImportResult y = readWav(wav, "son", Progress{&stop, &permille});
+    REQUIRE(y.ok());
+    CHECK(y.signal.frameCount() == 4800);
+    CHECK(permille.load() == 1000);
 }
 
 // ------------------------------------------------------------------------------------------------ WAV

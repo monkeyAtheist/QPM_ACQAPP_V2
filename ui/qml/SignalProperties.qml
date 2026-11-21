@@ -4,7 +4,8 @@ import QtQuick.Layouts
 import Qacq.App
 
 // Properties of the selected signal: name, timing, channels (name and unit), notes, and where it comes
-// from. Every edit is one step of the undo history.
+// from. Every edit is one step of the undo history. The sample rate is the time scale of the signal: the
+// samples stay, durations and frequencies follow it; a change by ten or more is confirmed first.
 ScrollView {
     id: root
     required property var session
@@ -18,6 +19,19 @@ ScrollView {
 
     function refresh() {
         info = signalId > 0 && list.rowOf(signalId) >= 0 ? list.info(signalId) : ({})
+    }
+    function setRate(rate) {
+        const before = info.sampleRate ?? 1
+        if (rate / before >= 10 || rate / before <= 0.1) {
+            rateDialog.newRate = rate
+            rateDialog.open()
+            return
+        }
+        applyRate(rate)
+    }
+    function applyRate(rate) {
+        list.setTiming(signalId, rate, info.start ?? 0)
+        list.endMerge()
     }
     onSignalIdChanged: refresh()
     Component.onCompleted: refresh()
@@ -88,12 +102,20 @@ ScrollView {
 
             SectionTitle { text: qsTr("Échantillonnage") }
             QuantityField {
-                label: qsTr("Fréquence d'échantillonnage")
+                label: qsTr("Fréquence d'échantillonnage (échelle des temps)")
                 unit: "Hz"
                 value: root.info.sampleRate ?? 1
                 minimum: 1e-9
-                tip: qsTr("Corrigez-la si la carte ne l'a pas annoncée : la durée et les axes suivent.")
-                onEdited: (v) => { root.list.setTiming(root.signalId, v, root.info.start ?? 0); root.list.endMerge() }
+                tip: qsTr("À corriger pour une carte qui ne l'annonce pas (1 Hz par défaut), un CSV sans colonne de temps ou une horloge à recaler. Ce n'est pas un rééchantillonnage.")
+                onEdited: (v) => root.setRate(v)
+            }
+            Label {
+                Layout.fillWidth: true
+                Layout.topMargin: -4
+                wrapMode: Text.WordWrap
+                text: qsTr("Ne change pas les échantillons : la durée, l'axe du temps et toutes les fréquences mesurées la suivent.")
+                color: Theme.textMuted
+                font.pixelSize: Theme.smallText
             }
             QuantityField {
                 label: qsTr("Instant du premier échantillon")
@@ -175,6 +197,48 @@ ScrollView {
                 color: Theme.textMuted
                 text: root.info.provenance !== undefined && root.info.provenance !== null
                       ? JSON.stringify(root.info.provenance, null, 2) : ""
+            }
+        }
+
+        // A new time scale ten times or more away from the old one: said before it is made.
+        Dialog {
+            id: rateDialog
+            property real newRate: 1
+            readonly property real oldRate: root.info.sampleRate ?? 1
+            readonly property real factor: newRate / oldRate
+            readonly property real frames: root.info.frameCount ?? 0
+            // 12,5 ; 1 000 000
+            function ratioText(r) {
+                return r >= 1000 ? Units.count(Math.round(r)) : Units.compact(r, "", 3)
+            }
+            title: qsTr("Changer l'échelle des temps ?")
+            modal: true
+            // A width given: with its row of buttons, the dialog would otherwise loop on its implicit width.
+            width: 470
+            anchors.centerIn: Overlay.overlay
+            onAccepted: root.applyRate(newRate)
+            Label {
+                width: parent ? parent.width : implicitWidth
+                wrapMode: Text.WordWrap
+                color: Theme.text
+                text: qsTr("La fréquence d'échantillonnage passe de %1 à %2 (%3) : la durée passe de %4 à %5, et toutes les fréquences (axe des spectres, fréquence mesurée, 1/Δt des curseurs) changent d'autant.\n\nLes échantillons ne changent pas : ce n'est pas un rééchantillonnage. Ctrl+Z revient en arrière.")
+                      .arg(Units.compact(rateDialog.oldRate, "Hz", 6))
+                      .arg(Units.compact(rateDialog.newRate, "Hz", 6))
+                      .arg((rateDialog.factor >= 1 ? "× " : "÷ ") + rateDialog.ratioText(rateDialog.factor >= 1 ? rateDialog.factor : 1 / rateDialog.factor))
+                      .arg(Units.duration(rateDialog.frames / rateDialog.oldRate))
+                      .arg(Units.duration(rateDialog.frames / rateDialog.newRate))
+            }
+            footer: DialogButtonBox {
+                Button {
+                    text: qsTr("Changer")
+                    highlighted: true
+                    DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+                }
+                Button {
+                    text: qsTr("Annuler")
+                    flat: true
+                    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                }
             }
         }
     }

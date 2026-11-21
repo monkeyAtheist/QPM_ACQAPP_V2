@@ -17,6 +17,8 @@ ColumnLayout {
     property real maximum: Number.MAX_VALUE
     property string tip: ""
     property int fieldWidth: -1
+    // Being typed in: a value set from outside meanwhile would replace what is typed.
+    readonly property bool editing: field.activeFocus
     signal edited(real value)
 
     spacing: 2

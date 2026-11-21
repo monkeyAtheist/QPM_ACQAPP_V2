@@ -7,8 +7,10 @@
 // separated by ';' and the decimal separator is ','.
 // Import: any file the text decoder reads (separators, decimal comma, comments); an optional header line
 // gives the channel names and units ("Voie 1 (V)" or "Voie 1 [V]"); an optional first column of times in
-// seconds gives the sample rate (median step) and the start time.
+// seconds gives the sample rate (median step) and the start time. A long import can be followed and
+// stopped from another thread (Progress).
 
+#include "qacq/model/progress.h"
 #include "qacq/model/signal.h"
 
 #include <filesystem>
@@ -61,12 +63,16 @@ struct ImportResult
     Signal signal; // id 0, origin Imported
     std::vector<std::string> warnings;
     std::string error;
+    bool cancelled = false; // stopped through Progress::cancelled (error: "Import annulé.")
 
     bool ok() const noexcept { return error.empty(); }
 };
 
-ImportResult readCsv(std::istream &in, const std::string &name, const CsvImportOptions &options = {});
-ImportResult importCsv(const std::filesystem::path &file, const CsvImportOptions &options = {});
+// The progress goes by the bytes read (a stream that cannot seek: no progress, cancel still works).
+ImportResult readCsv(std::istream &in, const std::string &name, const CsvImportOptions &options = {},
+                     const Progress &progress = {});
+ImportResult importCsv(const std::filesystem::path &file, const CsvImportOptions &options = {},
+                       const Progress &progress = {});
 
 // "Voie 1 (V)" -> {"Voie 1", "V"}; "x" -> {"x", ""}.
 ChannelInfo parseColumnTitle(const std::string &title);

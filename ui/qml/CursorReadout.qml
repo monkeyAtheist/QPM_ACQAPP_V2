@@ -10,6 +10,10 @@ Rectangle {
     property var view: null // the SignalPlot or SpectrumPlot
     property string deltaName: "Δt"
     property string inverseName: "1/Δt"
+    // The cross hides the cursors of `view`; a view whose cursors are shared with other plots sets this to
+    // false and handles closeRequested (all of them hidden, as with the button "Curseurs").
+    property bool closes: true
+    signal closeRequested()
     readonly property var info: view ? view.cursorInfo : ({})
     readonly property var rows: info.rows ?? []
 
@@ -84,7 +88,11 @@ Rectangle {
                 implicitHeight: 22
                 padding: 0
                 font.pixelSize: 14
-                onClicked: root.view.cursorsVisible = false
+                onClicked: {
+                    root.closeRequested()
+                    if (root.closes)
+                        root.view.cursorsVisible = false
+                }
                 ToolTip.visible: hovered
                 ToolTip.delay: 400
                 ToolTip.text: qsTr("Retirer les curseurs")

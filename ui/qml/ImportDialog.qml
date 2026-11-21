@@ -5,7 +5,8 @@ import Qacq.App
 
 // Import of a file: a WAV file goes in at once; a text file (CSV...) first shows its first lines and what
 // was recognised in it (decimal mark, header, time column), which can be corrected: without a time
-// column, the sample rate is asked.
+// column, the sample rate is asked. The reading itself runs on the session's thread (startImport, then
+// session.importFinished); `skipped` when nothing was started (dialog cancelled, or refused at once).
 Dialog {
     id: root
     required property var session
@@ -15,23 +16,30 @@ Dialog {
     property bool decimalComma: false
     property real sampleRate: 1000
     property string unit: ""
-    signal imported(var id)
+    // Open for a file, from openFor to Importer or Annuler (not `visible`, still true while it closes).
+    property bool asking: false
+    signal skipped()
 
+    function start(url, options) {
+        if (!root.session.startImport(url, options))
+            root.skipped()
+    }
     function openFor(url) {
         info = session.inspectImport(url)
         file = url
         if (info.kind === "wav") {
-            root.imported(session.importFile(url, {}))
+            start(url, {})
             return
         }
         if (!info.ok) {
             // The session tells the error (popup of the window).
-            root.imported(session.importFile(url, {}))
+            start(url, {})
             return
         }
         timeColumn = info.timeColumn
         decimalComma = info.decimalComma
         unit = ""
+        asking = true
         open()
     }
 
@@ -40,11 +48,16 @@ Dialog {
     anchors.centerIn: Overlay.overlay
     width: Math.min(parent ? parent.width - 80 : 640, 640)
     onAccepted: {
+        root.asking = false
         const options = { decimalComma: root.decimalComma, timeColumn: root.timeColumn,
                           timeUnitSeconds: root.info.timeUnitSeconds ?? 1, unit: root.unit }
         if (!root.timeColumn)
             options.sampleRateHz = root.sampleRate
-        root.imported(root.session.importFile(root.file, options))
+        root.start(root.file, options)
+    }
+    onRejected: {
+        root.asking = false
+        root.skipped()
     }
 
     footer: DialogButtonBox {

@@ -156,6 +156,13 @@ TEST_CASE("Quantities as shown: significant digits, prefixes, minus sign, comma"
     CHECK(significantFor(6000.0, 0.001) == 7);
     CHECK(significantFor(0.0, 1.0) == 4);
     CHECK(formatQuantity(2.400000301e9, "Hz", significantFor(2.400000301e9, 6.0)) == "2,400000301 GHz");
+    // Digits for statistics: enough to see the spread of the values.
+    CHECK(significantForSpread(440.0, 8.45e-3) == 7);
+    CHECK(formatQuantity(440.0021, "Hz", significantForSpread(440.0, 8.45e-3)) == "440,0021 Hz");
+    CHECK(significantForSpread(5.0, 2e-3) == 5);
+    CHECK(significantForSpread(0.6, 1.2) == 4);
+    CHECK(significantForSpread(440.0, 0.0) == 4);
+    CHECK(significantForSpread(1e6, 1e-6) == 9);
 }
 
 TEST_CASE("Quantities typed: units, prefixes, comma or point, spaces between thousands", "[plot]")

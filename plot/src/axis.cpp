@@ -268,6 +268,11 @@ int significantFor(double value, double resolution, int minimum, int maximum)
     return std::clamp(decade(magnitude) - decade(resolution) + 1, minimum, maximum);
 }
 
+int significantForSpread(double magnitude, double spread, int minimum, int maximum)
+{
+    return significantFor(magnitude, std::abs(spread) / 20.0, minimum, maximum);
+}
+
 AxisLabels axisLabels(const Ticks &ticks, std::string_view unit, char decimal)
 {
     AxisLabels out;

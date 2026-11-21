@@ -6,8 +6,8 @@ Ce dépôt est la réécriture de QtAcquisitionApp (« Architecture milestone 57
 
 **Statut : phase 4 (les modules) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle de
 session, l'acquisition sur ses threads et leurs tests sont en place. La fenêtre Qt Quick existe, sur la coquille
-de QTsignalApp V2 : modules Signaux (visualiser), Acquisition et Analyse (spectre et mesures) ; Générateur,
-Filtres et Modulations arrivent ensuite. L'ancienne application reste utilisable d'ici là.
+de QTsignalApp V2 : modules Signaux (visualiser, mesurer, ajouter des courbes et des spectres) et
+Acquisition ; Générateur, Filtres et Modulations arrivent ensuite. L'ancienne application reste utilisable d'ici là.
 
 ## Décisions (20/11/2026)
 
@@ -64,12 +64,12 @@ app/                         qacq_app : couche applicative sur QtCore (sans fen�
   include/qacq/app/acquisition_controller.h  démarrer, arrêter, statistiques, déclenchement, enregistrement continu
   include/qacq/app/serial_port_list.h  ports série présents, carte reconnue (Arduino, STM32, ESP32…), branchement détecté
   include/qacq/app/units.h          quantités pour les champs de QML : « 48 kHz » affiché, « 44,1 kHz » saisi
-  include/qacq/app/analysis_controller.h  module Analyse : calcul sur son thread, mesures mises en forme, export
+  include/qacq/app/analysis_controller.h  analyse (module Signaux) : calcul sur son thread, mesures mises en forme, export
   include/qacq/app/curves_controller.h    courbes ajoutées : liste (session), courbes du temps sur un thread
 plot/                        qacq_plot : le moteur de tracé de toutes les vues, sans aucune dépendance Qt
   include/qacq/plot/axis.h          graduations 1-2-5 et log, un préfixe par axe, quantités affichées et saisies
   include/qacq/plot/trace.h         tracé à tout zoom : extrêmes par colonne de pixels, pyramide min/max, ruptures
-analysis/                    qacq_analysis : le module Analyse sans Qt (spectre d'une zone, mesures, CSV)
+analysis/                    qacq_analysis : l'analyse sans Qt (spectre d'une zone, mesures, courbes, CSV)
   include/qacq/analysis/analysis.h  spectre d'amplitude ou densité (Welch), réel ou I/Q, niveaux en dB, mesures
   include/qacq/analysis/measures.h  statistiques A-B, mesures d'oscilloscope, pics, bande à −3 dB
   include/qacq/analysis/calculus.h  intégrale, dérivée, valeurs par période, courbe calculée (nouveau signal)
@@ -80,7 +80,9 @@ ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille d
   qml/Main.qml                     fenêtre, barre des modules, ruban, liste des signaux, propriétés
   qml/AcquisitionView.qml          module Acquisition : tracé en direct, ruban, état et chiffres de la liaison
   qml/AcquisitionSettings.qml      réglages de la source, du format, de la cadence, des voies ; préréglages
-  qml/SignalsView.qml              module Signaux : le signal choisi à tout zoom, avec la lecture au pointeur
+  qml/SignalsView.qml              module Signaux : le signal choisi, les courbes du temps et les spectres ajoutés
+  qml/AnalysisPanel.qml            onglet Mesures : mesures de la zone, pics des spectres, réglages des calculs
+  qml/ViewGroup.qml                groupe « Vue » du ruban, le même dans chaque module
 tests/                       qacq_tests (cœurs) et qacq_app_tests (couche Qt) : un groupe CTest par étiquette
   fixtures/scipy_reference.inc     résultats SciPy (générés, ne pas éditer)
   signals.h                        signaux d'essai déterministes, identiques en C++ et en Python
@@ -187,6 +189,13 @@ stockée sur 4 octets, sans perte. Chaque voie a son CRC-32 : un fichier abîmé
 de fausses valeurs. L'enregistrement passe par un fichier temporaire : un échec ne détruit pas la session
 précédente. 24 Mo s'écrivent et se relisent en moins de 0,1 s.
 
+**Import** (CSV, texte, WAV ; bouton Importer, Ctrl+I ou fichiers déposés sur la fenêtre, plusieurs à la
+suite) : la lecture tourne sur un fil à part, la fenêtre reste vivante. Au-delà d'un tiers de seconde, une
+fenêtre « Import en cours » montre le fichier, l'avancement (octets lus, échantillons convertis pour un
+WAV), le temps restant estimé et **Annuler** : la lecture s'arrête au bloc suivant (1 Mo), rien n'est
+ajouté, et les fichiers qui attendaient leur tour sont abandonnés aussi. Une nouvelle session ou une session
+ouverte pendant un import l'annule.
+
 ## Acquisition
 
 **Les sources** (couche Qt) tournent chacune dans son propre thread, pour qu'un appareil lent ou un réseau
@@ -243,24 +252,57 @@ dessiner ce qu'il calcule.
   bande par voie à son échelle, ou toutes sur un même axe ; échelle automatique stable en direct (elle suit
   aussitôt ce qui en sort, ne rétrécit que quand le signal n'occupe plus que 40 % de la hauteur).
 - **Souris** : molette pour le zoom du temps autour du pointeur (en direct : la largeur de la fenêtre), Ctrl +
-  molette pour les valeurs, glisser pour se déplacer, clic droit glissé pour zoomer sur un intervalle, double clic
-  pour tout voir ; la lecture suit le pointeur (instant et valeur de chaque voie à l'échantillon le plus proche).
+  molette ou molette sur une échelle pour les valeurs, glisser pour se déplacer (temps, valeurs ou les deux),
+  clic droit glissé pour zoomer sur un intervalle, double clic pour tout voir ; la lecture suit le pointeur
+  (instant et valeur de chaque voie à l'échantillon le plus proche).
 - **En direct** : défilement des dernières secondes, ou dernière capture du déclenchement (t = 0 à l'instant du
   déclenchement, niveau marqué), « Figer » pour lire pendant que les données continuent d'arriver.
 
-## L'analyse
+## Le module Signaux
 
-Le module Analyse montre en haut le signal choisi ; dessous, **seulement les courbes qu'on ajoute**
-(Courbes ▸ Ajouter…). Sans courbe, le signal prend toute la hauteur.
+Un seul module pour regarder, mesurer et analyser un signal de la session (Signaux et Analyse fusionnés le
+21/11/2026, selon l'audit). En haut le signal choisi ; dessous, **seulement les courbes qu'on ajoute**
+(onglet Courbes ▸ Ajouter…, ou clic droit sur le tracé). Sans courbe, le signal prend toute la hauteur.
+- **Ruban** : deux onglets bien visibles (pastilles avec icône, l'onglet ouvert en couleur), et dans les
+  deux le groupe Fichier (Importer). **Onglet Visualiser** : Vue (Tout voir, Zoom ±, Précédente, sur le
+  dernier tracé survolé ; le même groupe que dans Acquisition), Voies (Superposées), Mesurer (Curseurs ; Pic
+  et Suivant avec un spectre), Image. **Onglet Courbes** : Courbes (Ajouter…, Superposées, Garder, Tout
+  retirer, Exporter ▾ : les courbes du temps ou les spectres en CSV), Zone analysée, Spectres (amplitude ou
+  densité, dB ou linéaire, fréquences log, harmoniques).
+- **Panneau de droite** : onglet Mesures (mesures de chaque voie sur la zone analysée, pics des spectres,
+  réglages des calculs) et onglet Signal (nom, échantillonnage, voies, notes).
+- **Fréquence d'échantillonnage** (onglet Signal) : c'est l'échelle des temps du signal. La changer ne
+  touche pas aux échantillons ; la durée, l'axe du temps, les fréquences mesurées, l'axe des spectres et les
+  intégrales la suivent (ce n'est pas un rééchantillonnage). Un changement d'un facteur 10 ou plus est
+  d'abord confirmé, avec l'ancienne et la nouvelle durée (1 MHz → 1 Hz : 1,8 s deviendrait 500 h).
+- **Peu de doublons** : importer (aussi dans le ruban), exporter le signal, ouvrir, enregistrer sont dans la
+  barre du haut (sessions récentes sous « Ouvrir ▾ », chemin de la session en infobulle de son nom) ;
+  renommer, exporter, supprimer dans la liste (clic droit, F2, Suppr) ; le bouton « Importer un fichier… » de
+  la liste n'apparaît que quand elle est vide, et un fichier déposé sur la fenêtre est importé.
 - **Graphe du temps** : la voie elle-même (pour superposer), son intégrale, sa dérivée, sa moyenne, sa valeur
   efficace ou sa fréquence par période ; sur tout le signal ou entre A et B. Il suit le zoom et les curseurs
   du signal. Superposées, deux unités ont chacune leur échelle (gauche et droite) ; au-delà, une bande par
   unité.
 - **Graphe des fréquences** : le spectre (amplitude ou densité) des voies choisies, seules calculées.
-- Les voies du signal, en haut, se superposent aussi (groupe « Voies du signal »).
+- **Spectrogrammes** (Ajouter… ▸ Spectrogramme) : le spectre au fil du temps, dans leur propre graphe sous le
+  signal, sur le même axe du temps (il suit le zoom et les curseurs, et l'inverse) ; une bande par voie, les
+  fréquences en hauteur, le niveau en couleurs (dB de l'unité de la voie, échelle des couleurs à droite de la
+  bande : du plus haut niveau à 80 dB en dessous). Sur tout le signal ou entre A et B. Segments de 256 à
+  16 384 échantillons, recouvrement de 0 à 87,5 % (onglet Mesures ▸ Réglages des calculs, ou clic droit sur
+  les spectrogrammes, avec Δf et la durée d'un segment ; même fenêtre et même moyenne retirée que les
+  spectres). Sur un long signal, une colonne moyenne plusieurs segments
+  voisins (3 000 colonnes au plus, moins avec de très longs segments : 48 Mo au plus par voie) ; le dernier
+  segment finit avec le signal (plus près du précédent si le pas ne tombe pas juste) : aucun échantillon
+  n'est laissé de côté, la fin comprise. Le calcul tourne sur son propre thread ; « Calcul du spectrogramme :
+  40 % », avec une barre, dit où il en est, et l'ancien résultat reste affiché pendant qu'il recommence
+  (autres segments). La lecture sous le pointeur donne t, f et le niveau.
+- Les voies du signal, en haut, se superposent aussi (onglet Visualiser, groupe « Voies »).
 - Les courbes sont des vues du signal choisi, recalculées quand il change, enregistrées dans la session ;
   « Garder » fait un signal de la session des courbes du temps affichées. Une étiquette par courbe : un clic
-  la masque, la croix la retire.
+  la masque, la croix la retire. Au bout des étiquettes des spectres et des spectrogrammes, un « ? » dit au
+  survol comment ils sont calculés (fenêtre, points, Δf, remarques, zone analysée ; segments) : rien ne
+  s'affiche en travers des graphes, sauf la progression d'un spectrogramme pendant son calcul et la zone
+  analysée sur le signal quand elle n'est pas « Tout ».
 - **Zone analysée** (spectres et mesures) : tout le signal (par défaut : le zoom ne change rien), la partie
   visible, ou entre les curseurs A et B. Un signal dont la fréquence change (balayage) a bien un spectre
   différent selon la partie regardée.
@@ -285,7 +327,9 @@ Le module Analyse montre en haut le signal choisi ; dessous, **seulement les cou
   gestes que le tracé du temps ; la lecture donne le plus haut point sous le pointeur (fréquence, niveau, et
   la valeur en dB). Le calcul tourne sur son propre thread : zoomer pendant un calcul le relance avec la
   dernière zone ; changer dB/linéaire ou l'échelle des fréquences ne recalcule rien.
-- **Export** du spectre en CSV (fréquence, niveau en dB et en valeur, virgule décimale).
+- **Export** en CSV pour un tableur (virgule décimale, « ; » entre les colonnes, UTF-8 avec sa marque) : les
+  spectres (fréquence, niveau en dB et en valeur) et les courbes du temps affichées (le temps, puis une
+  colonne par courbe, « nan » là où une courbe n'a pas de valeur) ; aussi par clic droit sur leur graphe.
 - **Mesures temporelles** de chaque voie (comme un oscilloscope) : niveaux haut et bas (modes de
   l'histogramme, ou extrêmes), période et fréquence par les fronts (hystérésis de 10 %), rapport cyclique,
   montée et descente 10-90 % ou 20-80 % (réglage), dépassements, moyenne et efficace sur les périodes entières
@@ -298,10 +342,15 @@ Le module Analyse montre en haut le signal choisi ; dessous, **seulement les cou
 
 ## Outils des tracés
 
-- **Curseurs A et B** (Signaux, Acquisition figée ou déclenchée, Analyse) : on les glisse, ou Ctrl + clic
-  place A et Maj + clic place B. Sur le temps : Δt, 1/Δt, valeur de chaque voie sous A et sous B, et entre A
-  et B min, max, moyenne, efficace, crête à crête et intégrale (V·s). Sur le spectre : Δf, niveaux et écart en
-  dB, valeur efficace de la bande A-B (somme de la densité sur la bande).
+- **Curseurs A et B** (Signaux, Acquisition figée ou déclenchée) : on les glisse, ou Ctrl + clic
+  place A et Maj + clic place B. Dans Signaux, ce sont les mêmes sur le signal, les courbes du temps et les
+  spectrogrammes : la croix d'un relevé les retire partout, comme le bouton Curseurs, et la zone « Entre A
+  et B » revient alors à « Tout ». Un liseré sombre borde leurs lignes, visibles même sur un tracé dense de
+  leur couleur ; leurs étiquettes restent visibles avec une bande par voie. Sur le temps : Δt, 1/Δt, valeur
+  de chaque voie sous A et sous B, et entre A et B min, max, moyenne, efficace, crête à crête et intégrale
+  (V·s), avec assez de chiffres pour voir leur écart (une fréquence de 440 Hz ± 4 mHz se lit
+  « 440,0021 Hz » ; de même dans l'onglet Mesures). Sur le spectre : Δf, niveaux et écart en dB, valeur
+  efficace de la bande A-B (somme de la densité sur la bande).
 - **Se déplacer** : glisser le tracé avec le bouton gauche déplace ce que le geste suit surtout : à
   l'horizontale le temps (ou les fréquences), à la verticale les valeurs, en biais les deux (le sens se décide
   après 6 pixels, pour qu'un défilement dans le temps un peu de travers ne touche pas à l'échelle). Glisser une
@@ -313,12 +362,27 @@ Le module Analyse montre en haut le signal choisi ; dessous, **seulement les cou
 - **Échelles des valeurs** : la molette sur une échelle (ou Ctrl + molette sur le tracé) la zoome autour du
   pointeur ; un double clic sur une échelle la rend automatique, « Échelle verticale automatique » (clic
   droit) les rend toutes automatiques sans toucher au temps, un double clic sur le tracé remet tout.
-- **Clic droit** (sans glisser ; glisser zoome toujours) : le menu du tracé, avec une case par voie ou par
-  courbe à afficher, « Superposées », Tout afficher, Échelle verticale automatique, Tout voir, et pour les
-  courbes : Ajouter, Garder, Retirer les courbes masquées. Superposées, deux unités ont chacune leur échelle
-  (dans la couleur de leur voie quand elle est seule de son côté). Le bouton « Superposées » du ruban fait de
-  même (une bande par voie quand il est éteint).
-- **Marqueur de pic** (Analyse) : sur le plus haut pic, puis le suivant (clic droit : le précédent).
+- **Spectrogrammes** : les mêmes gestes pour le temps et les fréquences (molette sur l'échelle des
+  fréquences ou Ctrl + molette, glisser, ↑ ↓) ; la molette ou un glissement vertical sur l'échelle des
+  couleurs change l'étendue des niveaux montrés (10 à 200 dB), un double clic la remet à 80 dB.
+- **Bornes d'une échelle** : un clic droit sur une échelle (valeurs d'une bande ou d'un côté, niveaux et
+  fréquences d'un spectre, fréquences et couleurs d'un spectrogramme) ou sur l'axe du temps ouvre son menu,
+  dans tous les tracés (signal, courbes du temps, spectrogrammes, spectres, acquisition) : minimum et
+  maximum tapés avec leur unité ou un préfixe (2 ms, 1,5 kHz, −20 dBV), appliqués à la validation ;
+  Automatique (sur le temps : Tout le signal ; sur les fréquences : Toutes les fréquences) ; pour les
+  spectres, fréquences logarithmiques et niveaux en décibels. Le menu suit les gestes faits pendant qu'il
+  est ouvert. En acquisition qui défile, l'axe du temps se règle avec le champ Fenêtre. Un spectrogramme
+  garde des couleurs réglées à la main par bande (la molette sur son échelle change alors son minimum).
+- **Clic droit dans le tracé** (sans glisser ; glisser zoome toujours) : le menu du tracé, avec une case par
+  voie ou par courbe à afficher, « Superposées », Tout afficher, Échelle verticale automatique, Tout voir, et
+  pour les courbes : Ajouter, Garder, Retirer les courbes masquées. Superposées, deux unités ont chacune leur
+  échelle (dans la couleur de leur voie quand elle est seule de son côté). Le bouton « Superposées » du
+  ruban fait de même (une bande par voie quand il est éteint). Pour ce qui est calculé, le menu a en plus
+  une colonne « Calcul » avec les mêmes réglages que l'onglet Mesures, appliqués aussitôt : spectres (zone
+  analysée, amplitude ou densité, fenêtre et β de Kaiser, zéros ajoutés ou longueur et recouvrement des
+  segments, moyenne retirée, harmoniques mesurées) ; spectrogrammes (longueur et recouvrement des segments
+  avec Δf et durée, fenêtre et moyenne retirée, communes avec les spectres).
+- **Marqueur de pic** (spectres) : sur le plus haut pic, puis le suivant (clic droit : le précédent).
 - **Vue précédente** : chaque zoom, déplacement ou « tout voir » du temps (ou des fréquences et des niveaux du
   spectre) se défait (50 pas) ; les échelles des valeurs du temps reviennent par le double clic.
 - **Image** : le graphique copié dans le presse-papiers ou enregistré en PNG, tel qu'à l'écran.
@@ -354,8 +418,9 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
    Signaux et Acquisition ; glisser-déposer de fichiers, préréglages, réglages retenus d'une fois sur l'autre ;
    import d'un fichier texte avec aperçu et reconnaissance de sa forme (virgule décimale, titres, colonne de
    temps en s, ms ou µs).
-4. **Modules** (en cours) : analyse (spectre, densité, mesures, courbes ajoutées : fait) ; ensuite la fusion
-   de Signaux et Analyse en un module (audit du 21/11), spectrogramme, générateur, filtres, modulations ; VISA
+4. **Modules** (en cours) : analyse (spectre, densité, mesures, courbes ajoutées), fusion de Signaux et
+   Analyse en un module (audit du 21/11), export des courbes, garde-fou de la fréquence d'échantillonnage,
+   spectrogramme en courbe ajoutée : faits ; ensuite générateur, filtres, modulations ; VISA
    pour les instruments en USB. À étudier : réponse en fréquence entre deux voies (gain, phase, marges),
    distorsion pondérée A.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.

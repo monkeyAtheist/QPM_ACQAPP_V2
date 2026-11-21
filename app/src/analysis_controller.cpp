@@ -115,10 +115,12 @@ void AnalysisController::setSettings(const QVariantMap &values)
     m_settings = next;
     emit settingsChanged();
 
-    // Only the way it is drawn: no new computation.
+    // Only the way it is drawn, or the spectrograms (computed by the curves): no new analysis.
     analysis::AnalysisSettings computed = next;
     computed.scale = previous.scale;
     computed.logFrequency = previous.logFrequency;
+    computed.spectrogramSegment = previous.spectrogramSegment;
+    computed.spectrogramOverlap = previous.spectrogramOverlap;
     if (analysis::toJson(computed) == analysis::toJson(previous))
     {
         if (next.scale != previous.scale && m_result && !m_running)
@@ -312,15 +314,18 @@ QVariantList AnalysisController::measures() const
         else
         {
             const double scale = std::max(std::abs(m.minimum), std::abs(m.maximum));
-            values << row(tr("Moyenne"), quantity(cleaned(m.mean, scale), m.unit))
-                   << row(tr("Efficace (RMS)"), quantity(m.rms, m.unit))
+            // Digits enough to see the spread: 5 V ± 1 mV reads "5,0010 V", not "5,000 V" everywhere.
+            const int digits = plot::significantForSpread(scale, m.peakToPeak);
+            values << row(tr("Moyenne"), quantity(cleaned(m.mean, scale), m.unit, digits))
+                   << row(tr("Efficace (RMS)"), quantity(m.rms, m.unit, digits))
                    << row(tr("Efficace sans la moyenne"), quantity(cleaned(m.acRms, scale), m.unit))
-                   << row(tr("Minimum"), quantity(cleaned(m.minimum, scale), m.unit))
-                   << row(tr("Maximum"), quantity(cleaned(m.maximum, scale), m.unit))
+                   << row(tr("Minimum"), quantity(cleaned(m.minimum, scale), m.unit, digits))
+                   << row(tr("Maximum"), quantity(cleaned(m.maximum, scale), m.unit, digits))
                    << row(tr("Crête à crête"), quantity(m.peakToPeak, m.unit))
                    << row(tr("Facteur de crête"), text(plot::formatFixed(m.crestFactor, 2)))
                    << row(tr("Première / dernière valeur"),
-                          quantity(cleaned(m.first, scale), m.unit) + QStringLiteral(" / ") + quantity(cleaned(m.last, scale), m.unit));
+                          quantity(cleaned(m.first, scale), m.unit, digits) + QStringLiteral(" / ") +
+                              quantity(cleaned(m.last, scale), m.unit, digits));
             const double duration = m_result->sampleRateHz > 0.0 ? static_cast<double>(m_result->zoneFrames) / m_result->sampleRateHz : 0.0;
             values << row(tr("Intégrale (aire sous la courbe)"),
                           quantity(cleaned(m.integral, scale * duration), analysis::operationUnit(analysis::Operation::Integral, m.unit)));

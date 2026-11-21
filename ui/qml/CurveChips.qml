@@ -2,13 +2,16 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// The curves of one graph of the "Analyse" module, as chips over its top right, in their colours: a click
-// hides or shows a curve, its cross takes it away.
+// The curves of one graph of the module "Signaux", as chips over its top right, in their colours: a click
+// hides or shows a curve, its cross takes it away. At the end, while they are computed, a turning wheel,
+// and a "?" that tells on hovering how they are computed (rather than a strip over the graph).
 Rectangle {
     id: root
     required property var curves // the CurvesController
-    property string graph: "time" // or "frequency"
+    property string graph: "time" // or "frequency", "spectrogram"
     property string title: ""
+    property string info: "" // lines shown by "?" (none: no "?")
+    property bool busy: false
     readonly property var items: curves.curves.filter((c) => c.graph === root.graph)
 
     visible: items.length > 0
@@ -88,6 +91,29 @@ Rectangle {
                               + (chip.modelData.visible ? qsTr("Masquer cette courbe (la croix la retire)")
                                                         : qsTr("Afficher cette courbe (la croix la retire)"))
             }
+        }
+        BusyIndicator {
+            visible: root.busy
+            running: visible
+            Layout.preferredWidth: 16
+            Layout.preferredHeight: 16
+        }
+        Label {
+            visible: root.info.length > 0
+            text: "?"
+            font.pixelSize: Theme.bodyText
+            font.bold: true
+            color: infoArea.containsMouse ? Theme.text : Theme.textMuted
+            Layout.leftMargin: 2
+            Layout.rightMargin: 2
+            MouseArea {
+                id: infoArea
+                anchors.fill: parent
+                anchors.margins: -4
+                hoverEnabled: true
+            }
+            ToolTip.visible: infoArea.containsMouse
+            ToolTip.text: root.info
         }
     }
 }

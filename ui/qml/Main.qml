@@ -7,8 +7,8 @@ import QtQuick.Layouts
 import Qacq.App
 
 // The window: the shell of QTsignalApp V2 (module bar, tool header across the window, side panels that
-// fold away) around the modules. One session: its signals are listed on the left in every module, the
-// properties are on the right.
+// fold away) around the modules. One session: its signals are listed on the left in every module; on the
+// right, the measurements (Signaux) or the settings of the source (Acquisition), and the signal chosen.
 ApplicationWindow {
     id: window
     required property var session
@@ -33,10 +33,10 @@ ApplicationWindow {
     Material.background: Theme.window
     color: Theme.window
 
-    // 0 Signaux, 1 Acquisition, 2 Analyse (the other modules come next).
+    // 0 Signaux (with the curves and the spectra), 1 Acquisition (the other modules come next).
     property int module: 1
     property var selectedId: 0
-    property int inspectorTab: 0 // 0 settings of the module, 1 the selected signal
+    property int inspectorTab: 0 // 0 measurements or settings of the module, 1 the selected signal
     property bool signalsPanelOpen: true
     property bool inspectorOpen: true
     property bool darkTheme: true
@@ -52,7 +52,8 @@ ApplicationWindow {
         property alias signalsPanelOpen: window.signalsPanelOpen
         property alias inspectorOpen: window.inspectorOpen
         property alias darkTheme: window.darkTheme
-        property alias module: window.module
+        // Not "module" any more: that one could be 2, the former module "Analyse" (now in Signaux).
+        property alias moduleShown: window.module
         property var splitState
     }
     Binding {
@@ -82,8 +83,9 @@ ApplicationWindow {
     }
     function selectSignal(id) {
         selectedId = id
-        // In "Analyse", the panel keeps the measurements of the signal chosen.
-        if (id > 0 && module !== 2)
+        // In "Acquisition", a signal chosen shows its properties; in "Signaux", the panel keeps its tab
+        // (the measurements follow the signal).
+        if (id > 0 && module === 1)
             inspectorTab = 1
     }
     function selectAfterChange() {
@@ -96,7 +98,7 @@ ApplicationWindow {
         if (index === module)
             return
         module = index
-        inspectorTab = index === 1 || index === 2 ? 0 : (selectedId > 0 ? 1 : 0)
+        inspectorTab = 0
     }
     // Runs `action` once the session is saved or its changes given up (asks when there are some).
     function confirmDiscard(action) {
@@ -130,8 +132,24 @@ ApplicationWindow {
             selectAfterChange()
         }
     }
-    // A WAV file is imported at once; a text file first shows what was recognised in it (ImportDialog).
+    // Files to import, one after the other: a WAV file is read at once; a text file first shows what was
+    // recognised in it (ImportDialog). The reading runs on a thread of its own (importDialogProgress).
+    property var importQueue: []
+    function importFiles(urls) {
+        const queue = importQueue.slice()
+        for (let i = 0; i < urls.length; ++i)
+            queue.push(urls[i])
+        importQueue = queue
+        nextImport()
+    }
     function importFile(url) {
+        importFiles([url])
+    }
+    function nextImport() {
+        if (session.importing || importOptions.asking || importQueue.length === 0)
+            return
+        const url = importQueue[0]
+        importQueue = importQueue.slice(1)
         importOptions.openFor(url)
     }
     function imported(id) {
@@ -189,6 +207,30 @@ ApplicationWindow {
         target: window.session
         function onLastErrorChanged() { window.showError(window.session.lastError) }
         function onSessionReplaced() { window.selectAfterChange() }
+        function onImportingChanged() {
+            // Shown after a moment only: a small file comes in without a window flashing.
+            if (window.session.importing) {
+                importShowDelay.restart()
+            } else {
+                importShowDelay.stop()
+                importProgressDialog.close()
+            }
+        }
+        function onImportFinished(id, cancelled) {
+            if (cancelled) {
+                // "Annuler": the files still waiting are dropped too.
+                window.importQueue = []
+                window.showInfo(qsTr("Import annulé."))
+                return
+            }
+            window.imported(id)
+            window.nextImport()
+        }
+    }
+    Timer {
+        id: importShowDelay
+        interval: 300
+        onTriggered: if (window.session.importing) importProgressDialog.open()
     }
     Connections {
         target: window.session.signalList
@@ -277,10 +319,7 @@ ApplicationWindow {
         currentFolder: window.folderOf(window.appSettings.lastDirectory)
         nameFilters: window.session.importFilters()
         fileMode: FileDialog.OpenFiles
-        onAccepted: {
-            for (let i = 0; i < selectedFiles.length; ++i)
-                window.importFile(selectedFiles[i])
-        }
+        onAccepted: window.importFiles(selectedFiles)
     }
     FileDialog {
         id: exportDialog
@@ -296,15 +335,28 @@ ApplicationWindow {
         }
     }
     FileDialog {
+        id: curvesDialog
+        title: qsTr("Exporter les courbes du temps")
+        fileMode: FileDialog.SaveFile
+        currentFolder: window.folderOf(window.appSettings.lastDirectory)
+        defaultSuffix: "csv"
+        nameFilters: [qsTr("Tableau CSV (*.csv)")]
+        onAccepted: {
+            // A failure is said by the list of the signals (errorOccurred).
+            if (window.curves.exportTimeCurves(selectedFile))
+                window.showInfo(qsTr("Courbes exportées : %1").arg(decodeURIComponent(selectedFile.toString().split("/").pop())))
+        }
+    }
+    FileDialog {
         id: spectrumDialog
-        title: qsTr("Exporter le spectre")
+        title: qsTr("Exporter les spectres")
         fileMode: FileDialog.SaveFile
         currentFolder: window.folderOf(window.appSettings.lastDirectory)
         defaultSuffix: "csv"
         nameFilters: [qsTr("Tableau CSV (*.csv)")]
         onAccepted: {
             if (window.analysis.exportSpectrum(selectedFile))
-                window.showInfo(qsTr("Spectre exporté : %1").arg(decodeURIComponent(selectedFile.toString().split("/").pop())))
+                window.showInfo(qsTr("Spectres exportés : %1").arg(decodeURIComponent(selectedFile.toString().split("/").pop())))
             else
                 window.showError(window.analysis.lastError)
         }
@@ -332,9 +384,51 @@ ApplicationWindow {
                 Layout.rightMargin: 18
                 Layout.maximumWidth: 320
                 elide: Text.ElideRight
+                // Where the session is, and whether it is saved.
+                HoverHandler { id: sessionHover }
+                ToolTip.visible: sessionHover.hovered
+                ToolTip.delay: 500
+                ToolTip.text: (window.session.fileUrl.toString().length > 0
+                               ? decodeURIComponent(window.session.fileUrl.toString().replace(/^file:\/{2,3}/, ""))
+                               : qsTr("Session pas encore enregistrée"))
+                              + "\n" + (window.session.modified ? qsTr("Modifications non enregistrées (Ctrl+S)") : qsTr("Tout est enregistré"))
             }
             ToolButton { action: newAction }
             ToolButton { action: openAction }
+            // The sessions opened lately.
+            ToolButton {
+                id: recentButton
+                visible: window.appSettings.recentFiles.length > 0
+                text: "▾"
+                leftPadding: 4
+                rightPadding: 4
+                Layout.leftMargin: -6
+                onClicked: recentMenu.popup(recentButton, 0, recentButton.height)
+                ToolTip.visible: hovered
+                ToolTip.delay: 400
+                ToolTip.text: qsTr("Sessions récentes")
+                Menu {
+                    id: recentMenu
+                    Instantiator {
+                        model: window.appSettings.recentFiles
+                        delegate: MenuItem {
+                            required property string modelData
+                            text: modelData.split("/").pop()
+                            onTriggered: window.confirmDiscard(() => window.openSession(window.folderOf(modelData)))
+                            ToolTip.visible: hovered
+                            ToolTip.delay: 500
+                            ToolTip.text: modelData
+                        }
+                        onObjectAdded: (index, object) => recentMenu.insertItem(index, object)
+                        onObjectRemoved: (index, object) => recentMenu.removeItem(object)
+                    }
+                    MenuSeparator { }
+                    MenuItem {
+                        text: qsTr("Vider la liste")
+                        onTriggered: window.appSettings.clearRecentFiles()
+                    }
+                }
+            }
             ToolButton { action: saveAction }
             Rectangle { width: 1; height: 24; color: Theme.border; Layout.leftMargin: 6; Layout.rightMargin: 6 }
             ToolButton { action: importAction }
@@ -373,7 +467,7 @@ ApplicationWindow {
                     PanelIcon { anchors.centerIn: parent; rightSide: true; active: window.inspectorOpen }
                 }
                 ToolTip.visible: hovered
-                ToolTip.text: (window.inspectorOpen ? qsTr("Masquer les propriétés") : qsTr("Afficher les propriétés")) + " (F10)"
+                ToolTip.text: (window.inspectorOpen ? qsTr("Masquer le panneau de droite") : qsTr("Afficher le panneau de droite")) + " (F10)"
             }
             Rectangle { width: 1; height: 24; color: Theme.border; Layout.leftMargin: 6; Layout.rightMargin: 6 }
             Switch {
@@ -396,7 +490,7 @@ ApplicationWindow {
 
         Sidebar {
             Layout.fillHeight: true
-            current: window.module
+            current: window.module === 1 ? 1 : 0
             onModuleSelected: (index) => window.switchModule(index)
         }
 
@@ -445,17 +539,20 @@ ApplicationWindow {
                     SignalsView {
                         id: signalsView
                         anchors.fill: parent
-                        visible: window.module === 0
+                        visible: window.module !== 1
                         ribbonHost: moduleRibbon
                         session: window.session
+                        analysis: window.analysis
+                        curves: window.curves
                         signalId: window.selectedId
                         leftFolded: !window.signalsPanelOpen
                         rightFolded: !window.inspectorOpen
                         onUnfoldLeft: window.signalsPanelOpen = true
                         onUnfoldRight: window.inspectorOpen = true
                         onImportRequested: importDialog.open()
-                        onExportRequested: exportAction.trigger()
-                        onRenameRequested: signalsPanel.renameSelected()
+                        onSpectrumExportRequested: spectrumDialog.open()
+                        onTimeCurvesExportRequested: curvesDialog.open()
+                        onCurveRequested: (view) => curveDialog.openFor(window.selectedId, view)
                         onInfoMessage: (text) => window.showInfo(text)
                         onErrorMessage: (text) => window.showError(text)
                     }
@@ -480,28 +577,6 @@ ApplicationWindow {
                         onInfoMessage: (text) => window.showInfo(text)
                         onErrorMessage: (text) => window.showError(text)
                     }
-                    AnalysisView {
-                        id: analysisView
-                        anchors.fill: parent
-                        visible: window.module === 2
-                        ribbonHost: moduleRibbon
-                        session: window.session
-                        analysis: window.analysis
-                        curves: window.curves
-                        signalId: window.selectedId
-                        leftFolded: !window.signalsPanelOpen
-                        rightFolded: !window.inspectorOpen
-                        onUnfoldLeft: window.signalsPanelOpen = true
-                        onUnfoldRight: window.inspectorOpen = true
-                        onExportRequested: spectrumDialog.open()
-                        onCurveRequested: (view) => curveDialog.openFor(window.selectedId, view)
-                        onInfoMessage: (text) => window.showInfo(text)
-                        onErrorMessage: (text) => window.showError(text)
-                        onSettingsRequested: {
-                            window.inspectorOpen = true
-                            window.inspectorTab = 0
-                        }
-                    }
                 }
 
                 Inspector {
@@ -513,13 +588,13 @@ ApplicationWindow {
                     serialPorts: window.serialPorts
                     appSettings: window.appSettings
                     analysis: window.analysis
-                    module: window.module
+                    curves: window.curves
+                    module: window.module === 1 ? 1 : 0
                     signalId: window.selectedId
                     tab: window.inspectorTab
                     onTabSelected: (index) => window.inspectorTab = index
                     onCollapseRequested: window.inspectorOpen = false
                     onFirmwareRequested: firmwareDialog.open()
-                    onRecentFileChosen: (file) => window.confirmDiscard(() => window.openSession(window.folderOf(file)))
                 }
             }
         }
@@ -532,14 +607,16 @@ ApplicationWindow {
             if (!drop.hasUrls)
                 return
             drop.accept()
+            const files = []
             for (let i = 0; i < drop.urls.length; ++i) {
                 const url = drop.urls[i]
                 if (url.toString().toLowerCase().endsWith(".qacq")) {
                     window.confirmDiscard(() => window.openSession(url))
                     return
                 }
-                window.importFile(url)
+                files.push(url)
             }
+            window.importFiles(files)
         }
     }
 
@@ -556,7 +633,79 @@ ApplicationWindow {
     ImportDialog {
         id: importOptions
         session: window.session
-        onImported: (id) => window.imported(id)
+        // Not started (dialog cancelled, or refused at once): the next file.
+        onSkipped: Qt.callLater(window.nextImport)
+    }
+    // While a file is read (on its own thread): which, how far, about how long still, and Annuler.
+    Dialog {
+        id: importProgressDialog
+        // (No property named like a member of the Qt items: "left", "progress"... — Qt 6.11 refuses to
+        // load a file that overrides a FINAL one.)
+        property real startedMs: 0
+        readonly property real readFraction: window.session.importProgress
+        title: qsTr("Import en cours")
+        modal: true
+        closePolicy: Popup.NoAutoClose
+        anchors.centerIn: Overlay.overlay
+        width: 440
+        onAboutToShow: {
+            startedMs = Date.now() - importShowDelay.interval
+            importProgressText.clockMs = Date.now()
+        }
+        footer: DialogButtonBox {
+            Button {
+                text: qsTr("Annuler")
+                enabled: window.session.importing
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+        }
+        // "Annuler": the reading stops at the next block (a fraction of a second); the dialog closes with it.
+        onRejected: window.session.cancelImport()
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("Lecture de « %1 »").arg(window.session.importName)
+                elide: Text.ElideMiddle
+                color: Theme.text
+                font.pixelSize: Theme.bodyText
+            }
+            ProgressBar {
+                Layout.fillWidth: true
+                from: 0
+                to: 1
+                value: importProgressDialog.readFraction
+            }
+            Label {
+                id: importProgressText
+                // The clock, read every half second (the time left moves even when the progress stalls).
+                property real clockMs: Date.now()
+                readonly property real secondsElapsed: (clockMs - importProgressDialog.startedMs) / 1000
+                readonly property real secondsLeft: importProgressDialog.readFraction > 0.03
+                                                    ? secondsElapsed * (1 - importProgressDialog.readFraction) / importProgressDialog.readFraction
+                                                    : -1
+                Layout.fillWidth: true
+                text: Math.round(100 * importProgressDialog.readFraction) + " %"
+                      + (secondsLeft >= 0 ? qsTr(" · encore environ %1").arg(Units.duration(Math.max(1, Math.round(secondsLeft)))) : "")
+                color: Theme.textMuted
+                font.pixelSize: Theme.smallText
+                Timer {
+                    interval: 500
+                    repeat: true
+                    running: importProgressDialog.visible
+                    onTriggered: importProgressText.clockMs = Date.now()
+                }
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("Un gros fichier texte se lit ligne à ligne : quelques dizaines de mégaoctets par seconde.")
+                color: Theme.textMuted
+                font.pixelSize: Theme.smallText
+            }
+        }
     }
 
     Dialog {

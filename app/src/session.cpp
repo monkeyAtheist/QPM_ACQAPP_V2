@@ -5,8 +5,12 @@
 #include "qacq/model/session_file.h"
 #include "qacq/model/wav.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QFileInfo>
+
+#include <cmath>
+#include <optional>
 
 #ifndef QACQ_VERSION
 #define QACQ_VERSION "2.0.0"
@@ -34,6 +38,72 @@ QStringList toQStringList(const std::vector<std::string> &list)
     for (const auto &s : list) out << toQString(s);
     return out;
 }
+
+// What to read, in plain C++ (made here, read on the thread of imports): the options not given are the
+// ones recognised in the file.
+struct ImportRequest
+{
+    enum class Kind
+    {
+        Wav,
+        Text,
+        Unknown
+    };
+    std::filesystem::path path;
+    Kind kind = Kind::Unknown;
+    std::string suffix;
+    std::optional<bool> decimalComma, timeColumn;
+    std::optional<double> timeUnitSeconds;
+    double sampleRateHz = 1.0;
+    std::string unit;
+};
+
+ImportRequest importRequest(const QString &local, const QVariantMap &options)
+{
+    ImportRequest r;
+    r.path = toPath(local);
+    const QString suffix = QFileInfo(local).suffix().toLower();
+    r.suffix = toUtf8(suffix);
+    if (suffix == QStringLiteral("wav")) r.kind = ImportRequest::Kind::Wav;
+    else if (suffix == QStringLiteral("csv") || suffix == QStringLiteral("txt") || suffix == QStringLiteral("tsv") ||
+             suffix == QStringLiteral("dat"))
+        r.kind = ImportRequest::Kind::Text;
+    if (options.contains(QStringLiteral("decimalComma"))) r.decimalComma = options.value(QStringLiteral("decimalComma")).toBool();
+    if (options.contains(QStringLiteral("timeColumn"))) r.timeColumn = options.value(QStringLiteral("timeColumn")).toBool();
+    if (options.contains(QStringLiteral("timeUnitSeconds")))
+        r.timeUnitSeconds = options.value(QStringLiteral("timeUnitSeconds")).toDouble();
+    r.sampleRateHz = options.value(QStringLiteral("sampleRateHz"), 1.0).toDouble();
+    r.unit = toUtf8(options.value(QStringLiteral("unit")).toString());
+    return r;
+}
+
+model::ImportResult readImport(const ImportRequest &request, const model::Progress &progress)
+{
+    if (request.kind == ImportRequest::Kind::Wav) return model::importWav(request.path, progress);
+    if (request.kind == ImportRequest::Kind::Text)
+    {
+        model::CsvImportOptions csv;
+        if (!request.decimalComma || !request.timeColumn || !request.timeUnitSeconds)
+        {
+            const model::CsvSniff sniff = model::sniffCsv(request.path);
+            csv.decimalComma = request.decimalComma.value_or(sniff.decimalComma);
+            csv.firstColumnIsTime = request.timeColumn.value_or(sniff.firstColumnIsTime);
+            csv.timeUnitSeconds = request.timeUnitSeconds.value_or(sniff.timeUnitSeconds);
+        }
+        else
+        {
+            csv.decimalComma = *request.decimalComma;
+            csv.firstColumnIsTime = *request.timeColumn;
+            csv.timeUnitSeconds = *request.timeUnitSeconds;
+        }
+        csv.sampleRateHz = request.sampleRateHz;
+        csv.unit = request.unit;
+        return model::importCsv(request.path, csv, progress);
+    }
+    model::ImportResult unknown;
+    unknown.error = "Format non reconnu : « ." + request.suffix + " » (CSV, texte ou WAV attendu).";
+    return unknown;
+}
 } // namespace
 
 QString Session::applicationName()
@@ -45,6 +115,22 @@ Session::Session(AppSettings *settings, QObject *parent)
     : QObject(parent), m_settings(settings), m_signals(new SignalListModel(this))
 {
     connect(m_signals, &SignalListModel::modifiedChanged, this, &Session::onModifiedChanged);
+    m_importPool.setMaxThreadCount(1);
+    m_importTimer.setInterval(100);
+    connect(&m_importTimer, &QTimer::timeout, this, [this] {
+        const std::shared_ptr<ImportRun> run = m_importRun;
+        if (!run) return;
+        const double done = 0.001 * static_cast<double>(run->permille.load());
+        if (std::abs(done - m_importProgress) < 0.005) return;
+        m_importProgress = done;
+        emit importProgressChanged();
+    });
+}
+
+Session::~Session()
+{
+    cancelImport();
+    m_importPool.waitForDone();
 }
 
 QString Session::fileName() const
@@ -60,6 +146,7 @@ QString Session::title() const
 
 void Session::newSession()
 {
+    cancelImport(); // what it reads was for the session before
     m_signals->resetSignals();
     m_moduleSettings = model::Json::object();
     setSettingsModified(false);
@@ -75,6 +162,7 @@ bool Session::open(const QUrl &url)
     std::string error;
     auto content = model::loadSession(toPath(local), &error);
     if (!content) return fail(toQString(error));
+    cancelImport(); // what it reads was for the session before
     m_signals->resetSignals(std::move(content->signalList));
     m_moduleSettings = content->settings.isObject() ? content->settings : model::Json::object();
     setSettingsModified(false);
@@ -169,29 +257,65 @@ qint64 Session::importFile(const QUrl &url, const QVariantMap &options)
         fail(QStringLiteral("Seuls les fichiers locaux peuvent être importés."));
         return 0;
     }
-    const QString suffix = QFileInfo(local).suffix().toLower();
-    model::ImportResult result;
-    if (suffix == QStringLiteral("wav"))
+    model::ImportResult result = readImport(importRequest(local, options), {});
+    return addImported(local, result);
+}
+
+bool Session::startImport(const QUrl &url, const QVariantMap &options)
+{
+    if (m_importing) return fail(QStringLiteral("Un import est déjà en cours : attendez qu'il finisse, ou annulez-le."));
+    const QString local = localFileOf(url);
+    if (local.isEmpty()) return fail(QStringLiteral("Seuls les fichiers locaux peuvent être importés."));
+    const ImportRequest request = importRequest(local, options);
+    auto run = std::make_shared<ImportRun>();
+    m_importRun = run;
+    m_importing = true;
+    m_importName = QFileInfo(local).fileName();
+    m_importProgress = 0.0;
+    emit importingChanged();
+    emit importProgressChanged();
+    m_importTimer.start();
+    m_importPool.start([this, local, request, run] {
+        auto result = std::make_shared<model::ImportResult>(readImport(request, model::Progress{&run->cancelled, &run->permille}));
+        // The destructor waits for this task: `this` is alive here, and the queued call is dropped if it is
+        // destroyed before the call runs.
+        QMetaObject::invokeMethod(this, [this, local, run, result] { importDone(local, run, result); }, Qt::QueuedConnection);
+    });
+    return true;
+}
+
+void Session::cancelImport()
+{
+    if (m_importRun) m_importRun->cancelled.store(true);
+}
+
+void Session::waitForImport()
+{
+    while (m_importing)
     {
-        result = model::importWav(toPath(local));
+        m_importPool.waitForDone();
+        QCoreApplication::processEvents();
     }
-    else if (suffix == QStringLiteral("csv") || suffix == QStringLiteral("txt") || suffix == QStringLiteral("tsv") ||
-             suffix == QStringLiteral("dat"))
+}
+
+void Session::importDone(const QString &localFile, const std::shared_ptr<ImportRun> &run,
+                         const std::shared_ptr<model::ImportResult> &result)
+{
+    if (m_importRun == run)
     {
-        const model::CsvSniff sniff = model::sniffCsv(toPath(local));
-        model::CsvImportOptions csv;
-        csv.decimalComma = options.value(QStringLiteral("decimalComma"), sniff.decimalComma).toBool();
-        csv.firstColumnIsTime = options.value(QStringLiteral("timeColumn"), sniff.firstColumnIsTime).toBool();
-        csv.timeUnitSeconds = options.value(QStringLiteral("timeUnitSeconds"), sniff.timeUnitSeconds).toDouble();
-        csv.sampleRateHz = options.value(QStringLiteral("sampleRateHz"), 1.0).toDouble();
-        csv.unit = toUtf8(options.value(QStringLiteral("unit")).toString());
-        result = model::importCsv(toPath(local), csv);
+        m_importRun.reset();
+        m_importTimer.stop();
     }
-    else
-    {
-        fail(QStringLiteral("Format non reconnu : « .%1 » (CSV, texte ou WAV attendu).").arg(suffix));
-        return 0;
-    }
+    const bool cancelled = run->cancelled.load() || result->cancelled;
+    const qint64 id = cancelled ? 0 : addImported(localFile, *result);
+    m_importing = false;
+    m_importName.clear();
+    emit importingChanged();
+    emit importFinished(id, cancelled);
+}
+
+qint64 Session::addImported(const QString &localFile, model::ImportResult &result)
+{
     if (!result.ok())
     {
         fail(toQString(result.error));
@@ -208,7 +332,7 @@ qint64 Session::importFile(const QUrl &url, const QVariantMap &options)
         fail(error);
         return 0;
     }
-    if (m_settings) m_settings->setLastDirectory(QFileInfo(local).absolutePath());
+    if (m_settings) m_settings->setLastDirectory(QFileInfo(localFile).absolutePath());
     succeed(toQStringList(result.warnings));
     return id;
 }

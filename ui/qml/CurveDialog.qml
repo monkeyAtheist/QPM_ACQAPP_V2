@@ -3,9 +3,9 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Qacq.App
 
-// Adds curves under the signal of the "Analyse" module: a spectrum (graph of the frequencies), or a curve
-// of time (graph of time, on the time axis of the signal): the channel itself, its integral, derivative,
-// or one value per period. The curves follow the signal chosen and are computed again when it changes;
+// Adds curves under the signal of the module "Signaux": a spectrum (graph of the frequencies), a
+// spectrogram (its own graph, on the time axis of the signal), or a curve of time (graph of time, on the
+// time axis of the signal): the channel itself, its integral, derivative, or one value per period. The curves follow the signal chosen and are computed again when it changes;
 // "Garder comme signal" makes a signal of the session of them.
 Dialog {
     id: root
@@ -21,11 +21,16 @@ Dialog {
     property var chosen: []
     signal added(int count)
 
-    readonly property bool computedTime: kind !== "spectrum" && kind !== "source"
+    // Computed on a part of the signal (all of it, or between A and B): all but the spectra (on the zone
+    // analysed) and the channels themselves.
+    readonly property bool hasPart: kind !== "spectrum" && kind !== "source"
+    readonly property bool computedTime: hasPart && kind !== "spectrogram"
     readonly property bool cursorsReady: plot !== null && plot.cursorsVisible && plot.cursorFrameCount > 1
     readonly property var kinds: [
         { key: "spectrum", name: qsTr("Spectre"),
           text: qsTr("Dans le graphe des fréquences : amplitude ou densité (groupe Spectre), sur la zone analysée.") },
+        { key: "spectrogram", name: qsTr("Spectrogramme"),
+          text: qsTr("Le spectre au fil du temps, dans son graphe sous le signal : les fréquences en hauteur, le niveau en couleurs. Long sur un grand signal : la progression est affichée.") },
         { key: "source", name: qsTr("Voie d'origine"),
           text: qsTr("La voie telle quelle, dans le graphe du temps, pour y superposer d'autres courbes.") },
         { key: "integral", name: qsTr("Intégrale  ∫ x dt"),
@@ -67,7 +72,7 @@ Dialog {
     width: 560
     onAccepted: {
         const options = { withSources: root.computedTime && root.withSources, removeMean: root.removeMean }
-        if (root.computedTime && root.betweenCursors && root.cursorsReady) {
+        if (root.hasPart && root.betweenCursors && root.cursorsReady) {
             options.firstFrame = root.plot.cursorFirstFrame
             options.frameCount = root.plot.cursorFrameCount
         }
@@ -148,19 +153,19 @@ Dialog {
         }
 
         SectionTitle {
-            visible: root.computedTime
+            visible: root.hasPart
             text: qsTr("Partie du signal")
         }
         ButtonGroup { id: partGroup }
         RadioButton {
-            visible: root.computedTime
+            visible: root.hasPart
             text: qsTr("Tout le signal")
             checked: !root.betweenCursors
             ButtonGroup.group: partGroup
             onToggled: if (checked) root.betweenCursors = false
         }
         RadioButton {
-            visible: root.computedTime
+            visible: root.hasPart
             enabled: root.cursorsReady
             text: root.cursorsReady
                   ? qsTr("Entre les curseurs A et B (%1 échantillons)").arg(Units.count(root.plot.cursorFrameCount))

@@ -7,6 +7,7 @@
 #include "qacq/dsp/window.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 using namespace qacq::dsp;
@@ -215,6 +216,84 @@ TEST_CASE("Spectrogram follows a frequency step and spreads its frames over the 
     };
     CHECK_NEAR(peakFrequency(1), 500.0, 0, 32.0);
     CHECK_NEAR(peakFrequency(s.frames - 2), 1500.0, 0, 32.0);
+}
+
+TEST_CASE("Spectrogram of a long record: averaged segments miss nothing, stopped early, progress", "[spectrum]")
+{
+    // Silence with a burst of 200 samples at 3 kHz (bin 96 of 256 at 8 kHz) between the frames that
+    // spread over the record would use.
+    const double fs = 8000.0;
+    const std::size_t n = 80000;
+    std::vector<double> x(n, 0.0);
+    for (std::size_t i = 800; i < 1000; ++i) x[i] = std::sin(kTwoPi * 3000.0 * static_cast<double>(i) / fs);
+    SpectrogramOptions options;
+    options.segmentLength = 256;
+    options.maximumFrames = 50;
+    const auto loudest = [](const Spectrogram &s, std::size_t bin) {
+        double best = -1e300;
+        for (std::size_t f = 0; f < s.frames; ++f) best = std::max(best, s.at(f, bin));
+        return best;
+    };
+    const Spectrogram spread = spectrogram(x, fs, options);
+    CHECK(spread.segmentsPerFrame == 1);
+    CHECK(loudest(spread, 96) < -200.0); // missed
+    options.averageSegments = true;
+    std::atomic<int> permille{0};
+    const Spectrogram averaged = spectrogram(x, fs, options, Progress{nullptr, &permille});
+    REQUIRE(averaged.frames <= 50);
+    REQUIRE(averaged.frames >= 45);
+    CHECK(averaged.hop == 64); // the overlap asked (75 %) is kept
+    CHECK(averaged.segmentsPerFrame == (1 + (n - 256) / 64 + 49) / 50);
+    CHECK(loudest(averaged, 96) > -40.0); // seen
+    CHECK(permille.load() == 1000);
+    CHECK(averaged.timeSeconds.front() < averaged.timeSeconds.back());
+    CHECK(averaged.timeSeconds.back() < static_cast<double>(n) / fs);
+    CHECK_NEAR(averaged.frameStepSeconds, static_cast<double>(averaged.segmentsPerFrame * 64) / fs, 0, 1e-12);
+
+    // A steady sinusoid on a bin reads its amplitude in every frame, averaged or not (1 V: 0 dB).
+    std::vector<double> tone(n);
+    for (std::size_t i = 0; i < n; ++i) tone[i] = std::sin(kTwoPi * 1000.0 * static_cast<double>(i) / fs);
+    const Spectrogram steady = spectrogram(tone, fs, options);
+    for (std::size_t f = 0; f < steady.frames; f += 7) CHECK_NEAR(steady.at(f, 32), 0.0, 0, 0.01);
+
+    // Stopped before it starts: nothing.
+    const std::atomic<bool> stop{true};
+    CHECK(spectrogram(tone, fs, options, Progress{&stop, nullptr}).empty());
+}
+
+TEST_CASE("Spectrogram: the end of the record is in a frame even when the hop does not fall right", "[spectrum]")
+{
+    // 2 000 samples, segments of 1 024 every 256: four segments stop at 1 792; a fifth ends with the record,
+    // where a burst at 2 kHz (bin 256 of 1 024 at 8 kHz) lies.
+    const double fs = 8000.0;
+    std::vector<double> x(2000, 0.0);
+    for (std::size_t i = 1850; i < 2000; ++i) x[i] = std::sin(kTwoPi * 2000.0 * static_cast<double>(i) / fs);
+    SpectrogramOptions options;
+    options.segmentLength = 1024;
+    options.overlap = 0.75;
+    for (const bool averaged : {false, true})
+    {
+        options.averageSegments = averaged;
+        const Spectrogram s = spectrogram(x, fs, options);
+        REQUIRE(s.frames == 5);
+        CHECK(s.timeSeconds[3] == (768.0 + 512.0) / fs);
+        CHECK(s.timeSeconds[4] == (976.0 + 512.0) / fs); // closer to the one before
+        CHECK(s.at(4, 256) > -40.0);
+        CHECK(s.at(3, 256) < -200.0);
+    }
+    // Two segments per frame: the first and second, the third and fourth, then the fifth alone (the end).
+    options.averageSegments = true;
+    options.maximumFrames = 3;
+    const Spectrogram pairs = spectrogram(x, fs, options);
+    REQUIRE(pairs.frames == 3);
+    CHECK(pairs.segmentsPerFrame == 2);
+    CHECK(pairs.timeSeconds[1] == (512.0 + 1792.0) / 2.0 / fs);
+    CHECK(pairs.timeSeconds[2] == (976.0 + 2000.0) / 2.0 / fs);
+    CHECK(pairs.at(2, 256) > -40.0);
+    CHECK(pairs.at(1, 256) < -200.0);
+    // A hop that falls right: no segment more.
+    options.maximumFrames = 2000;
+    CHECK(spectrogram(std::vector<double>(1792, 0.0), fs, options).frames == 4);
 }
 
 TEST_CASE("chosen FFT length: zeros after the record, amplitudes and density unchanged", "[spectrum]")

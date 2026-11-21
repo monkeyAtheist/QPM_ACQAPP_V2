@@ -1,12 +1,13 @@
 #pragma once
-// The spectrum of the "Analyse" module: the curves of qacq::app::AnalysisController (one per real
+// The spectra of the module "Signaux": the curves of qacq::app::AnalysisController (one per real
 // channel or I/Q pair) on one frequency axis, linear or logarithmic, levels in dB or linear.
 //
 // Mouse, as on the time plot: the wheel zooms the frequencies about the pointer (Ctrl, or over the scale:
 // the levels); a drag moves what it is mostly along (sideways the frequencies, up or down the levels, in
 // between both), on the scale the levels only, on the frequency axis the frequencies only; a right drag
 // zooms on the band it covers; a double click shows everything again (on the scale: automatic levels).
-// Keys: ← → the frequencies, ↑ ↓ the levels.
+// Keys: ← → the frequencies, ↑ ↓ the levels. A right click on the scale of the levels or on the frequency
+// axis asks for the menu of that scale (scaleMenuRequested); elsewhere, for the plot's menu.
 // The readout gives, for each curve, the highest bin under the pointer (what the stroke shows there):
 // its frequency and level (in dB, the amplitude as well). The harmonics found by the tone measurement
 // are marked H2, H3...
@@ -95,6 +96,13 @@ public:
     Q_INVOKABLE void scrollTo(double start);
     Q_INVOKABLE void scrollBy(double viewFraction);
 
+    // The scales, for the menu of a scale: "frequency" or "levels". The map: { key, kind, title, unit,
+    // low, high, automatic, lowLabel, highLabel, autoText, positive (logarithmic: above 0) }; empty without
+    // a spectrum. Both ends set by hand go in the history, as the gestures do.
+    Q_INVOKABLE QVariantMap scaleInfo(const QString &key) const;
+    Q_INVOKABLE bool setScaleRange(const QString &key, double low, double high);
+    Q_INVOKABLE void setScaleAutomatic(const QString &key);
+
     void paint(QPainter *painter) override;
 
 signals:
@@ -106,6 +114,8 @@ signals:
     void scalesChanged();
     // A right click that did not drag (the plot's menu), at this point of the item.
     void contextMenuRequested(double x, double y);
+    // The same on the scale of the levels or on the frequency axis: the menu of that scale (scaleInfo).
+    void scaleMenuRequested(double x, double y, const QVariantMap &scale);
     void markerChanged();
 
 protected:

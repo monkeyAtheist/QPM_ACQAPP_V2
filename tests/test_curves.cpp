@@ -3,6 +3,7 @@
 #include "qacq/analysis/analysis.h"
 #include "qacq/analysis/curves.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numbers>
@@ -63,6 +64,85 @@ TEST_CASE("curves: kinds, names, units, parts", "[analysis]")
     CHECK((curvePart(c, s) == std::pair<std::size_t, std::size_t>(4000, 800)));
     c.firstFrame = 9000;
     CHECK(curvePart(c, s).second == 0);
+}
+
+TEST_CASE("curves: the spectrogram of a part, in its own graph, saved with its part", "[analysis]")
+{
+    CurveKind k = CurveKind::Spectrum;
+    REQUIRE(curveKindFromKey("spectrogram", k));
+    CHECK(k == CurveKind::Spectrogram);
+    CHECK(!isTimeCurve(CurveKind::Spectrogram));
+    CHECK(curveGraph(CurveKind::Spectrogram) == "spectrogram");
+    CHECK(curveGraph(CurveKind::Spectrum) == "frequency");
+    CHECK(curveGraph(CurveKind::Derivative) == "time");
+    CHECK(hasPart(CurveKind::Spectrogram));
+    CHECK(!hasPart(CurveKind::Source));
+    CHECK(curveKindName(CurveKind::Spectrogram) == "Spectrogramme");
+
+    Signal s = twoChannels();
+    const CurveSpec spec{4, CurveKind::Spectrogram, 0, true, false, 480, 2400};
+    const std::vector<CurveSpec> back = curveSpecsFromJson(toJson(std::vector<CurveSpec>{spec}));
+    REQUIRE(back.size() == 1);
+    CHECK(back[0].kind == CurveKind::Spectrogram);
+    CHECK(back[0].firstFrame == 480);
+    CHECK(back[0].frameCount == 2400);
+    CHECK(curveName(spec, s) == "Tension");
+    CHECK(curveUnit(spec, s) == "V");
+
+    SpectrogramSettings settings;
+    settings.segmentLength = 480; // 100 Hz per bin at 48 kHz: 1 kHz is bin 10
+    settings.overlap = 0.5;
+    const qacq::dsp::Spectrogram g = computeSpectrogram(s, spec, settings);
+    REQUIRE(!g.empty());
+    CHECK(g.bins == 241);
+    CHECK(g.frames == (2400 - 480) / 240 + 1);
+    CHECK(g.timeSeconds.front() == 240.0 / 48000.0); // from the start of the part
+    // 0,5 V at 1 kHz: −6,02 dB in every frame.
+    for (std::size_t f = 0; f < g.frames; ++f) CHECK_NEAR(g.at(f, 10), 20.0 * std::log10(0.5), 0, 0.01);
+    // Not a spectrogram, or no such channel: nothing.
+    CHECK(computeSpectrogram(s, {5, CurveKind::Integral, 0}, settings).empty());
+    CHECK(computeSpectrogram(s, {6, CurveKind::Spectrogram, 9}, settings).empty());
+    // A missing sample counts as a zero: every level stays a number.
+    auto holes = std::make_shared<SampleData>(*s.data);
+    holes->channels[0][1000] = std::numeric_limits<double>::quiet_NaN();
+    s.data = holes;
+    const qacq::dsp::Spectrogram h = computeSpectrogram(s, spec, settings);
+    REQUIRE(!h.empty());
+    CHECK(std::all_of(h.amplitudeDb.begin(), h.amplitudeDb.end(), [](double v) { return std::isfinite(v); }));
+}
+
+TEST_CASE("curves: a spectrogram of long segments keeps fewer columns, not hundreds of megabytes", "[analysis]")
+{
+    // 20 s at 48 kHz, 1 kHz: 4 096 samples per segment, 50 %: 467 segments, and one more that ends with
+    // the record.
+    auto data = std::make_shared<SampleData>();
+    data->channels.assign(1, std::vector<double>(960000));
+    for (std::size_t i = 0; i < data->channels[0].size(); ++i)
+        data->channels[0][i] = std::sin(2.0 * std::numbers::pi * 1000.0 * static_cast<double>(i) / 48000.0);
+    Signal s;
+    s.id = 8;
+    s.sampleRateHz = 48000.0;
+    s.channels = {ChannelInfo{"Tension", "V"}};
+    s.data = data;
+    const CurveSpec spec{1, CurveKind::Spectrogram, 0};
+    SpectrogramSettings settings;
+    settings.segmentLength = 4096;
+    settings.overlap = 0.5;
+    // Room for every segment: one per column.
+    const qacq::dsp::Spectrogram all = computeSpectrogram(s, spec, settings);
+    CHECK(all.frames == 468);
+    CHECK(all.segmentsPerFrame == 1);
+    // Room for 500 000 levels: 244 columns at most (2 049 bins), here 468 segments two by two.
+    settings.maximumLevels = 500'000;
+    const qacq::dsp::Spectrogram fewer = computeSpectrogram(s, spec, settings);
+    CHECK(fewer.segmentsPerFrame == 2);
+    CHECK(fewer.frames == 234);
+    CHECK(fewer.frames * fewer.bins <= 500'000);
+    // The cap never goes under 200 columns: 468 segments three by three.
+    settings.maximumLevels = 1000;
+    const qacq::dsp::Spectrogram least = computeSpectrogram(s, spec, settings);
+    CHECK(least.segmentsPerFrame == 3);
+    CHECK(least.frames == 156);
 }
 
 TEST_CASE("curves: the list in the session file", "[analysis]")

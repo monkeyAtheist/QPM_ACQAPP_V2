@@ -44,6 +44,11 @@ bool takesPrefix(std::string_view unit);
 // Significant digits that show `value` down to `resolution` (a fraction of the range on screen), within
 // [minimum, maximum]: 2,4 GHz read to the hertz needs ten.
 int significantFor(double value, double resolution, int minimum = 4, int maximum = 12);
+// Significant digits for values that spread over `spread` around `magnitude` (statistics of a part, the
+// values under two cursors): about twenty steps of the last digit across the spread, so that they can be
+// told apart. 440 Hz ± 4 mHz → 7 ("440,0021 Hz"), 5 V ± 1 mV → 5, a signal using its whole scale (or no
+// spread) → `minimum`.
+int significantForSpread(double magnitude, double spread, int minimum = 4, int maximum = 9);
 
 struct AxisLabels
 {

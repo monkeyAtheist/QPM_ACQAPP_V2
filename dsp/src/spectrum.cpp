@@ -197,21 +197,31 @@ WelchResult welch(std::span<const double> x, double fs, const WelchOptions &opti
     return result;
 }
 
-Spectrogram spectrogram(std::span<const double> x, double fs, const SpectrogramOptions &options)
+Spectrogram spectrogram(std::span<const double> x, double fs, const SpectrogramOptions &options, const Progress &progress)
 {
     Spectrogram result;
     if (x.size() < 2 || !validRate(fs)) return result;
 
     const std::size_t segment = std::clamp<std::size_t>(options.segmentLength, 2, x.size());
     std::size_t hop = segment - overlapSamples(options.overlap, segment);
-    const std::size_t possible = 1 + (x.size() - segment) / hop;
     const std::size_t maximum = std::max<std::size_t>(1, options.maximumFrames);
-    if (possible > maximum)
+    // The segments every `hop` samples, and one more that ends with the record when they stop short of it
+    // (otherwise up to hop - 1 samples at the end would be in none).
+    const std::size_t regular = 1 + (x.size() - segment) / hop;
+    const bool spread = !options.averageSegments && regular > maximum;
+    std::size_t perFrame = 1; // segments averaged into one frame
+    if (spread)
     {
         // Spread the frames over the whole record rather than stopping early.
         hop = std::max(hop, (x.size() - segment) / std::max<std::size_t>(1, maximum - 1));
         while (1 + (x.size() - segment) / hop > maximum) ++hop;
     }
+    const std::size_t stepped = 1 + (x.size() - segment) / hop;
+    const bool endSegment = !spread && (stepped - 1) * hop + segment < x.size();
+    const std::size_t segments = stepped + (endSegment ? 1 : 0);
+    if (options.averageSegments && segments > maximum) perFrame = (segments + maximum - 1) / maximum;
+    const auto startOf = [&](std::size_t g) { return g < stepped ? g * hop : x.size() - segment; };
+    const std::size_t frames = (segments + perFrame - 1) / perFrame;
     const std::vector<double> w = makeWindow(options.window, segment, WindowSymmetry::Periodic, options.kaiserBeta);
     double sum = 0.0;
     for (double v : w) sum += v;
@@ -219,28 +229,52 @@ Spectrogram spectrogram(std::span<const double> x, double fs, const SpectrogramO
     const FftPlan plan(segment);
     const std::size_t bins = segment / 2 + 1;
     std::vector<Complex> work(segment);
+    std::vector<double> power(bins);
     result.frequencyHz.resize(bins);
     for (std::size_t k = 0; k < bins; ++k)
         result.frequencyHz[k] = static_cast<double>(k) * fs / static_cast<double>(segment);
-    for (std::size_t start = 0; start + segment <= x.size(); start += hop)
+    result.amplitudeDb.reserve(frames * bins);
+    result.timeSeconds.reserve(frames);
+    std::size_t done = 0;
+    for (std::size_t f = 0; f < frames; ++f)
     {
-        const auto part = x.subspan(start, segment);
-        const double offset = options.removeSegmentMean ? offsetOf(part, w, options.windowedMean) : 0.0;
-        for (std::size_t i = 0; i < segment; ++i) work[i] = Complex((part[i] - offset) * w[i], 0.0);
-        plan.forward(work);
-        for (std::size_t k = 0; k < bins; ++k)
+        const std::size_t first = f * perFrame;
+        const std::size_t last = std::min(segments, first + perFrame); // past the last segment of the frame
+        std::fill(power.begin(), power.end(), 0.0);
+        for (std::size_t g = first; g < last; ++g)
         {
-            const double amplitude = (doubledBin(k, segment) ? 2.0 : 1.0) * std::abs(work[k]) / sum;
-            result.amplitudeDb.push_back(20.0 * std::log10(std::max(amplitude, 1e-300)));
+            const auto part = x.subspan(startOf(g), segment);
+            const double offset = options.removeSegmentMean ? offsetOf(part, w, options.windowedMean) : 0.0;
+            for (std::size_t i = 0; i < segment; ++i) work[i] = Complex((part[i] - offset) * w[i], 0.0);
+            plan.forward(work);
+            for (std::size_t k = 0; k < bins; ++k)
+            {
+                const double amplitude = (doubledBin(k, segment) ? 2.0 : 1.0) * std::abs(work[k]) / sum;
+                power[k] += amplitude * amplitude;
+            }
+            if (++done % 64 == 0)
+            {
+                if (progress.cancelled && progress.cancelled->load(std::memory_order_relaxed)) return {};
+                if (progress.permille)
+                    progress.permille->store(static_cast<int>(done * 1000 / segments), std::memory_order_relaxed);
+            }
         }
-        result.timeSeconds.push_back((static_cast<double>(start) + 0.5 * static_cast<double>(segment)) / fs);
+        // The amplitude of the mean power: a steady sinusoid reads its own amplitude.
+        const double count = static_cast<double>(last - first);
+        for (std::size_t k = 0; k < bins; ++k)
+            result.amplitudeDb.push_back(10.0 * std::log10(std::max(power[k] / count, 1e-300)));
+        const double from = static_cast<double>(startOf(first));
+        const double to = static_cast<double>(startOf(last - 1) + segment);
+        result.timeSeconds.push_back(0.5 * (from + to) / fs);
         ++result.frames;
     }
+    if (progress.permille) progress.permille->store(1000, std::memory_order_relaxed);
     result.bins = bins;
     result.segmentLength = segment;
     result.hop = hop;
-    result.frameDurationSeconds = static_cast<double>(segment) / fs;
-    result.frameStepSeconds = static_cast<double>(hop) / fs;
+    result.segmentsPerFrame = perFrame;
+    result.frameDurationSeconds = static_cast<double>((perFrame - 1) * hop + segment) / fs;
+    result.frameStepSeconds = static_cast<double>(perFrame * hop) / fs;
     return result;
 }
 } // namespace qacq::dsp

@@ -18,6 +18,8 @@
 #include <cmath>
 #include <fstream>
 #include <memory>
+#include <utility>
+#include <vector>
 
 using namespace qacq;
 using namespace qacq::app;
@@ -329,6 +331,70 @@ TEST_CASE("Session: a text file is inspected, then imported as recognised", "[ap
     CHECK(session.signalList()->signalById(plain)->sampleRateHz == 10.0);
     CHECK(session.inspectImport(QUrl::fromLocalFile(dir.filePath(QStringLiteral("absent.csv")))).value(QStringLiteral("ok")).toBool() == false);
     CHECK(session.inspectImport(QUrl::fromLocalFile(dir.filePath(QStringLiteral("tableur.csv")))).value(QStringLiteral("lines")).toInt() == 4);
+}
+
+TEST_CASE("Session: an import on its own thread, followed, cancelled", "[app]")
+{
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    Session session;
+    // About 6 MB of text (times in ms): long enough to be stopped on the way.
+    const QString big = dir.filePath(QStringLiteral("long.csv"));
+    {
+        std::ofstream out(toPath(big), std::ios::binary);
+        out << "t;v\n";
+        for (int i = 0; i < 600000; ++i) out << i << ';' << (i % 100) << '\n';
+    }
+    const QVariantMap options{{QStringLiteral("timeColumn"), true},
+                              {QStringLiteral("decimalComma"), false},
+                              {QStringLiteral("timeUnitSeconds"), 1e-3}};
+    std::vector<std::pair<qint64, bool>> finished;
+    QObject::connect(&session, &Session::importFinished,
+                     [&finished](qint64 id, bool cancelled) { finished.emplace_back(id, cancelled); });
+
+    REQUIRE(session.startImport(QUrl::fromLocalFile(big), options));
+    CHECK(session.importing());
+    CHECK(session.importName() == QStringLiteral("long.csv"));
+    CHECK(session.importProgress() == 0.0);
+    CHECK(!session.startImport(QUrl::fromLocalFile(big), options)); // one at a time
+    CHECK(session.lastError().contains(QStringLiteral("déjà")));
+    session.waitForImport();
+    REQUIRE(finished.size() == 1);
+    CHECK(finished[0].first > 0);
+    CHECK(!finished[0].second);
+    CHECK(!session.importing());
+    const model::SignalPtr s = session.signalList()->signalById(finished[0].first);
+    REQUIRE(s != nullptr);
+    CHECK(s->frameCount() == 600000);
+    CHECK(s->sampleRateHz == 1000.0);
+    CHECK(session.lastError().isEmpty());
+
+    // Cancelled on the way: nothing added.
+    const int count = session.signalList()->count();
+    REQUIRE(session.startImport(QUrl::fromLocalFile(big), options));
+    session.cancelImport();
+    session.waitForImport();
+    REQUIRE(finished.size() == 2);
+    CHECK(finished[1].first == 0);
+    CHECK(finished[1].second);
+    CHECK(session.signalList()->count() == count);
+
+    // A file that cannot be read: finished with 0, the error said.
+    REQUIRE(session.startImport(QUrl::fromLocalFile(dir.filePath(QStringLiteral("image.png")))));
+    session.waitForImport();
+    REQUIRE(finished.size() == 3);
+    CHECK(finished[2].first == 0);
+    CHECK(!finished[2].second);
+    CHECK(session.lastError().contains(QStringLiteral("png")));
+
+    // A new session while it reads: what it reads was for the one before.
+    REQUIRE(session.startImport(QUrl::fromLocalFile(big), options));
+    session.newSession();
+    session.waitForImport();
+    REQUIRE(finished.size() == 4);
+    CHECK(finished[3].first == 0);
+    CHECK(finished[3].second);
+    CHECK(session.signalList()->count() == 0);
 }
 
 TEST_CASE("Settings: recent files, last folder, presets, persistence", "[app]")

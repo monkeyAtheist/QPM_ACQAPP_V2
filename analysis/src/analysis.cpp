@@ -297,6 +297,8 @@ model::Json toJson(const AnalysisSettings &s)
     j["logFrequency"] = s.logFrequency;
     j["harmonics"] = static_cast<unsigned long long>(s.harmonics);
     j["edgeLow"] = s.edgeLow;
+    j["spectrogramSegment"] = static_cast<unsigned long long>(s.spectrogramSegment);
+    j["spectrogramOverlap"] = s.spectrogramOverlap;
     return j;
 }
 
@@ -320,6 +322,10 @@ AnalysisSettings analysisSettingsFromJson(const model::Json &j)
     const double harmonics = j["harmonics"].toNumber(static_cast<double>(s.harmonics));
     if (std::isfinite(harmonics)) s.harmonics = static_cast<std::size_t>(std::clamp(harmonics, 2.0, 50.0));
     s.edgeLow = j["edgeLow"].toNumber(s.edgeLow) == 0.2 ? 0.2 : 0.1;
+    const double stft = j["spectrogramSegment"].toNumber(static_cast<double>(s.spectrogramSegment));
+    if (std::isfinite(stft)) s.spectrogramSegment = static_cast<std::size_t>(std::clamp(stft, 16.0, 65536.0));
+    const double stftOverlap = j["spectrogramOverlap"].toNumber(s.spectrogramOverlap);
+    if (std::isfinite(stftOverlap)) s.spectrogramOverlap = std::clamp(stftOverlap, 0.0, 0.9);
     return s;
 }
 

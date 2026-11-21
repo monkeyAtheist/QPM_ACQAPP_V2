@@ -32,7 +32,6 @@ qt_add_qml_module(QTacquisitionApp
         qml/StatusStrip.qml
         qml/FirmwareDialog.qml
         qml/ImportDialog.qml
-        qml/AnalysisView.qml
         qml/AnalysisPanel.qml
         qml/CursorReadout.qml
         qml/ImageActions.qml
@@ -40,11 +39,18 @@ qt_add_qml_module(QTacquisitionApp
         qml/CurveDialog.qml
         qml/CurveChips.qml
         qml/PlotMenu.qml
+        qml/ViewGroup.qml
+        qml/ScaleMenu.qml
+        qml/WindowField.qml
+        qml/SpectrumSettings.qml
+        qml/SpectrogramSettings.qml
     SOURCES
         signal_plot.h
         signal_plot.cpp
         spectrum_plot.h
         spectrum_plot.cpp
+        spectrogram_plot.h
+        spectrogram_plot.cpp
         image_tools.h
         image_tools.cpp
 )

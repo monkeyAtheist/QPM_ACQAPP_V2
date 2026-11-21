@@ -1,5 +1,5 @@
 #pragma once
-// The "Analyse" module without Qt: what is measured on a part of a signal, and its spectrum as the
+// The analysis of the module "Signaux" without Qt: what is measured on a part of a signal, and its spectrum as the
 // plot shows it.
 //
 //   analyse()          one call for a zone of a signal: the spectrum of every channel (or I/Q pair),
@@ -56,6 +56,9 @@ struct AnalysisSettings
     bool logFrequency = false;
     std::size_t harmonics = 10; // fundamental included
     double edgeLow = 0.1;       // rise and fall times from 10 % to 90 % (0.2: 20 % to 80 %)
+    // Spectrograms (curves added, with the window above): length of the segments, overlap.
+    std::size_t spectrogramSegment = 1024;
+    double spectrogramOverlap = 0.75;
 };
 
 model::Json toJson(const AnalysisSettings &settings);

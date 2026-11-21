@@ -38,6 +38,7 @@ std::string writeWav(std::ostream &out, const Signal &signal, const WavWriteOpti
 std::string exportWav(const std::filesystem::path &file, const Signal &signal, const WavWriteOptions &options = {},
                       std::vector<std::string> *warnings = nullptr);
 
-ImportResult readWav(std::istream &in, const std::string &name);
-ImportResult importWav(const std::filesystem::path &file);
+// The progress goes by the samples converted; cancelled: ImportResult::cancelled.
+ImportResult readWav(std::istream &in, const std::string &name, const Progress &progress = {});
+ImportResult importWav(const std::filesystem::path &file, const Progress &progress = {});
 } // namespace qacq::model

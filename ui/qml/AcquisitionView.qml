@@ -45,6 +45,7 @@ Item {
         parent: root.ribbonHost ? root.ribbonHost : root
         visible: root.visible
         tabs: [qsTr("Acquisition")]
+        tabIcons: ["acquire"]
 
         RibbonGroup {
             title: qsTr("Source")
@@ -297,13 +298,12 @@ Item {
                 tip: qsTr("Les voies sur un même tracé (une échelle par unité, à gauche et à droite), ou une bande chacune ; clic droit sur le tracé : choisir les voies")
                 onClicked: plot.stacked = !plot.stacked
             }
-            RibbonButton {
-                glyph: "fit"
-                text: qsTr("Échelles")
-                enabled: plot.hasData
-                tip: qsTr("Échelles automatiques et tout voir (double clic sur le tracé)")
-                onClicked: plot.showAll()
-            }
+        }
+        // The same group as in "Signaux"; while the data roll in, the zoom sets the width of the window.
+        ViewGroup {
+            target: plot
+            rolling: root.running && !plot.capture
+            fitTip: qsTr("Tout l'enregistrement, échelles automatiques (en direct : échelles automatiques ; double clic sur le tracé)")
         }
         RibbonGroup {
             title: qsTr("Mesurer")
@@ -315,13 +315,6 @@ Item {
                 tip: plot.cursorsAvailable ? qsTr("Deux curseurs A et B : Δt, 1/Δt, valeurs et statistiques entre eux")
                                            : qsTr("Figez le tracé ou déclenchez pour poser des curseurs")
                 onClicked: plot.cursorsVisible = !plot.cursorsVisible
-            }
-            RibbonButton {
-                glyph: "back"
-                text: qsTr("Précédente")
-                enabled: plot.canGoBack
-                tip: qsTr("Revenir à la vue d'avant")
-                onClicked: plot.goBack()
             }
         }
         ImageActions {
@@ -393,6 +386,7 @@ Item {
                 channelColors: Theme.channelColors
                 emptyText: qsTr("Choisissez la source dans le panneau de droite (le simulateur ne demande aucun matériel), puis Démarrer.\nUne fois arrêtée, l'acquisition devient un signal de la session.")
                 onContextMenuRequested: (x, y) => plotMenu.openAt(plot, x, y)
+                onScaleMenuRequested: (x, y, scale) => scaleMenu.openFor(plot, x, y, scale)
             }
             ViewScrollBar {
                 id: scrollBar
@@ -414,6 +408,10 @@ Item {
                 id: plotMenu
                 view: plot
                 mode: "channels"
+            }
+            // Right click on a scale or on the time axis: its ends, automatic.
+            ScaleMenu {
+                id: scaleMenu
             }
             PlotToolbar {
                 view: plot

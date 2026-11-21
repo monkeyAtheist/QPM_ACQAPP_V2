@@ -218,6 +218,8 @@ TEST_CASE("analysis settings: JSON round trip, values out of range", "[analysis]
     s.scale = LevelScale::Linear;
     s.logFrequency = true;
     s.harmonics = 7;
+    s.spectrogramSegment = 4096;
+    s.spectrogramOverlap = 0.5;
     const AnalysisSettings b = analysisSettingsFromJson(toJson(s));
     CHECK(b.kind == s.kind);
     CHECK(b.window == s.window);
@@ -229,17 +231,22 @@ TEST_CASE("analysis settings: JSON round trip, values out of range", "[analysis]
     CHECK(b.scale == LevelScale::Linear);
     CHECK(b.logFrequency);
     CHECK(b.harmonics == 7);
+    CHECK(b.spectrogramSegment == 4096);
+    CHECK(b.spectrogramOverlap == 0.5);
 
     qacq::model::Json bad = qacq::model::Json::object();
     bad["window"] = "triangle";
     bad["zeroPadFactor"] = 3;
     bad["overlap"] = 2.0;
     bad["segmentLength"] = 1;
+    bad["spectrogramSegment"] = 1e9;
     const AnalysisSettings d = analysisSettingsFromJson(bad);
     CHECK(d.window == qacq::dsp::Window::Hann);
     CHECK(d.zeroPadFactor == 1);
     CHECK(d.overlap == 0.95);
     CHECK(d.segmentLength == 16);
+    CHECK(d.spectrogramSegment == 65536);
+    CHECK(d.spectrogramOverlap == 0.75);
     CHECK(analysisSettingsFromJson(qacq::model::Json()).kind == SpectrumKind::Amplitude);
 }
 

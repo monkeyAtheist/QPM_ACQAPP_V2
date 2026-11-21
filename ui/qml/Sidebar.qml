@@ -2,7 +2,8 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Module navigation: one entry per module, the same layout behind each one (as in QTsignalApp V2).
+// Module navigation: one entry per module, the same layout behind each one (as in QTsignalApp V2). The
+// analysis of a signal (spectra, curves, measurements) is part of "Signaux".
 Rectangle {
     id: root
     property int current: 0
@@ -14,7 +15,6 @@ Rectangle {
     readonly property var modules: [
         { icon: "signals", label: qsTr("Signaux"), ready: true, tip: "" },
         { icon: "acquire", label: qsTr("Acqui-\nsition"), ready: true, tip: "" },
-        { icon: "analysis", label: qsTr("Analyse"), ready: true, tip: "" },
         { icon: "generator", label: qsTr("Généra-\nteur"), ready: false, tip: qsTr("Formes d'onde et bruit : phase 4 de la refonte") },
         { icon: "filter", label: qsTr("Filtres"), ready: false, tip: qsTr("Filtres RIF et RII : phase 4 de la refonte") },
         { icon: "modulation", label: qsTr("Modula-\ntions"), ready: false, tip: qsTr("Modulations numériques et analogiques : phase 4 de la refonte") }

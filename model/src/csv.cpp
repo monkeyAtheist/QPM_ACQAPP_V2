@@ -140,12 +140,29 @@ std::string exportCsv(const std::filesystem::path &file, const Signal &signal, c
     return writeCsv(out, signal, options);
 }
 
-ImportResult readCsv(std::istream &in, const std::string &name, const CsvImportOptions &options)
+ImportResult readCsv(std::istream &in, const std::string &name, const CsvImportOptions &options, const Progress &progress)
 {
     ImportResult result;
     Signal &signal = result.signal;
     signal.name = name.empty() ? "Import CSV" : name;
     signal.origin = Origin::Imported;
+    const auto stoppedHere = [&progress, &result] {
+        if (!progress.stopped()) return false;
+        result.cancelled = true;
+        result.error = "Import annulé.";
+        return true;
+    };
+
+    // What is left to read, for the progress (0 when the stream cannot tell).
+    std::uint64_t total = 0, consumed = 0;
+    if (const std::streampos here = in.tellg(); here != std::streampos(-1))
+    {
+        in.seekg(0, std::ios::end);
+        const std::streampos end = in.tellg();
+        if (end != std::streampos(-1) && end > here) total = static_cast<std::uint64_t>(end - here);
+        in.clear();
+        in.seekg(here);
+    }
 
     // Header: the first line that is neither empty nor a comment, if none of its fields is a number.
     std::vector<std::string> titles;
@@ -184,12 +201,16 @@ ImportResult readCsv(std::istream &in, const std::string &name, const CsvImportO
     std::vector<char> buffer(1 << 20);
     while (in)
     {
+        if (stoppedHere()) return result;
         in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const auto got = static_cast<std::size_t>(in.gcount());
         if (got == 0) break;
         decoder.decode({reinterpret_cast<const std::uint8_t *>(buffer.data()), got}, block);
+        consumed += got;
+        progress.report(consumed * 95, total * 100); // the last 5 %: columns and times
     }
     decoder.decode({reinterpret_cast<const std::uint8_t *>("\n"), 1}, block); // a last line without newline
+    if (stoppedHere()) return result;
 
     const auto &stats = decoder.statistics();
     if (stats.rejected > 0)
@@ -268,10 +289,11 @@ ImportResult readCsv(std::istream &in, const std::string &name, const CsvImportO
     signal.provenance["import"] = "csv";
     const std::string problem = validateSignal(signal);
     if (!problem.empty()) result.error = problem;
+    progress.report(1, 1);
     return result;
 }
 
-ImportResult importCsv(const std::filesystem::path &file, const CsvImportOptions &options)
+ImportResult importCsv(const std::filesystem::path &file, const CsvImportOptions &options, const Progress &progress)
 {
     std::ifstream in(file, std::ios::binary);
     if (!in)
@@ -281,7 +303,7 @@ ImportResult importCsv(const std::filesystem::path &file, const CsvImportOptions
         return r;
     }
     const std::u8string stem = file.stem().u8string();
-    ImportResult r = readCsv(in, std::string(reinterpret_cast<const char *>(stem.data()), stem.size()), options);
+    ImportResult r = readCsv(in, std::string(reinterpret_cast<const char *>(stem.data()), stem.size()), options, progress);
     r.signal.provenance["file"] = detail::displayName(file);
     return r;
 }

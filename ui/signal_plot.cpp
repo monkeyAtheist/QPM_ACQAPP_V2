@@ -771,6 +771,119 @@ void SignalPlot::autoScaleLane(const Lane &lane, bool right)
     update();
 }
 
+QString SignalPlot::scaleKeyAt(const QPointF &at) const
+{
+    if (m_channels.empty()) return {};
+    int index = -1;
+    const Place place = placeAt(at, &index);
+    if (place == Place::TimeAxis) return QStringLiteral("time");
+    if ((place != Place::LeftScale && place != Place::RightScale) || index < 0 ||
+        static_cast<std::size_t>(index) >= m_lastLanes.size())
+        return {};
+    const bool right = place == Place::RightScale;
+    const Lane &lane = m_lastLanes[static_cast<std::size_t>(index)];
+    const std::vector<int> &channels = right ? lane.rightChannels : lane.channels;
+    if (channels.empty()) return {};
+    return QStringLiteral("values:%1:%2").arg(channels.front()).arg(right ? QStringLiteral("right") : QStringLiteral("left"));
+}
+
+const SignalPlot::Lane *SignalPlot::laneOfScale(const QString &key, bool *right) const
+{
+    const QStringList parts = key.split(QLatin1Char(':'));
+    if (parts.size() != 3 || parts.at(0) != QStringLiteral("values")) return nullptr;
+    bool ok = false;
+    const int channel = parts.at(1).toInt(&ok);
+    if (!ok) return nullptr;
+    *right = parts.at(2) == QStringLiteral("right");
+    for (const Lane &lane : m_lastLanes)
+    {
+        const std::vector<int> &channels = *right ? lane.rightChannels : lane.channels;
+        if (std::find(channels.begin(), channels.end(), channel) != channels.end()) return &lane;
+    }
+    return nullptr;
+}
+
+QVariantMap SignalPlot::scaleInfo(const QString &key) const
+{
+    QVariantMap m;
+    if (key == QStringLiteral("time"))
+    {
+        if (m_channels.empty()) return m;
+        m.insert(QStringLiteral("key"), key);
+        m.insert(QStringLiteral("kind"), QStringLiteral("time"));
+        m.insert(QStringLiteral("title"), tr("Axe du temps"));
+        m.insert(QStringLiteral("unit"), timeUnit());
+        m.insert(QStringLiteral("low"), m_view.low);
+        m.insert(QStringLiteral("high"), m_view.high);
+        m.insert(QStringLiteral("automatic"), !zoomed());
+        m.insert(QStringLiteral("lowLabel"), tr("Début"));
+        m.insert(QStringLiteral("highLabel"), tr("Fin"));
+        m.insert(QStringLiteral("autoText"), tr("Tout le signal"));
+        if (m_live && !m_showingCapture)
+            m.insert(QStringLiteral("locked"), tr("En direct, la largeur de la fenêtre se règle avec le champ Fenêtre du ruban."));
+        return m;
+    }
+    bool right = false;
+    const Lane *lane = laneOfScale(key, &right);
+    if (!lane) return m;
+    const std::vector<int> &channels = right ? lane->rightChannels : lane->channels;
+    QStringList names;
+    bool automatic = true;
+    for (int c : channels)
+    {
+        if (c < 0 || static_cast<std::size_t>(c) >= m_channels.size()) continue;
+        const Channel &ch = m_channels[static_cast<std::size_t>(c)];
+        automatic = automatic && ch.automatic;
+        if (names.size() < 3) names << ch.name;
+        else if (names.size() == 3) names << QStringLiteral("…");
+    }
+    if (!lane->perChannel) automatic = right ? m_overlayRightAutomatic : m_overlayAutomatic;
+    const QString unit = right ? lane->rightUnit : lane->unit;
+    const Range r = scaleOf(*lane, right);
+    m.insert(QStringLiteral("key"), key);
+    m.insert(QStringLiteral("kind"), QStringLiteral("values"));
+    m.insert(QStringLiteral("title"), names.join(QStringLiteral(", ")) + (unit.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(unit)));
+    m.insert(QStringLiteral("unit"), unit);
+    m.insert(QStringLiteral("low"), r.low);
+    m.insert(QStringLiteral("high"), r.high);
+    m.insert(QStringLiteral("automatic"), automatic);
+    m.insert(QStringLiteral("lowLabel"), tr("Minimum"));
+    m.insert(QStringLiteral("highLabel"), tr("Maximum"));
+    m.insert(QStringLiteral("autoText"), tr("Automatique"));
+    return m;
+}
+
+bool SignalPlot::setScaleRange(const QString &key, double low, double high)
+{
+    if (!std::isfinite(low) || !std::isfinite(high) || !(high > low)) return false;
+    if (key == QStringLiteral("time"))
+    {
+        if (m_channels.empty() || (m_live && !m_showingCapture)) return false;
+        rememberView();
+        setViewRange({low, high}); // within the signal, at least a few samples
+        return true;
+    }
+    bool right = false;
+    const Lane *lane = laneOfScale(key, &right);
+    if (!lane) return false;
+    setLaneScale(*lane, right, {low, high});
+    return true;
+}
+
+void SignalPlot::setScaleAutomatic(const QString &key)
+{
+    if (key == QStringLiteral("time"))
+    {
+        if (m_channels.empty() || (m_live && !m_showingCapture)) return;
+        rememberView();
+        setViewRange(m_limits);
+        return;
+    }
+    bool right = false;
+    const Lane *lane = laneOfScale(key, &right);
+    if (lane) autoScaleLane(*lane, right);
+}
+
 void SignalPlot::dragValues(double dy)
 {
     if (m_grabLane < 0 || static_cast<std::size_t>(m_grabLane) >= m_lastLanes.size()) return;
@@ -1394,8 +1507,6 @@ void SignalPlot::refreshCursors()
             };
             const double va = at(m_cursorA), vb = at(m_cursorB);
             const std::string unit = utf8(ch.unit);
-            const double scale = std::max(std::abs(va), std::abs(vb));
-            const int vd = qacq::plot::significantFor(scale, std::max(scale, 1e-300) * 1e-4, 4, 8);
             // The samples between A and B (both included).
             const auto n = static_cast<double>(ch.values.size());
             const double first = std::clamp(std::ceil((lo - m_timeOrigin) * rate - ch.frameOffset - 1e-9), 0.0, n);
@@ -1403,14 +1514,22 @@ void SignalPlot::refreshCursors()
             const auto span = last > first ? ch.values.subspan(static_cast<std::size_t>(first), static_cast<std::size_t>(last - first))
                                            : std::span<const double>();
             const qacq::analysis::SpanStatistics st = qacq::analysis::spanStatistics(span);
+            // Digits enough to tell apart the values between A and B (a frequency of 440 Hz ± 4 mHz reads
+            // "440,0021 Hz", not "440,0 Hz" for all of them); Δ down to the step of the last digit of A and B.
+            const double spread = st.samples > 0 ? st.peakToPeak : 0.0;
+            const double scale = std::max(std::abs(va), std::abs(vb));
+            const int vd = std::max(qacq::plot::significantFor(scale, std::max(scale, 1e-300) * 1e-4, 4, 8),
+                                    qacq::plot::significantForSpread(scale, spread));
+            const int dd = qacq::plot::significantFor(vb - va, scale * std::pow(10.0, 1.0 - vd), 3, 9);
             QString stats;
             if (st.samples > 0)
             {
+                const int sd = qacq::plot::significantForSpread(std::max(std::abs(st.minimum), std::abs(st.maximum)), spread);
                 stats = tr("min %1 · max %2 · moy %3 · eff %4 · c-c %5")
-                            .arg(text(qacq::plot::formatQuantity(st.minimum, unit, 4)),
-                                 text(qacq::plot::formatQuantity(st.maximum, unit, 4)),
-                                 text(qacq::plot::formatQuantity(st.mean, unit, 4)),
-                                 text(qacq::plot::formatQuantity(st.rms, unit, 4)),
+                            .arg(text(qacq::plot::formatQuantity(st.minimum, unit, sd)),
+                                 text(qacq::plot::formatQuantity(st.maximum, unit, sd)),
+                                 text(qacq::plot::formatQuantity(st.mean, unit, sd)),
+                                 text(qacq::plot::formatQuantity(st.rms, unit, sd)),
                                  text(qacq::plot::formatQuantity(st.peakToPeak, unit, 4)));
                 // Area between A and B (trapezoids), in unit·s.
                 if (m_rate > 0.0 && span.size() >= 2)
@@ -1423,7 +1542,7 @@ void SignalPlot::refreshCursors()
                                 {QStringLiteral("channel"), c},
                                 {QStringLiteral("a"), text(qacq::plot::formatQuantity(va, unit, vd))},
                                 {QStringLiteral("b"), text(qacq::plot::formatQuantity(vb, unit, vd))},
-                                {QStringLiteral("delta"), text(qacq::plot::formatQuantity(vb - va, unit, vd))},
+                                {QStringLiteral("delta"), text(qacq::plot::formatQuantity(vb - va, unit, dd))},
                                 {QStringLiteral("stats"), stats}};
         }
         info[QStringLiteral("rows")] = rows;
@@ -1452,10 +1571,14 @@ void SignalPlot::drawCursors(QPainter &p, const std::vector<Lane> &lanes) const
     {
         if (xs[k] < area.left() - 1.0 || xs[k] > area.right() + 1.0) continue;
         const double x = std::round(xs[k]) + 0.5;
+        // A dark edge under the dashes: the line stays visible on a dense trace of its own colour.
+        p.setPen(QPen(faded(m_background, 0.85), 3.0));
+        p.drawLine(QPointF(x, top), QPointF(x, bottom));
         p.setPen(QPen(colours[k], 1.0, Qt::DashLine));
         p.drawLine(QPointF(x, top), QPointF(x, bottom));
         const double w = metrics.horizontalAdvance(names[k]) + 8.0;
-        const QRectF tag(x - w / 2.0, top - metrics.height() - 2.0, w, metrics.height() + 2.0);
+        // Above the first band, within the item (one band per channel leaves only 8 pixels above it).
+        const QRectF tag(x - w / 2.0, std::max(0.0, top - metrics.height() - 2.0), w, metrics.height() + 2.0);
         p.setPen(Qt::NoPen);
         p.setBrush(colours[k]);
         p.drawRoundedRect(tag, 3.0, 3.0);
@@ -1690,7 +1813,13 @@ void SignalPlot::mouseReleaseEvent(QMouseEvent *event)
 {
     m_pointer = event->position();
     if (m_rightPress && std::abs(m_pointer.x() - m_pressAt.x()) <= 4.0 && std::abs(m_pointer.y() - m_pressAt.y()) <= 4.0)
-        emit contextMenuRequested(m_pointer.x(), m_pointer.y());
+    {
+        // On a scale or on the time axis: the menu of that scale; elsewhere the plot's menu.
+        const QString key = scaleKeyAt(m_pointer);
+        const QVariantMap scale = key.isEmpty() ? QVariantMap() : scaleInfo(key);
+        if (!scale.isEmpty()) emit scaleMenuRequested(m_pointer.x(), m_pointer.y(), scale);
+        else emit contextMenuRequested(m_pointer.x(), m_pointer.y());
+    }
     m_rightPress = false;
     if (m_selecting && std::abs(m_pointer.x() - m_pressAt.x()) > 4.0)
     {

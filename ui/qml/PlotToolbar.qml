@@ -101,6 +101,7 @@ Rectangle {
                                + "Flèches ↑ ↓ : les valeurs de la voie sous le pointeur (Maj : une demi-hauteur)\n"
                                + "+ / − : zoom ; clic droit glissé : zoom sur l'intervalle choisi\n"
                                + "Clic droit : voies affichées, superposées ou non, échelle verticale automatique\n"
+                               + "Clic droit sur une échelle ou sur l'axe du temps : ses bornes (minimum, maximum), automatique\n"
                                + "Double clic : tout voir ; sur une échelle : cette échelle automatique")
         }
     }

@@ -15,7 +15,8 @@
 // moves its values only, on the time axis the time only (live: the values only). A right drag zooms on the
 // span it covers; a double click shows everything again (on a scale: that scale automatic again). Keys:
 // ← → the time, ↑ ↓ the values of the lane under the pointer. The readout follows the pointer: the time,
-// and the value of each channel at the nearest sample.
+// and the value of each channel at the nearest sample. A right click on a scale or on the time axis asks
+// for its menu (scaleMenuRequested: its ends typed, automatic again); elsewhere, for the plot's menu.
 
 #include "qacq/analysis/curves.h"
 #include "qacq/plot/axis.h"
@@ -79,7 +80,7 @@ class SignalPlot : public QQuickPaintedItem
     Q_PROPERTY(bool capture READ capture NOTIFY contentChanged)   // showing a trigger capture
     Q_PROPERTY(bool zoomed READ zoomed NOTIFY viewChanged)        // part of the signal only
     Q_PROPERTY(QString viewText READ viewText NOTIFY viewChanged) // "0 à 1,2 s (sur 10 s)"
-    // The samples on screen of a signal of the session (what the "Analyse" module analyses): the first
+    // The samples on screen of a signal of the session (what the analysis of the module "Signaux" covers): the first
     // one and how many; 0 and -1 when it shows no signal of the session.
     Q_PROPERTY(qint64 viewFirstFrame READ viewFirstFrame NOTIFY viewChanged)
     Q_PROPERTY(qint64 viewFrameCount READ viewFrameCount NOTIFY viewChanged)
@@ -95,7 +96,7 @@ class SignalPlot : public QQuickPaintedItem
     Q_PROPERTY(qint64 cursorFrameCount READ cursorFrameCount NOTIFY cursorsChanged)
     // The views asked before (zoom, slide, all): goBack() returns to the last one.
     Q_PROPERTY(bool canGoBack READ canGoBack NOTIFY viewChanged)
-    // The curves added in the "Analyse" module (a CurvesController): drawn instead of a signal of the
+    // The curves added in the module "Signaux" (a CurvesController): drawn instead of a signal of the
     // session, on the time base of the signal they come from.
     Q_PROPERTY(QObject *curves READ curves WRITE setCurves NOTIFY sourceChanged)
     // Room for a scale on the right even when no channel needs one: plots one above the other keep the
@@ -173,6 +174,15 @@ public:
     // Zoom of the time axis about its centre (factor < 1 zooms in; live: the rolling window).
     Q_INVOKABLE void zoomTime(double factor);
 
+    // The scales, for the menu of a scale. key: "time", or "values:<channel>:left|right" (a channel shown
+    // on that scale). The map: { key, kind ("time" | "values"), title, unit, low, high, automatic,
+    // lowLabel, highLabel, autoText, locked (why it cannot be set, or absent) }; empty when the scale is
+    // gone (channels hidden, layout changed).
+    Q_INVOKABLE QVariantMap scaleInfo(const QString &key) const;
+    // Both ends (low < high), by hand; false when refused. The time span goes in the history.
+    Q_INVOKABLE bool setScaleRange(const QString &key, double low, double high);
+    Q_INVOKABLE void setScaleAutomatic(const QString &key);
+
     void paint(QPainter *painter) override;
 
 signals:
@@ -184,6 +194,8 @@ signals:
     void scalesChanged();
     // A right click that did not drag (the plot's menu), at this point of the item.
     void contextMenuRequested(double x, double y);
+    // The same on a scale or on the time axis: the menu of that scale (scaleInfo).
+    void scaleMenuRequested(double x, double y, const QVariantMap &scale);
 
 protected:
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -269,6 +281,8 @@ private:
     void slideValues(double fraction);  // ↑ ↓: the lane under the pointer, or every lane
     void noteScales();                  // scalesChanged when manualScales() changed
     void updateCursorShape();
+    QString scaleKeyAt(const QPointF &at) const;                   // "" when not over a scale
+    const Lane *laneOfScale(const QString &key, bool *right) const; // in the lanes of the last paint
 
     QPointer<qacq::app::Session> m_session;
     qint64 m_signalId = 0;

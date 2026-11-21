@@ -158,7 +158,7 @@ std::string exportWav(const std::filesystem::path &file, const Signal &signal, c
     return writeWav(out, signal, options, warnings);
 }
 
-ImportResult readWav(std::istream &in, const std::string &name)
+ImportResult readWav(std::istream &in, const std::string &name, const Progress &progress)
 {
     ImportResult result;
     auto fail = [&](const std::string &why) {
@@ -243,6 +243,12 @@ ImportResult readWav(std::istream &in, const std::string &name)
     const double intScale = std::ldexp(1.0, -(static_cast<int>(bits) - 1));
     for (std::uint64_t first = 0; first < frames; first += framesPerChunk)
     {
+        if (progress.stopped())
+        {
+            result.cancelled = true;
+            return fail("Import annulé.");
+        }
+        progress.report(first, frames);
         const std::uint64_t count = std::min(framesPerChunk, frames - first);
         buffer.resize(static_cast<std::size_t>(count * blockAlign));
         in.read(reinterpret_cast<char *>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
@@ -284,10 +290,11 @@ ImportResult readWav(std::istream &in, const std::string &name)
     signal.provenance = Json::object();
     signal.provenance["import"] = "wav";
     signal.provenance["encoding"] = std::string(isFloat ? "float " : "PCM ") + std::to_string(bits) + " bits";
+    progress.report(1, 1);
     return result;
 }
 
-ImportResult importWav(const std::filesystem::path &file)
+ImportResult importWav(const std::filesystem::path &file, const Progress &progress)
 {
     std::ifstream in(file, std::ios::binary);
     if (!in)
@@ -297,7 +304,7 @@ ImportResult importWav(const std::filesystem::path &file)
         return r;
     }
     const std::u8string stem = file.stem().u8string();
-    ImportResult r = readWav(in, std::string(reinterpret_cast<const char *>(stem.data()), stem.size()));
+    ImportResult r = readWav(in, std::string(reinterpret_cast<const char *>(stem.data()), stem.size()), progress);
     if (r.ok()) r.signal.provenance["file"] = detail::displayName(file);
     return r;
 }

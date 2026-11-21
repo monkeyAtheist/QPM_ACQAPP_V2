@@ -183,6 +183,50 @@ TEST_CASE("Computed curves: integral of a signal added after it, undone in one s
     CHECK(analysis.curves()[0].toMap().value(QStringLiteral("band")).toString().startsWith(QStringLiteral("Bande à −3 dB")));
 }
 
+TEST_CASE("Spectrograms of the module: on their own thread, again with other segments", "[app]")
+{
+    Session session;
+    SignalListModel *list = session.signalList();
+    const qint64 id = list->addSignal(toneSignal(), QStringLiteral("Ajouter"));
+    AnalysisController analysis(&session);
+    CurvesController curves(&session, &analysis);
+    analysis.setSignalId(id);
+    curves.setSignalId(id);
+    CHECK(!curves.hasSpectrograms());
+    CHECK(curves.add(QStringLiteral("spectrogram"), {0}) == 1);
+    CHECK(curves.hasSpectrograms());
+    CHECK(!curves.hasTimeCurves());
+    CHECK(!curves.hasSpectra());
+    CHECK(curves.curves()[0].toMap().value(QStringLiteral("graph")).toString() == QStringLiteral("spectrogram"));
+    REQUIRE(settle([&] {
+        const auto set = curves.spectrograms();
+        return !curves.spectrogramBusy() && set && set->curves.size() == 1 && set->curves[0].result;
+    }));
+    const auto first = curves.spectrograms();
+    CHECK(first->curves[0].name == "Entrée");
+    CHECK(first->curves[0].result->segmentLength == 1024);
+    CHECK(first->curves[0].result->frames == 2 + (4800 - 1024) / 256); // the last segment ends with the record
+    CHECK(curves.curves()[0].toMap().value(QStringLiteral("ready")).toBool());
+
+    // Other segments: computed again, the spectra are not.
+    analysis.setSettings({{QStringLiteral("spectrogramSegment"), 480}});
+    REQUIRE(settle([&] {
+        const auto set = curves.spectrograms();
+        return !curves.spectrogramBusy() && set && set->curves[0].result && set->curves[0].result->segmentLength == 480;
+    }));
+    // 0,5 V at 1 kHz, bin 10 of 480 at 48 kHz: −6,02 dB.
+    CHECK_NEAR(curves.spectrograms()->curves[0].result->at(0, 10), 20.0 * std::log10(0.5), 0, 0.02);
+
+    // Saved with the session; taken away.
+    CurvesController again(&session, nullptr);
+    REQUIRE(again.specs().size() == 1);
+    CHECK(again.specs()[0].kind == analysis::CurveKind::Spectrogram);
+    curves.clear(QStringLiteral("spectrogram"));
+    CHECK(!curves.hasSpectrograms());
+    curves.waitForIdle();
+    again.waitForIdle();
+}
+
 TEST_CASE("Curves of the module: added on the signal chosen, computed, saved with the session", "[app]")
 {
     Session session;
@@ -237,6 +281,21 @@ TEST_CASE("Curves of the module: added on the signal chosen, computed, saved wit
     REQUIRE(k);
     CHECK(k->origin == model::Origin::Derived);
     CHECK(k->channelCount() == 2);
+
+    // Exported for a spreadsheet: UTF-8 mark, time then the curves shown, decimal comma, ';'.
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QString path = dir.filePath(QStringLiteral("courbes é.csv"));
+    REQUIRE(curves.exportTimeCurves(QUrl::fromLocalFile(path)));
+    QFile file(path);
+    REQUIRE(file.open(QIODevice::ReadOnly));
+    const QList<QByteArray> lines = file.readAll().split('\n');
+    CHECK(lines.size() == 4800 + 2); // the header, a line per sample, nothing after the last line end
+    CHECK(lines[0] == QByteArray("\xEF\xBB\xBF" "temps (s);Entr\xC3\xA9" "e (V);\xE2\x88\xAB Entr\xC3\xA9" "e (V\xC2\xB7s)\r"));
+    CHECK(lines[1] == QByteArray("0;0;0\r"));
+    CHECK(lines[2].startsWith("2,0833333333333333e-05;")); // 1 / 48 kHz
+    // Nothing to write to: said, nothing written.
+    CHECK(!curves.exportTimeCurves(QUrl(QStringLiteral("https://exemple.fr/courbes.csv"))));
 
     // Removing: one curve, then a whole graph.
     curves.remove(integralId);

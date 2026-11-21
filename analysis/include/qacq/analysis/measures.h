@@ -1,5 +1,5 @@
 #pragma once
-// Measuring tools of the plots and of the "Analyse" module, without Qt.
+// Measuring tools of the plots and of the analysis (module "Signaux"), without Qt.
 //
 //   spanStatistics()  min, max, mean, rms... of a part of a channel (between cursors A and B)
 //   waveMeasures()    what an oscilloscope measures on its own: top and base levels, period, frequency,

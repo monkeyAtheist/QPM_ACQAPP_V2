@@ -5,6 +5,7 @@
 #include "qacq/app/qt_convert.h"
 #include "qacq/app/session.h"
 #include "qacq/app/signal_list_model.h"
+#include "qacq/model/csv.h"
 #include "qacq/plot/axis.h"
 
 #include <QAbstractItemModel>
@@ -12,6 +13,8 @@
 #include <QDateTime>
 
 #include <algorithm>
+#include <cmath>
+#include <fstream>
 #include <limits>
 
 namespace qacq::app
@@ -23,7 +26,7 @@ const QString kModule = QStringLiteral("curves");
 
 QString graphOf(analysis::CurveKind kind)
 {
-    return analysis::isTimeCurve(kind) ? QStringLiteral("time") : QStringLiteral("frequency");
+    return toQString(std::string(analysis::curveGraph(kind)));
 }
 } // namespace
 
@@ -31,12 +34,31 @@ CurvesController::CurvesController(Session *session, AnalysisController *analysi
     : QObject(parent), m_session(session), m_analysis(analysis)
 {
     m_pool.setMaxThreadCount(1);
+    m_spectrogramPool.setMaxThreadCount(1);
+    m_progressTimer.setInterval(150);
+    connect(&m_progressTimer, &QTimer::timeout, this, [this] {
+        const std::shared_ptr<SpectrogramRun> run = m_spectrogramRun;
+        if (!run) return;
+        const double done = (static_cast<double>(run->index.load()) + 0.001 * static_cast<double>(run->permille.load())) /
+                            static_cast<double>(std::max(1, run->total));
+        if (std::abs(done - m_spectrogramProgressShown) < 0.005) return;
+        m_spectrogramProgressShown = std::clamp(done, 0.0, 1.0);
+        emit spectrogramProgressChanged();
+    });
+    if (analysis)
+    {
+        // Other segments or another window: the spectrograms again (the spectra are the analysis's own).
+        connect(analysis, &AnalysisController::settingsChanged, this, [this] {
+            if (settingsKey(spectrogramSettings()) != m_spectrogramSettingsKey) computeSpectrograms();
+        });
+    }
     if (session)
     {
         SignalListModel *list = session->signalList();
         const auto again = [this] {
             const model::SignalPtr signal = currentSignal();
             if (!m_set || m_set->signal != signal) compute();
+            if (!m_spectrograms || m_spectrograms->signal != signal) computeSpectrograms();
         };
         connect(list, &QAbstractItemModel::dataChanged, this, again);
         connect(list, &QAbstractItemModel::rowsInserted, this, again);
@@ -49,6 +71,8 @@ CurvesController::CurvesController(Session *session, AnalysisController *analysi
 
 CurvesController::~CurvesController()
 {
+    if (m_spectrogramRun) m_spectrogramRun->cancelled.store(true);
+    m_spectrogramPool.waitForDone();
     m_pool.waitForDone();
 }
 
@@ -75,12 +99,18 @@ bool CurvesController::hasTimeCurves() const
 
 bool CurvesController::hasSpectra() const
 {
-    return std::any_of(m_specs.begin(), m_specs.end(), [](const analysis::CurveSpec &c) { return !analysis::isTimeCurve(c.kind); });
+    return std::any_of(m_specs.begin(), m_specs.end(), [](const analysis::CurveSpec &c) { return c.kind == analysis::CurveKind::Spectrum; });
+}
+
+bool CurvesController::hasSpectrograms() const
+{
+    return std::any_of(m_specs.begin(), m_specs.end(),
+                       [](const analysis::CurveSpec &c) { return c.kind == analysis::CurveKind::Spectrogram; });
 }
 
 QString CurvesController::partText(const analysis::CurveSpec &spec, const model::Signal *signal) const
 {
-    if (!analysis::isTimeCurve(spec.kind) || (spec.firstFrame == 0 && spec.frameCount == kToTheEnd)) return QString();
+    if (!analysis::hasPart(spec.kind) || (spec.firstFrame == 0 && spec.frameCount == kToTheEnd)) return QString();
     if (!signal || !(signal->sampleRateHz > 0.0)) return tr("une partie");
     const auto [first, count] = analysis::curvePart(spec, *signal);
     const double t0 = signal->startSeconds + static_cast<double>(first) / signal->sampleRateHz;
@@ -102,6 +132,8 @@ QVariantList CurvesController::curves() const
         if (name.isEmpty()) name = tr("Voie %1 (absente de ce signal)").arg(static_cast<int>(c.channel + 1));
         bool ready = !time || c.kind == analysis::CurveKind::Source;
         if (time && !ready && signal) ready = cached(c, *signal);
+        if (c.kind == analysis::CurveKind::Spectrogram)
+            ready = signal && spectrogramCached(c, *signal, m_spectrogramSettingsKey);
         list << QVariantMap{{QStringLiteral("id"), static_cast<int>(c.id)},
                             {QStringLiteral("kind"), toQString(std::string(analysis::curveKindKey(c.kind)))},
                             {QStringLiteral("kindName"), toQString(analysis::curveKindName(c.kind))},
@@ -128,7 +160,7 @@ int CurvesController::add(const QString &kind, const QVariantList &channels, con
     analysis::CurveSpec base;
     base.kind = k;
     base.removeMean = k == analysis::CurveKind::Integral && options.value(QStringLiteral("removeMean")).toBool();
-    if (time && k != analysis::CurveKind::Source)
+    if (analysis::hasPart(k))
     {
         base.firstFrame = static_cast<std::size_t>(std::max<qint64>(0, options.value(QStringLiteral("firstFrame"), 0).toLongLong()));
         const qint64 count = options.value(QStringLiteral("frameCount"), -1).toLongLong();
@@ -178,6 +210,7 @@ void CurvesController::remove(int id)
                                  [id](const analysis::CurveSpec &c) { return c.id == static_cast<std::uint64_t>(id); });
     if (it == m_specs.end()) return;
     m_cache.erase(it->id);
+    m_spectrogramCache.erase(it->id);
     m_specs.erase(it);
     changed(true);
 }
@@ -201,6 +234,9 @@ void CurvesController::clear(const QString &graph)
     std::erase_if(m_cache, [this](const auto &entry) {
         return std::none_of(m_specs.begin(), m_specs.end(), [&entry](const analysis::CurveSpec &c) { return c.id == entry.first; });
     });
+    std::erase_if(m_spectrogramCache, [this](const auto &entry) {
+        return std::none_of(m_specs.begin(), m_specs.end(), [&entry](const analysis::CurveSpec &c) { return c.id == entry.first; });
+    });
     changed(true);
 }
 
@@ -221,12 +257,39 @@ qint64 CurvesController::keepAsSignal()
     return list->addSignal(std::move(signal), tr("Garder les courbes comme signal"));
 }
 
+bool CurvesController::exportTimeCurves(const QUrl &url)
+{
+    Session *session = m_session.data();
+    if (!session) return false;
+    SignalListModel *list = session->signalList();
+    const auto fail = [list](const QString &message) {
+        emit list->errorOccurred(message);
+        return false;
+    };
+    if (!m_set) return fail(tr("Pas de courbe du temps à exporter."));
+    const QString local = url.toLocalFile();
+    if (local.isEmpty()) return fail(tr("Seuls les fichiers locaux peuvent être écrits."));
+    const analysis::Derived derived = analysis::signalFromCurves(*m_set);
+    if (!derived.ok()) return fail(toQString(derived.error));
+    std::ofstream out(toPath(local), std::ios::binary | std::ios::trunc);
+    if (!out) return fail(tr("Impossible de créer « %1 ».").arg(local));
+    out << "\xEF\xBB\xBF"; // UTF-8 mark: a spreadsheet reads "∫" and the accents of the names
+    model::CsvExportOptions csv;
+    csv.decimalComma = true;
+    const std::string error = model::writeCsv(out, derived.signal, csv);
+    if (!error.empty()) return fail(toQString(error));
+    out.close();
+    if (!out) return fail(tr("L'écriture de « %1 » n'a pas abouti (disque plein ?).").arg(local));
+    return true;
+}
+
 void CurvesController::changed(bool saveList)
 {
     if (saveList && !m_loading) save();
     emit curvesChanged();
     handOverSpectra();
     compute();
+    computeSpectrograms();
 }
 
 void CurvesController::handOverSpectra()
@@ -258,6 +321,7 @@ void CurvesController::load()
     m_specs = session ? analysis::curveSpecsFromJson(variantToJson(session->moduleSettings(kModule).value(QStringLiteral("list"))))
                       : std::vector<analysis::CurveSpec>();
     m_cache.clear();
+    m_spectrogramCache.clear();
     m_nextId = 1;
     for (const analysis::CurveSpec &c : m_specs) m_nextId = std::max(m_nextId, c.id + 1);
     changed(false);
@@ -380,10 +444,151 @@ void CurvesController::rebuild()
 
 void CurvesController::waitForIdle()
 {
-    while (m_running || m_pool.activeThreadCount() > 0)
+    while (m_running || m_pool.activeThreadCount() > 0 || m_spectrogramRunning || m_spectrogramPool.activeThreadCount() > 0)
     {
         m_pool.waitForDone();
+        m_spectrogramPool.waitForDone();
         QCoreApplication::processEvents();
     }
+}
+
+analysis::SpectrogramSettings CurvesController::spectrogramSettings() const
+{
+    analysis::SpectrogramSettings settings;
+    const AnalysisController *controller = m_analysis.data(); // one read of the guarded pointer
+    if (controller)
+    {
+        const analysis::AnalysisSettings &a = controller->analysisSettings();
+        settings.window = a.window;
+        settings.kaiserBeta = a.kaiserBeta;
+        settings.segmentLength = a.spectrogramSegment;
+        settings.overlap = a.spectrogramOverlap;
+        settings.removeMean = a.removeMean; // as for the spectra: one setting
+    }
+    return settings;
+}
+
+std::string CurvesController::settingsKey(const analysis::SpectrogramSettings &settings)
+{
+    return std::to_string(static_cast<int>(settings.window)) + '|' + std::to_string(settings.kaiserBeta) + '|' +
+           std::to_string(settings.segmentLength) + '|' + std::to_string(settings.overlap) + '|' +
+           std::to_string(settings.maximumFrames) + (settings.removeMean ? "|m" : "|");
+}
+
+bool CurvesController::spectrogramCached(const analysis::CurveSpec &spec, const model::Signal &signal, const std::string &settings) const
+{
+    // An empty `settings`: whatever the settings (what was computed before shows while it is computed again).
+    const auto it = m_spectrogramCache.find(spec.id);
+    return it != m_spectrogramCache.end() && it->second.data == signal.data.get() &&
+           it->second.rateHz == signal.sampleRateHz && it->second.spec.samePlace(spec) && it->second.result &&
+           (settings.empty() || it->second.settings == settings);
+}
+
+void CurvesController::computeSpectrograms()
+{
+    const analysis::SpectrogramSettings settings = spectrogramSettings();
+    const std::string key = settingsKey(settings);
+    m_spectrogramSettingsKey = key;
+    if (m_spectrogramRunning)
+    {
+        // What runs is no longer what is wanted: it stops early, then this starts again.
+        m_spectrogramAgain = true;
+        if (m_spectrogramRun) m_spectrogramRun->cancelled.store(true);
+        rebuildSpectrograms();
+        return;
+    }
+    m_spectrogramAgain = false;
+    ++m_spectrogramGeneration;
+    const model::SignalPtr signal = currentSignal();
+    std::vector<analysis::CurveSpec> wanted;
+    if (signal)
+    {
+        for (const analysis::CurveSpec &c : m_specs)
+        {
+            if (c.kind == analysis::CurveKind::Spectrogram && c.visible && c.channel < signal->channelCount() &&
+                !spectrogramCached(c, *signal, key))
+                wanted.push_back(c);
+        }
+    }
+    rebuildSpectrograms(); // what is ready shows at once
+    if (wanted.empty()) return;
+    auto run = std::make_shared<SpectrogramRun>();
+    run->total = static_cast<int>(wanted.size());
+    m_spectrogramRun = run;
+    m_spectrogramRunning = true;
+    m_spectrogramProgressShown = 0.0;
+    emit spectrogramProgressChanged();
+    emit spectrogramBusyChanged();
+    m_progressTimer.start();
+    const quint64 generation = m_spectrogramGeneration;
+    m_spectrogramPool.start([this, signal, wanted, settings, key, generation, run] {
+        SpectrogramResults results;
+        for (std::size_t i = 0; i < wanted.size(); ++i)
+        {
+            run->index.store(static_cast<int>(i));
+            run->permille.store(0);
+            auto result = std::make_shared<const dsp::Spectrogram>(
+                analysis::computeSpectrogram(*signal, wanted[i], settings, dsp::Progress{&run->cancelled, &run->permille}));
+            if (run->cancelled.load()) break; // stopped: what it gave is not a whole spectrogram
+            results[wanted[i].id] = std::move(result);
+        }
+        // The destructor waits for this task: `this` is still alive here, and the queued call is dropped if
+        // it is destroyed before the call runs.
+        QMetaObject::invokeMethod(
+            this, [this, generation, signal, key, results] { spectrogramsFinished(generation, signal, key, results); },
+            Qt::QueuedConnection);
+    });
+}
+
+void CurvesController::spectrogramsFinished(quint64 generation, model::SignalPtr signal, std::string settings,
+                                            SpectrogramResults results)
+{
+    m_spectrogramRunning = false;
+    m_progressTimer.stop();
+    if (generation == m_spectrogramGeneration && signal == currentSignal())
+    {
+        for (auto &entry : results)
+        {
+            const std::uint64_t id = entry.first;
+            const auto spec = std::find_if(m_specs.begin(), m_specs.end(), [id](const analysis::CurveSpec &c) { return c.id == id; });
+            if (spec == m_specs.end()) continue;
+            m_spectrogramCache[id] = SpectrogramCached{signal->data.get(), signal->sampleRateHz, *spec, settings, std::move(entry.second)};
+        }
+    }
+    if (m_spectrogramAgain || generation != m_spectrogramGeneration)
+    {
+        computeSpectrograms();
+        if (!m_spectrogramRunning) emit spectrogramBusyChanged();
+        return;
+    }
+    emit spectrogramBusyChanged();
+    rebuildSpectrograms();
+    emit curvesChanged(); // "ready" of the chips
+}
+
+void CurvesController::rebuildSpectrograms()
+{
+    const model::SignalPtr signal = currentSignal();
+    auto set = std::make_shared<analysis::SpectrogramSet>();
+    set->signal = signal;
+    if (signal && signal->sampleRateHz > 0.0)
+    {
+        for (const analysis::CurveSpec &c : m_specs)
+        {
+            if (c.kind != analysis::CurveKind::Spectrogram) continue;
+            analysis::SpectrogramCurve curve;
+            curve.id = c.id;
+            curve.channel = c.channel;
+            curve.visible = c.visible;
+            curve.name = analysis::curveName(c, *signal);
+            curve.unit = analysis::curveUnit(c, *signal);
+            curve.startSeconds = signal->startSeconds + static_cast<double>(analysis::curvePart(c, *signal).first) / signal->sampleRateHz;
+            // Computed with these settings, or with the ones before while it is computed again.
+            if (spectrogramCached(c, *signal, std::string())) curve.result = m_spectrogramCache.at(c.id).result;
+            set->curves.push_back(std::move(curve));
+        }
+    }
+    m_spectrograms = std::move(set);
+    emit spectrogramsChanged();
 }
 } // namespace qacq::app

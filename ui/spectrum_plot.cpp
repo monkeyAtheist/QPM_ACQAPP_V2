@@ -226,6 +226,78 @@ void SpectrumPlot::setLevels(const Range &levels)
     update();
 }
 
+QVariantMap SpectrumPlot::scaleInfo(const QString &key) const
+{
+    QVariantMap m;
+    if (!hasData()) return m;
+    const analysis::AnalysisResult &r = *m_result;
+    m.insert(QStringLiteral("key"), key);
+    m.insert(QStringLiteral("lowLabel"), tr("Minimum"));
+    m.insert(QStringLiteral("highLabel"), tr("Maximum"));
+    if (key == QStringLiteral("frequency"))
+    {
+        m.insert(QStringLiteral("kind"), QStringLiteral("frequency"));
+        m.insert(QStringLiteral("title"), logActive() ? tr("Fréquences (échelle logarithmique)") : tr("Fréquences"));
+        m.insert(QStringLiteral("unit"), QStringLiteral("Hz"));
+        m.insert(QStringLiteral("low"), m_view.low);
+        m.insert(QStringLiteral("high"), m_view.high);
+        m.insert(QStringLiteral("automatic"), !zoomed());
+        m.insert(QStringLiteral("autoText"), tr("Toutes les fréquences"));
+        m.insert(QStringLiteral("positive"), logActive());
+        return m;
+    }
+    if (key == QStringLiteral("levels"))
+    {
+        const bool decibel = r.scale == analysis::LevelScale::Decibel;
+        std::string unit = sharedLevelUnit(r);
+        if (unit.empty() && decibel) unit = "dB"; // each curve its reference: dB all the same
+        m.insert(QStringLiteral("kind"), QStringLiteral("levels"));
+        m.insert(QStringLiteral("title"), unit.empty() ? tr("Niveaux") : tr("Niveaux (%1)").arg(text(unit)));
+        m.insert(QStringLiteral("unit"), text(unit));
+        m.insert(QStringLiteral("low"), m_levels.low);
+        m.insert(QStringLiteral("high"), m_levels.high);
+        m.insert(QStringLiteral("automatic"), m_levelsAutomatic);
+        m.insert(QStringLiteral("autoText"), tr("Automatique"));
+        return m;
+    }
+    return {};
+}
+
+bool SpectrumPlot::setScaleRange(const QString &key, double low, double high)
+{
+    if (!hasData() || !std::isfinite(low) || !std::isfinite(high) || !(high > low)) return false;
+    if (key == QStringLiteral("frequency"))
+    {
+        if (logActive() && !(low > 0.0)) return false;
+        rememberView();
+        setAxisView(logActive() ? Range{std::log10(low), std::log10(high)} : Range{low, high});
+        return true;
+    }
+    if (key == QStringLiteral("levels"))
+    {
+        rememberView();
+        setLevels({low, high});
+        return true;
+    }
+    return false;
+}
+
+void SpectrumPlot::setScaleAutomatic(const QString &key)
+{
+    if (!hasData()) return;
+    if (key == QStringLiteral("frequency"))
+    {
+        rememberView();
+        m_view = limits();
+        emit viewChanged();
+        update();
+    }
+    else if (key == QStringLiteral("levels"))
+    {
+        autoScale();
+    }
+}
+
 void SpectrumPlot::noteScales()
 {
     const bool manual = manualScales();
@@ -1093,7 +1165,15 @@ void SpectrumPlot::mouseReleaseEvent(QMouseEvent *event)
 {
     m_pointer = event->position();
     if (m_rightPress && std::abs(m_pointer.x() - m_pressAt.x()) <= 4.0 && std::abs(m_pointer.y() - m_pressAt.y()) <= 4.0)
-        emit contextMenuRequested(m_pointer.x(), m_pointer.y());
+    {
+        // On the scale or on the frequency axis: the menu of that scale; elsewhere the plot's menu.
+        const Place place = placeAt(m_pointer);
+        const QVariantMap scale = place == Place::Scale           ? scaleInfo(QStringLiteral("levels"))
+                                  : place == Place::FrequencyAxis ? scaleInfo(QStringLiteral("frequency"))
+                                                                  : QVariantMap();
+        if (!scale.isEmpty()) emit scaleMenuRequested(m_pointer.x(), m_pointer.y(), scale);
+        else emit contextMenuRequested(m_pointer.x(), m_pointer.y());
+    }
     m_rightPress = false;
     if (m_selecting && std::abs(m_pointer.x() - m_pressAt.x()) > 4.0)
     {

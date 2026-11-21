@@ -3,43 +3,25 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Qacq.App
 
-// Right panel of the "Analyse" module: the settings of the computation, then the measurements of every
-// channel of the zone (statistics, tone: frequency, THD, SINAD, SNR, SFDR, ENOB, harmonics). The
-// settings are remembered from one run to the next.
+// Tab "Mesures" of the right panel of the module "Signaux": the measurements of every channel of the zone
+// analysed (statistics, tone: frequency, THD, SINAD, SNR, SFDR, ENOB, harmonics; what an oscilloscope
+// measures), the peaks of the spectra added, then the settings of the computations (remembered from one
+// run to the next), the spectrograms' among them when there are some.
 ScrollView {
     id: root
     required property var analysis
     required property var appSettings
+    property var curves: null // CurvesController: are there spectrograms
+    property real sampleRate: 0 // of the signal chosen: Δf and duration of a segment
+    readonly property bool hasSpectrograms: curves !== null && curves.hasSpectrograms === true
 
     readonly property var s: analysis.settings
-    readonly property bool density: s.kind === "density"
 
     contentWidth: availableWidth
     clip: true
 
-    readonly property var windows: [
-        { key: "hann", name: qsTr("Hann (usage courant)") },
-        { key: "flatTop", name: qsTr("À sommet plat (amplitudes exactes)") },
-        { key: "blackmanHarris", name: qsTr("Blackman-Harris (−92 dB : petits signaux)") },
-        { key: "blackman", name: qsTr("Blackman") },
-        { key: "hamming", name: qsTr("Hamming") },
-        { key: "kaiser", name: qsTr("Kaiser (β réglable)") },
-        { key: "rectangular", name: qsTr("Rectangulaire (aucune)") }
-    ]
-    readonly property var paddings: [1, 2, 4, 8]
-    readonly property var segments: [256, 512, 1024, 2048, 4096, 8192, 16384, 65536]
-    readonly property var overlaps: [0, 0.25, 0.5, 0.75]
-    readonly property var harmonicCounts: [5, 10, 20]
-
     function set(values) {
         analysis.setSettings(values)
-    }
-    function indexOf(list, value, key) {
-        for (let i = 0; i < list.length; ++i) {
-            if ((key ? list[i][key] : list[i]) === value)
-                return i
-        }
-        return 0
     }
 
     Component.onCompleted: {
@@ -88,88 +70,10 @@ ScrollView {
         width: root.availableWidth
         spacing: 10
 
-        SectionTitle { text: root.density ? qsTr("Densité spectrale (Welch)") : qsTr("Spectre d'amplitude") }
-        Hint {
-            text: root.density
-                  ? qsTr("La zone est coupée en segments qui se recouvrent ; leurs spectres sont moyennés. Le bruit se lit en unité/√Hz, indépendamment de la longueur des segments.")
-                  : qsTr("Une seule FFT de toute la zone : une sinusoïde se lit à son amplitude crête. Plus la zone est longue, plus les fréquences sont fines (Δf = fréquence d'échantillonnage / nombre d'échantillons).")
-        }
-        ChoiceField {
-            label: qsTr("Fenêtre")
-            choices: root.windows.map(w => w.name)
-            value: root.indexOf(root.windows, root.s.window, "key")
-            onEdited: (index) => root.set({ window: root.windows[index].key })
-        }
-        Hint {
-            text: qsTr("Une sinusoïde qui ne tombe pas pile sur une fréquence de la FFT se lit un peu bas avec Hann (jusqu'à −1,4 dB) ; la fenêtre à sommet plat donne l'amplitude exacte, au prix de pics plus larges.")
-            visible: !root.density && root.s.window === "hann"
-        }
-        ColumnLayout {
-            visible: root.s.window === "kaiser"
-            Layout.fillWidth: true
-            spacing: 2
-            Label {
-                text: qsTr("β de Kaiser : %1").arg(Number(betaSlider.value).toLocaleString(Qt.locale(), "f", 1))
-                color: Theme.textMuted
-                font.pixelSize: Theme.smallText
-            }
-            Slider {
-                id: betaSlider
-                Layout.fillWidth: true
-                from: 0
-                to: 20
-                stepSize: 0.5
-                value: root.s.kaiserBeta ?? 8.6
-                onMoved: root.set({ kaiserBeta: value })
-            }
-        }
-        ChoiceField {
-            visible: !root.density
-            label: qsTr("Zéros ajoutés (fréquences plus serrées, pas plus de détails)")
-            choices: [qsTr("Aucun"), qsTr("× 2"), qsTr("× 4"), qsTr("× 8")]
-            value: root.indexOf(root.paddings, root.s.zeroPadFactor)
-            onEdited: (index) => root.set({ zeroPadFactor: root.paddings[index] })
-        }
-        ChoiceField {
-            visible: root.density
-            label: qsTr("Longueur des segments")
-            choices: root.segments.map(n => qsTr("%1 échantillons").arg(Units.count(n)))
-            value: root.indexOf(root.segments, root.s.segmentLength)
-            onEdited: (index) => root.set({ segmentLength: root.segments[index] })
-        }
-        ChoiceField {
-            visible: root.density
-            label: qsTr("Recouvrement des segments")
-            choices: ["0 %", "25 %", "50 %", "75 %"]
-            value: root.indexOf(root.overlaps, root.s.overlap)
-            onEdited: (index) => root.set({ overlap: root.overlaps[index] })
-        }
-        CheckBox {
-            text: qsTr("Retirer la moyenne (composante continue)")
-            checked: root.s.removeMean ?? true
-            onToggled: root.set({ removeMean: checked })
-            ToolTip.visible: hovered
-            ToolTip.delay: 500
-            ToolTip.text: qsTr("Sans elle, une tension continue fait un grand pic à 0 Hz qui peut cacher les basses fréquences. Elle reste mesurée ci-dessous (Moyenne).")
-        }
-        ChoiceField {
-            visible: !root.density
-            label: qsTr("Harmoniques mesurées (fondamentale comprise)")
-            choices: root.harmonicCounts.map(n => String(n))
-            value: root.indexOf(root.harmonicCounts, root.s.harmonics)
-            onEdited: (index) => root.set({ harmonics: root.harmonicCounts[index] })
-        }
-        ChoiceField {
-            label: qsTr("Temps de montée et de descente")
-            choices: [qsTr("De 10 % à 90 % de l'amplitude"), qsTr("De 20 % à 80 % (fronts lents ou bruités)")]
-            value: (root.s.edgeLow ?? 0.1) === 0.2 ? 1 : 0
-            onEdited: (index) => root.set({ edgeLow: index === 1 ? 0.2 : 0.1 })
-        }
-
         SectionTitle { text: qsTr("Mesures") }
         Hint {
             visible: root.analysis.zoneText.length > 0
-            text: qsTr("Sur %1").arg(root.analysis.zoneText)
+            text: qsTr("Sur %1 (zone : Courbes ▸ Zone analysée)").arg(root.analysis.zoneText)
         }
         Hint {
             visible: root.analysis.error.length > 0
@@ -398,6 +302,23 @@ ScrollView {
                 }
             }
         }
+        SectionTitle { text: qsTr("Réglages des calculs") }
+        ChoiceField {
+            label: qsTr("Temps de montée et de descente")
+            choices: [qsTr("De 10 % à 90 % de l'amplitude"), qsTr("De 20 % à 80 % (fronts lents ou bruités)")]
+            value: (root.s.edgeLow ?? 0.1) === 0.2 ? 1 : 0
+            onEdited: (index) => root.set({ edgeLow: index === 1 ? 0.2 : 0.1 })
+        }
+        // The same controls as the menus of the spectra and spectrograms (right click on them).
+        SpectrumSettings {
+            analysis: root.analysis
+        }
+        SpectrogramSettings {
+            visible: root.hasSpectrograms
+            analysis: root.analysis
+            sampleRate: root.sampleRate
+        }
+
         Item { Layout.preferredHeight: 8 }
     }
 }

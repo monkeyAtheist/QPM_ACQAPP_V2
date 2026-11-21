@@ -12,7 +12,7 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 constexpr CurveKind kKinds[] = {CurveKind::Spectrum,  CurveKind::Source,   CurveKind::Integral,
                                 CurveKind::Derivative, CurveKind::CycleMean, CurveKind::CycleRms,
-                                CurveKind::CycleFrequency};
+                                CurveKind::CycleFrequency, CurveKind::Spectrogram};
 
 // The operation of calculus.h behind a computed time curve.
 bool operationOf(CurveKind kind, Operation &operation) noexcept
@@ -25,7 +25,8 @@ bool operationOf(CurveKind kind, Operation &operation) noexcept
     case CurveKind::CycleRms: operation = Operation::CycleRms; return true;
     case CurveKind::CycleFrequency: operation = Operation::CycleFrequency; return true;
     case CurveKind::Spectrum:
-    case CurveKind::Source: return false;
+    case CurveKind::Source:
+    case CurveKind::Spectrogram: return false;
     }
     return false;
 }
@@ -49,6 +50,7 @@ std::string_view curveKindKey(CurveKind kind) noexcept
     case CurveKind::CycleMean: return "cycleMean";
     case CurveKind::CycleRms: return "cycleRms";
     case CurveKind::CycleFrequency: return "cycleFrequency";
+    case CurveKind::Spectrogram: return "spectrogram";
     }
     return "spectrum";
 }
@@ -68,7 +70,19 @@ bool curveKindFromKey(std::string_view key, CurveKind &kind) noexcept
 
 bool isTimeCurve(CurveKind kind) noexcept
 {
-    return kind != CurveKind::Spectrum;
+    return kind != CurveKind::Spectrum && kind != CurveKind::Spectrogram;
+}
+
+std::string_view curveGraph(CurveKind kind) noexcept
+{
+    if (kind == CurveKind::Spectrum) return "frequency";
+    if (kind == CurveKind::Spectrogram) return "spectrogram";
+    return "time";
+}
+
+bool hasPart(CurveKind kind) noexcept
+{
+    return kind != CurveKind::Spectrum && kind != CurveKind::Source;
 }
 
 std::string curveKindName(CurveKind kind)
@@ -82,6 +96,7 @@ std::string curveKindName(CurveKind kind)
     case CurveKind::CycleMean: return "Moyenne par période";
     case CurveKind::CycleRms: return "Efficace par période";
     case CurveKind::CycleFrequency: return "Fréquence par période";
+    case CurveKind::Spectrogram: return "Spectrogramme";
     }
     return "Courbe";
 }
@@ -103,7 +118,7 @@ model::Json toJson(const std::vector<CurveSpec> &curves)
         j["channel"] = static_cast<unsigned long long>(c.channel);
         j["visible"] = c.visible;
         if (c.kind == CurveKind::Integral) j["removeMean"] = c.removeMean;
-        if (isTimeCurve(c.kind))
+        if (isTimeCurve(c.kind) || c.kind == CurveKind::Spectrogram)
         {
             j["firstFrame"] = static_cast<unsigned long long>(c.firstFrame);
             if (c.frameCount != std::numeric_limits<std::size_t>::max())
@@ -194,6 +209,38 @@ std::vector<double> computeTimeCurve(const model::Signal &signal, const CurveSpe
     return {};
 }
 
+dsp::Spectrogram computeSpectrogram(const model::Signal &signal, const CurveSpec &curve, const SpectrogramSettings &settings,
+                                    const dsp::Progress &progress)
+{
+    if (curve.kind != CurveKind::Spectrogram || curve.channel >= signal.channelCount() || !signal.data ||
+        signal.channelCount() != signal.data->channelCount() || !(signal.sampleRateHz > 0.0))
+        return {};
+    const auto [first, count] = curvePart(curve, signal);
+    std::span<const double> x = signal.channel(curve.channel).subspan(first, count);
+    // A missing sample would spoil every segment that holds it: zeros instead.
+    std::vector<double> filled;
+    if (std::any_of(x.begin(), x.end(), [](double v) { return !std::isfinite(v); }))
+    {
+        filled.assign(x.begin(), x.end());
+        for (double &v : filled)
+        {
+            if (!std::isfinite(v)) v = 0.0;
+        }
+        x = filled;
+    }
+    dsp::SpectrogramOptions options;
+    options.window = settings.window;
+    options.kaiserBeta = settings.kaiserBeta;
+    options.segmentLength = settings.segmentLength;
+    options.overlap = settings.overlap;
+    const std::size_t bins = std::clamp<std::size_t>(settings.segmentLength, 2, std::max<std::size_t>(2, count)) / 2 + 1;
+    options.maximumFrames = std::max<std::size_t>(1, std::min(settings.maximumFrames, std::max<std::size_t>(200, settings.maximumLevels / bins)));
+    options.averageSegments = true;
+    options.removeSegmentMean = settings.removeMean;
+    options.windowedMean = true;
+    return dsp::spectrogram(x, signal.sampleRateHz, options, progress);
+}
+
 Derived signalFromCurves(const TimeCurveSet &set)
 {
     Derived out;
@@ -242,7 +289,7 @@ Derived signalFromCurves(const TimeCurveSet &set)
     s.sampleRateHz = source.sampleRateHz;
     s.startSeconds = source.startSeconds + static_cast<double>(lo) / source.sampleRateHz;
     s.data = std::move(data);
-    s.notes = "Courbes du module Analyse, calculées à partir de « " + source.name + " » : " + list +
+    s.notes = "Courbes ajoutées sous « " + source.name + " » (module Signaux) : " + list +
               ". Vide (échantillons manquants) là où une courbe n'a pas de valeur.";
     s.provenance = model::Json::object();
     s.provenance["operation"] = "curves";

@@ -3,8 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // Left panel: the signals of the session, the same in every module. A click selects a signal (the
-// views and the properties follow it), a double click renames it, the right click offers rename,
-// export and delete. Every change can be undone (Ctrl+Z).
+// views and the properties follow it), a double click renames it (F2), the right click offers rename,
+// export and delete (also the Suppr key). Every change can be undone (Ctrl+Z).
 Rectangle {
     id: root
     required property var session
@@ -150,13 +150,15 @@ Rectangle {
                 visible: list.count === 0
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-                text: qsTr("Aucun signal pour l'instant.\n\nImportez un fichier CSV ou WAV, ou lancez une acquisition (le simulateur ne demande aucun matériel).")
+                text: qsTr("Aucun signal pour l'instant.\n\nImportez un fichier CSV ou WAV (ou déposez-le sur la fenêtre), ou lancez une acquisition (le simulateur ne demande aucun matériel).")
                 color: Theme.textMuted
                 font.pixelSize: Theme.smallText
             }
         }
 
+        // Only while the list is empty: then, Importer… of the top bar (Ctrl+I) or a file dropped on the window.
         Button {
+            visible: list.count === 0
             Layout.fillWidth: true
             flat: true
             text: qsTr("Importer un fichier…")

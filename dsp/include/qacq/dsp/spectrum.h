@@ -5,6 +5,7 @@
 
 #include "qacq/dsp/window.h"
 
+#include <atomic>
 #include <cstddef>
 #include <span>
 #include <vector>
@@ -98,7 +99,8 @@ struct WelchResult
 WelchResult welch(std::span<const double> x, double sampleRateHz, const WelchOptions &options = {});
 
 // Short-time spectrum (amplitude in dB, same scaling as spectrum()). When the record would give more
-// than maximumFrames frames, the hop grows (the result says which hop was used).
+// than maximumFrames frames: the hop grows (the result says which hop was used), or with averageSegments
+// every segment at the hop asked is computed and each frame is the mean power of consecutive segments.
 struct SpectrogramOptions
 {
     Window window = Window::Hann;
@@ -106,8 +108,22 @@ struct SpectrogramOptions
     std::size_t segmentLength = 1024;
     double overlap = 0.75;
     std::size_t maximumFrames = 2000;
+    // Past maximumFrames segments, false: the frames spread over the record, the samples between them
+    // unused (a burst between two frames is missed); true: every sample counts, a frame holds the mean
+    // power of its segments (the noise is averaged too). The amplitude of a steady sinusoid reads the same
+    // either way. Unless spread, the last segment ends with the record (closer to the one before it when
+    // the hop does not fall right), so that the end is in a frame too.
+    bool averageSegments = false;
     bool removeSegmentMean = false;
     bool windowedMean = false; // as SpectrumOptions::windowedMean, frame by frame
+};
+
+// Control of a long computation from another thread: stop it early (the result is then empty), and how
+// far it is (thousandths, 1000 at the end).
+struct Progress
+{
+    const std::atomic<bool> *cancelled = nullptr;
+    std::atomic<int> *permille = nullptr;
 };
 
 struct Spectrogram
@@ -119,12 +135,14 @@ struct Spectrogram
     std::size_t bins = 0;
     std::size_t segmentLength = 0;
     std::size_t hop = 0;
-    double frameDurationSeconds = 0.0;
-    double frameStepSeconds = 0.0;
+    std::size_t segmentsPerFrame = 1; // averageSegments on a long record: more than one
+    double frameDurationSeconds = 0.0; // the samples one frame covers
+    double frameStepSeconds = 0.0;     // from one frame to the next (the last one can be closer)
 
     bool empty() const noexcept { return amplitudeDb.empty(); }
     double at(std::size_t frame, std::size_t bin) const { return amplitudeDb[frame * bins + bin]; }
 };
 
-Spectrogram spectrogram(std::span<const double> x, double sampleRateHz, const SpectrogramOptions &options = {});
+Spectrogram spectrogram(std::span<const double> x, double sampleRateHz, const SpectrogramOptions &options = {},
+                        const Progress &progress = {});
 } // namespace qacq::dsp
