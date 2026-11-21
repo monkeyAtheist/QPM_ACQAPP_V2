@@ -10,9 +10,10 @@ add_executable(qacq_tests
     test_io.cpp
     test_model.cpp
     test_acquisition.cpp
+    test_plot.cpp
     qt_keywords_check.cpp
 )
-target_link_libraries(qacq_tests PRIVATE qacq::dsp qacq::io qacq::model qacq::acquisition)
+target_link_libraries(qacq_tests PRIVATE qacq::dsp qacq::io qacq::model qacq::acquisition qacq::plot)
 target_include_directories(qacq_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 qacq_set_warnings(qacq_tests)
 
@@ -38,6 +39,7 @@ qacq_add_test_group(json       "[json]"       fast)
 qacq_add_test_group(model      "[model]"      fast)
 qacq_add_test_group(session    "[session]"    fast)
 qacq_add_test_group(csv        "[csv]"        fast)
+qacq_add_test_group(plot       "[plot]"       fast)
 qacq_add_test_group(wav        "[wav]"        fast)
 qacq_add_test_group(acquisition "[acquisition]" fast)
 qacq_add_test_group(ber        "[ber]"        slow)

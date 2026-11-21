@@ -31,10 +31,30 @@ std::string exportCsv(const std::filesystem::path &file, const Signal &signal, c
 struct CsvImportOptions
 {
     bool decimalComma = false;
-    bool firstColumnIsTime = false; // seconds
-    double sampleRateHz = 1.0;      // without a time column
-    std::string unit;               // for the channels the header gives no unit
+    bool firstColumnIsTime = false;
+    double timeUnitSeconds = 1.0; // unit of the time column: 1e-3 for milliseconds
+    double sampleRateHz = 1.0;    // without a time column
+    std::string unit;             // for the channels the header gives no unit
 };
+
+// What a text file looks like, for the import dialog: decimal mark, header, time column.
+// Decimal comma when numbers hold a comma and no point, with ';' or tabs between columns (French
+// spreadsheets) or spaces. Time column when the first title says so ("Temps (s)", "t", "time [ms]") or,
+// without header, when the first column grows by a regular step.
+struct CsvSniff
+{
+    bool decimalComma = false;
+    bool header = false;
+    std::vector<std::string> titles;  // of the header, if any
+    std::size_t columns = 0;          // numbers on a line (time column included)
+    std::size_t lines = 0;            // lines of numbers among those read
+    bool firstColumnIsTime = false;
+    double timeUnitSeconds = 1.0;     // 1e-3 when the title says ms
+    double timeStepSeconds = 0.0;     // median step of the time column, 0 without one
+    std::vector<std::string> preview; // the first lines, as they are (at most 8)
+};
+CsvSniff sniffCsv(std::istream &in, std::size_t maximumLines = 200);
+CsvSniff sniffCsv(const std::filesystem::path &file, std::size_t maximumLines = 200);
 
 struct ImportResult
 {

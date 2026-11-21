@@ -35,6 +35,8 @@
 #include "qacq/model/session_file.h"
 #include "qacq/model/signal.h"
 #include "qacq/model/wav.h"
+#include "qacq/plot/axis.h"
+#include "qacq/plot/trace.h"
 #undef signals
 #undef slots
 #undef emit

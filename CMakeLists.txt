@@ -20,11 +20,13 @@ option(QACQ_BUILD_APP "Build the Qt Quick application (needs Qt 6.8 or later)" O
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 
-# Layer 1 - signal processing, acquisition decoding, session model, acquisition logic (no Qt, ever).
+# Layer 1 - signal processing, acquisition decoding, session model, acquisition logic, plot engine
+# (no Qt, ever).
 add_subdirectory(dsp)
 add_subdirectory(io)
 add_subdirectory(model)
 add_subdirectory(acquisition)
+add_subdirectory(plot)
 
 # Layer 2 - application logic (QtCore, phase 1) and layer 3 - Qt Quick interface (phase 3).
 # Without Qt (CI runners, core-only work) the core libraries and their tests still build.

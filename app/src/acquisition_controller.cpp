@@ -146,7 +146,7 @@ void AcquisitionController::updateChannelNames()
     std::size_t count = m_pipe ? m_pipe->channelCount() : acquisition::effectiveDecoder(s).channelCount();
     if (s.source == acquisition::SourceKind::Simulated) count = s.simulated.channels.size();
     const std::vector<std::string> streamNames = m_shared ? m_shared->channelNames() : std::vector<std::string>();
-    QStringList names;
+    QStringList names, units;
     for (std::size_t c = 0; c < count; ++c)
     {
         QString name;
@@ -154,10 +154,12 @@ void AcquisitionController::updateChannelNames()
         else if (c < streamNames.size() && !streamNames[c].empty()) name = toQString(streamNames[c]);
         else name = QStringLiteral("Voie %1").arg(static_cast<int>(c + 1));
         names << name;
+        units << (c < s.channels.size() ? toQString(s.channels[c].unit) : QString());
     }
-    if (names != m_channelNames)
+    if (names != m_channelNames || units != m_channelUnits)
     {
         m_channelNames = names;
+        m_channelUnits = units;
         emit channelsChanged();
     }
 }
@@ -190,6 +192,8 @@ bool AcquisitionController::start()
     m_byteRate.reset();
     m_trigger.reset();
     m_haveCapture = false;
+    m_captureCount = 0;
+    emit captureCountChanged();
     m_pulled = 0;
     m_instrument.clear();
     emit instrumentChanged();
@@ -324,7 +328,10 @@ void AcquisitionController::poll()
                 {
                     m_lastCapture = capture;
                     m_haveCapture = true;
+                    ++m_captureCount;
+                    emit captureCountChanged();
                     emit triggered(captureToMap(capture, false));
+                    if (m_trigger.settings().mode == acquisition::TriggerMode::Single) emit triggerChanged();
                 }
             }
             m_pulled += frames;
@@ -456,11 +463,34 @@ void AcquisitionController::setTrigger(const QVariantMap &t)
     s.holdoff = static_cast<std::size_t>(std::max(0, t.value(QStringLiteral("holdoff"), static_cast<int>(s.holdoff)).toInt()));
     m_trigger.configure(s);
     m_haveCapture = false;
+    emit triggerChanged();
 }
 
 void AcquisitionController::armTrigger()
 {
     m_trigger.arm();
+    emit triggerChanged();
+}
+
+QVariantMap AcquisitionController::trigger() const
+{
+    const acquisition::TriggerSettings &s = m_trigger.settings();
+    QVariantMap t;
+    t.insert(QStringLiteral("enabled"), m_triggerEnabled);
+    t.insert(QStringLiteral("channel"), static_cast<int>(s.channel));
+    t.insert(QStringLiteral("level"), s.level);
+    t.insert(QStringLiteral("hysteresis"), s.hysteresis);
+    t.insert(QStringLiteral("edge"), s.edge == acquisition::TriggerEdge::Rising    ? QStringLiteral("rising")
+                                     : s.edge == acquisition::TriggerEdge::Falling ? QStringLiteral("falling")
+                                                                                   : QStringLiteral("either"));
+    t.insert(QStringLiteral("mode"), s.mode == acquisition::TriggerMode::Auto     ? QStringLiteral("auto")
+                                     : s.mode == acquisition::TriggerMode::Normal ? QStringLiteral("normal")
+                                                                                  : QStringLiteral("single"));
+    t.insert(QStringLiteral("length"), static_cast<int>(s.length));
+    t.insert(QStringLiteral("preTrigger"), s.preTrigger);
+    t.insert(QStringLiteral("holdoff"), static_cast<int>(s.holdoff));
+    t.insert(QStringLiteral("armed"), m_trigger.armed());
+    return t;
 }
 
 QVariantMap AcquisitionController::captureToMap(const acquisition::TriggerCapture &c, bool withValues) const

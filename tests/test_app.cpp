@@ -6,6 +6,7 @@
 #include "qacq/app/qt_convert.h"
 #include "qacq/app/session.h"
 #include "qacq/app/signal_list_model.h"
+#include "qacq/app/units.h"
 #include "qacq/model/signal.h"
 
 #include <QDir>
@@ -293,6 +294,43 @@ TEST_CASE("Session: import and export CSV and WAV", "[app]")
     CHECK(!session.exportSignal(9999, QUrl::fromLocalFile(csvOut)));
 }
 
+TEST_CASE("Session: a text file is inspected, then imported as recognised", "[app]")
+{
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    Session session;
+    {
+        QFile csv(dir.filePath(QStringLiteral("tableur.csv")));
+        REQUIRE(csv.open(QIODevice::WriteOnly));
+        csv.write("Temps (ms);Tension (V);Courant (mA)\r\n0;1,5;-20\r\n0,5;1,6;-19,5\r\n1;1,7;-19\r\n1,5;1,8;-18\r\n");
+    }
+    const QUrl url = QUrl::fromLocalFile(dir.filePath(QStringLiteral("tableur.csv")));
+    const QVariantMap seen = session.inspectImport(url);
+    CHECK(seen.value(QStringLiteral("ok")).toBool());
+    CHECK(seen.value(QStringLiteral("kind")).toString() == QStringLiteral("csv"));
+    CHECK(seen.value(QStringLiteral("decimalComma")).toBool());
+    CHECK(seen.value(QStringLiteral("timeColumn")).toBool());
+    CHECK(seen.value(QStringLiteral("timeUnitSeconds")).toDouble() == 1e-3);
+    CHECK(seen.value(QStringLiteral("columns")).toInt() == 3);
+    CHECK(seen.value(QStringLiteral("titles")).toStringList().size() == 3);
+    CHECK(seen.value(QStringLiteral("preview")).toStringList().size() == 5);
+    // No option given: what was recognised.
+    const qint64 id = session.importFile(url);
+    REQUIRE(id > 0);
+    const model::SignalPtr s = session.signalList()->signalById(id);
+    CHECK(s->sampleRateHz == 2000.0);
+    CHECK(s->channelCount() == 2);
+    CHECK(s->channels.at(0).unit == "V");
+    CHECK(s->data->channels.at(1).at(1) == -19.5);
+    // Given options win.
+    const qint64 plain = session.importFile(url, {{QStringLiteral("timeColumn"), false}, {QStringLiteral("sampleRateHz"), 10.0}});
+    REQUIRE(plain > 0);
+    CHECK(session.signalList()->signalById(plain)->channelCount() == 3);
+    CHECK(session.signalList()->signalById(plain)->sampleRateHz == 10.0);
+    CHECK(session.inspectImport(QUrl::fromLocalFile(dir.filePath(QStringLiteral("absent.csv")))).value(QStringLiteral("ok")).toBool() == false);
+    CHECK(session.inspectImport(QUrl::fromLocalFile(dir.filePath(QStringLiteral("tableur.csv")))).value(QStringLiteral("lines")).toInt() == 4);
+}
+
 TEST_CASE("Settings: recent files, last folder, presets, persistence", "[app]")
 {
     QTemporaryDir dir;
@@ -339,4 +377,25 @@ TEST_CASE("Settings: recent files, last folder, presets, persistence", "[app]")
     CHECK(reopened.presetNames(QStringLiteral("frames")) == QStringList{QStringLiteral("Arduino / 8 voies")});
     reopened.clearRecentFiles();
     CHECK(reopened.recentFiles().isEmpty());
+}
+
+TEST_CASE("Units for QML: shown, typed, prefix kept for a bare number", "[app]")
+{
+    qacq::app::Units units;
+    CHECK(units.format(0.001234, QStringLiteral("s")) == QStringLiteral("1,234 ms"));
+    CHECK(units.compact(48000.0, QStringLiteral("Hz")) == QStringLiteral("48 kHz"));
+    CHECK(units.compact(115200.0, QString()) == QStringLiteral("115200"));
+    const QVariantMap ok = units.parse(QStringLiteral("2,5 kHz"), QStringLiteral("Hz"));
+    CHECK(ok.value(QStringLiteral("ok")).toBool());
+    CHECK(ok.value(QStringLiteral("value")).toDouble() == 2500.0);
+    // The field shows "48 kHz": "44,1" typed over it means 44,1 kHz.
+    const double factor = units.shownFactor(48000.0, QStringLiteral("Hz"));
+    CHECK(factor == 1000.0);
+    CHECK(units.parse(QStringLiteral("44,1"), QStringLiteral("Hz"), factor).value(QStringLiteral("value")).toDouble() == 44100.0);
+    CHECK(units.shownFactor(0.0, QStringLiteral("V")) == 1.0);
+    CHECK(units.shownFactor(5000.0, QStringLiteral("s")) == 1.0);
+    const QVariantMap wrong = units.parse(QStringLiteral("3 V"), QStringLiteral("Hz"));
+    CHECK(!wrong.value(QStringLiteral("ok")).toBool());
+    CHECK(wrong.value(QStringLiteral("error")).toString().contains(QStringLiteral("Hz")));
+    CHECK(units.count(480000).size() == 7); // "480 000", with the French group separator
 }

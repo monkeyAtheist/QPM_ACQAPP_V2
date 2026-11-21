@@ -218,7 +218,11 @@ ImportResult readCsv(std::istream &in, const std::string &name, const CsvImportO
             result.error = "Il faut au moins une colonne de valeurs après la colonne de temps.";
             return result;
         }
-        const std::vector<double> time = std::move(data->channels.front());
+        std::vector<double> time = std::move(data->channels.front());
+        if (options.timeUnitSeconds != 1.0 && options.timeUnitSeconds > 0.0)
+        {
+            for (double &t : time) t *= options.timeUnitSeconds;
+        }
         data->channels.erase(data->channels.begin());
         infos.erase(infos.begin());
         if (time.size() < 2)
@@ -281,4 +285,182 @@ ImportResult importCsv(const std::filesystem::path &file, const CsvImportOptions
     r.signal.provenance["file"] = detail::displayName(file);
     return r;
 }
+
+namespace
+{
+bool digit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+// A field "1,5", "-2,25e-3" or "12": a number written with a decimal comma (or an integer).
+bool commaNumber(const std::string &field)
+{
+    std::size_t i = 0, commas = 0, digits = 0;
+    if (i < field.size() && (field[i] == '-' || field[i] == '+')) ++i;
+    for (; i < field.size(); ++i)
+    {
+        const char c = field[i];
+        if (digit(c)) ++digits;
+        else if (c == ',') ++commas;
+        else if ((c == 'e' || c == 'E') && digits > 0) break;
+        else return false;
+    }
+    if (i < field.size())
+    {
+        ++i;
+        if (i < field.size() && (field[i] == '-' || field[i] == '+')) ++i;
+        if (i == field.size()) return false;
+        for (; i < field.size(); ++i)
+        {
+            if (!digit(field[i])) return false;
+        }
+    }
+    return digits > 0 && commas <= 1;
+}
+
+std::string lowerAscii(std::string s)
+{
+    for (char &c : s)
+    {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return s;
+}
+} // namespace
+
+CsvSniff sniffCsv(std::istream &in, std::size_t maximumLines)
+{
+    CsvSniff sniff;
+    std::vector<std::string> data;
+    std::string headerLine;
+    std::string line;
+    for (std::size_t read = 0; read < maximumLines && std::getline(in, line); ++read)
+    {
+        if (read == 0 && line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
+            static_cast<unsigned char>(line[1]) == 0xBB && static_cast<unsigned char>(line[2]) == 0xBF)
+            line.erase(0, 3);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (sniff.preview.size() < 8) sniff.preview.push_back(line);
+        const std::string t = trim(line);
+        if (t.empty() || t.front() == '#') continue;
+        const auto asPoint = io::parseNumberLine(t, false);
+        const auto asComma = io::parseNumberLine(t, true);
+        const bool numbers = (asPoint && !asPoint->empty()) || (asComma && !asComma->empty());
+        if (!numbers && data.empty() && headerLine.empty())
+        {
+            headerLine = t;
+            continue;
+        }
+        if (numbers) data.push_back(t);
+    }
+
+    // Decimal mark.
+    bool separators = false, point = false, comma = false;
+    for (const std::string &d : data)
+    {
+        if (d.find(';') != std::string::npos || d.find('\t') != std::string::npos) separators = true;
+        for (std::size_t i = 1; i + 1 < d.size(); ++i)
+        {
+            if (!digit(d[i - 1]) || !digit(d[i + 1])) continue;
+            if (d[i] == '.') point = true;
+            if (d[i] == ',') comma = true;
+        }
+    }
+    if (comma && !point)
+    {
+        if (separators)
+        {
+            sniff.decimalComma = true;
+        }
+        else
+        {
+            // "1,5 2,5": spaces between the columns, one comma in each number. "512,1023" alone stays two
+            // integers (an Arduino printing two values), the usual case.
+            bool all = true, spaced = false;
+            for (const std::string &d : data)
+            {
+                std::size_t start = 0, fields = 0;
+                while (start < d.size() && all)
+                {
+                    while (start < d.size() && d[start] == ' ') ++start;
+                    std::size_t end = start;
+                    while (end < d.size() && d[end] != ' ') ++end;
+                    if (end > start)
+                    {
+                        all = commaNumber(d.substr(start, end - start));
+                        ++fields;
+                    }
+                    start = end;
+                }
+                spaced = spaced || fields >= 2;
+            }
+            sniff.decimalComma = all && spaced;
+        }
+    }
+
+    // Columns, header.
+    std::vector<std::vector<double>> rows;
+    for (const std::string &d : data)
+    {
+        if (auto v = io::parseNumberLine(d, sniff.decimalComma); v && !v->empty()) rows.push_back(std::move(*v));
+    }
+    sniff.lines = rows.size();
+    if (!rows.empty()) sniff.columns = rows.front().size();
+    if (!headerLine.empty())
+    {
+        sniff.header = true;
+        sniff.titles = splitHeader(headerLine, sniff.decimalComma);
+    }
+
+    // Time column: named so, or (without header) growing by a regular step.
+    if (sniff.columns < 2 || rows.size() < 2) return sniff;
+    std::vector<double> steps;
+    for (std::size_t i = 1; i < rows.size(); ++i)
+    {
+        if (rows[i].size() == sniff.columns && rows[i - 1].size() == sniff.columns) steps.push_back(rows[i][0] - rows[i - 1][0]);
+    }
+    if (steps.empty()) return sniff;
+    // The order of the steps does not matter below: the median is taken in place.
+    std::nth_element(steps.begin(), steps.begin() + static_cast<std::ptrdiff_t>(steps.size() / 2), steps.end());
+    const double step = steps[steps.size() / 2];
+    bool regular = step > 0.0;
+    for (double st : steps) regular = regular && st > 0.0 && std::abs(st - step) <= 0.01 * step;
+
+    bool named = false;
+    double unit = 1.0;
+    if (sniff.header && !sniff.titles.empty())
+    {
+        const ChannelInfo info = parseColumnTitle(sniff.titles.front());
+        const std::string name = lowerAscii(info.name);
+        const std::string u = lowerAscii(info.unit);
+        named = name == "t" || name == "s" || name == "ms" || name.rfind("temps", 0) == 0 || name.rfind("time", 0) == 0 ||
+                name.rfind("horodatage", 0) == 0 || name == "seconds" || name == "secondes";
+        if (u == "s" || u == "sec") named = true;
+        else if (u == "ms") unit = 1e-3;
+        else if (u == "us" || u == "\xC2\xB5s" || u == "\xCE\xBCs") unit = 1e-6;
+        else if (u == "min") unit = 60.0;
+        if (unit != 1.0) named = true;
+        if (name == "ms" && u.empty()) unit = 1e-3;
+        sniff.firstColumnIsTime = named;
+    }
+    else
+    {
+        sniff.firstColumnIsTime = regular;
+    }
+    if (sniff.firstColumnIsTime)
+    {
+        sniff.timeUnitSeconds = unit;
+        sniff.timeStepSeconds = step > 0.0 ? step * unit : 0.0;
+    }
+    return sniff;
+}
+
+CsvSniff sniffCsv(const std::filesystem::path &file, std::size_t maximumLines)
+{
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return {};
+    return sniffCsv(in, maximumLines);
+}
 } // namespace qacq::model
+

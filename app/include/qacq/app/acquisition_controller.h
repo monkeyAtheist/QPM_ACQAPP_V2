@@ -45,11 +45,15 @@ class AcquisitionController : public QObject
     Q_PROPERTY(QVariantMap statistics READ statistics NOTIFY statisticsChanged)
     Q_PROPERTY(int channelCount READ channelCount NOTIFY channelsChanged)
     Q_PROPERTY(QStringList channelNames READ channelNames NOTIFY channelsChanged)
+    Q_PROPERTY(QStringList channelUnits READ channelUnits NOTIFY channelsChanged)
     Q_PROPERTY(double sampleRate READ sampleRate NOTIFY statisticsChanged)
     Q_PROPERTY(double measuredRate READ measuredRate NOTIFY statisticsChanged)
     Q_PROPERTY(QString instrument READ instrument NOTIFY instrumentChanged)
     Q_PROPERTY(bool recording READ isRecording NOTIFY recordingChanged)
     Q_PROPERTY(qint64 lastSignalId READ lastSignalId NOTIFY lastSignalIdChanged)
+    // The trigger as setTrigger takes it, with "armed" (a single capture waiting).
+    Q_PROPERTY(QVariantMap trigger READ trigger NOTIFY triggerChanged)
+    Q_PROPERTY(int captureCount READ captureCount NOTIFY captureCountChanged) // since the start
 
 public:
     enum class State
@@ -70,15 +74,19 @@ public:
     QString lastError() const { return m_lastError; }
     QStringList warnings() const { return m_warnings; }
     QVariantMap settings() const;
-    void setSettings(const QVariantMap &settings);
+    // Partial maps change only what they hold ({serial: {baudRate: 9600}}); callable from QML.
+    Q_INVOKABLE void setSettings(const QVariantMap &settings);
     QVariantMap statistics() const;
     int channelCount() const { return static_cast<int>(m_channelNames.size()); }
     QStringList channelNames() const { return m_channelNames; }
+    QStringList channelUnits() const { return m_channelUnits; }
     double sampleRate() const { return effectiveRate(); }
     double measuredRate() const;
     QString instrument() const { return m_instrument; }
     bool isRecording() const { return m_recording; }
     qint64 lastSignalId() const { return m_lastSignalId; }
+    QVariantMap trigger() const;
+    int captureCount() const { return m_captureCount; }
 
     Q_INVOKABLE bool start();
     // Stops; with keep, what was recorded becomes a signal of the session. Returns its id (0 if none).
@@ -106,6 +114,10 @@ public:
     const acquisition::AcquisitionSettings &acquisitionSettings() const { return m_settings; }
     void setAcquisitionSettings(const acquisition::AcquisitionSettings &settings);
     const acquisition::LiveRecorder &recorder() const { return m_recorder; }
+    bool triggerEnabled() const { return m_triggerEnabled; }
+    const acquisition::TriggerSettings &triggerSettings() const { return m_trigger.settings(); }
+    // The last complete capture (its frames are in the recorder), null before the first one.
+    const acquisition::TriggerCapture *lastCaptureData() const { return m_haveCapture ? &m_lastCapture : nullptr; }
     void setRecorderLimits(const acquisition::RecorderLimits &limits);
     void setPollInterval(int milliseconds);
     void poll(); // empties the pipe now (the timer calls it)
@@ -120,6 +132,8 @@ signals:
     void instrumentChanged();
     void recordingChanged();
     void lastSignalIdChanged();
+    void triggerChanged();
+    void captureCountChanged();
     void framesArrived(qint64 totalFrames);
     void triggered(const QVariantMap &capture);
 
@@ -165,6 +179,8 @@ private:
     QElapsedTimer m_clock;
     QString m_startedUtc;
     QStringList m_channelNames;
+    QStringList m_channelUnits;
+    int m_captureCount = 0;
     QString m_instrument;
     qint64 m_lastSignalId = 0;
     std::vector<double> m_values;

@@ -718,3 +718,65 @@ TEST_CASE("CSV and WAV files on disk", "[csv][wav]")
     std::filesystem::remove(csv);
     std::filesystem::remove(wav);
 }
+
+TEST_CASE("CSV: the layout is recognised before import (decimal mark, header, time column)", "[csv]")
+{
+    using namespace qacq::model;
+    {
+        std::istringstream in("Temps (s);Tension (V);Courant (mA)\r\n0;1,5;-20\r\n0,001;1,6;-19,5\r\n0,002;1,7;-19\r\n");
+        const CsvSniff s = sniffCsv(in);
+        CHECK(s.decimalComma);
+        CHECK(s.header);
+        REQUIRE(s.titles.size() == 3);
+        CHECK(s.titles[2] == "Courant (mA)");
+        CHECK(s.columns == 3);
+        CHECK(s.lines == 3);
+        CHECK(s.firstColumnIsTime);
+        CHECK(s.timeUnitSeconds == 1.0);
+        CHECK(std::abs(s.timeStepSeconds - 0.001) < 1e-12);
+        CHECK(s.preview.size() == 4);
+        CHECK(s.preview[0] == "Temps (s);Tension (V);Courant (mA)");
+    }
+    {
+        // Our own export, and a time column in milliseconds.
+        std::istringstream in("time [ms],a,b\n0,1,2\n2,1.5,2\n4,1,2\n");
+        const CsvSniff s = sniffCsv(in);
+        CHECK(!s.decimalComma);
+        CHECK(s.firstColumnIsTime);
+        CHECK(s.timeUnitSeconds == 1e-3);
+        CHECK(std::abs(s.timeStepSeconds - 0.002) < 1e-15);
+    }
+    {
+        // No header: a regular first column is taken for time; two integers per line stay two columns.
+        std::istringstream regular("0.0,1.0\n0.5,2\n1.0,3\n");
+        const CsvSniff r = sniffCsv(regular);
+        CHECK(!r.header);
+        CHECK(r.firstColumnIsTime);
+        CHECK(r.timeStepSeconds == 0.5);
+        std::istringstream arduino("512,1023\n510,1020\n515,1019\n");
+        const CsvSniff a = sniffCsv(arduino);
+        CHECK(!a.decimalComma);
+        CHECK(a.columns == 2);
+        CHECK(!a.firstColumnIsTime);
+        std::istringstream spaced("1,5 2,25\n1,75 -2,5e-1\n");
+        CHECK(sniffCsv(spaced).decimalComma);
+    }
+    {
+        // A first column that grows regularly but is named otherwise is a channel.
+        std::istringstream in("Voie 1,Voie 2\n1,5\n2,6\n3,7\n");
+        const CsvSniff s = sniffCsv(in);
+        CHECK(s.header);
+        CHECK(!s.firstColumnIsTime);
+    }
+    {
+        // The import uses the unit of the time column.
+        std::istringstream in("t (ms),x\n0,1\n2,2\n4,3\n");
+        CsvImportOptions options;
+        options.firstColumnIsTime = true;
+        options.timeUnitSeconds = 1e-3;
+        const ImportResult r = readCsv(in, "ms", options);
+        REQUIRE(r.ok());
+        CHECK(r.signal.sampleRateHz == 500.0);
+        CHECK(r.signal.channelCount() == 1);
+    }
+}

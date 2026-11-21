@@ -48,8 +48,12 @@ public:
     Q_INVOKABLE bool save();
     Q_INVOKABLE bool saveAs(const QUrl &url);
 
+    // What an import would read: {ok, error, kind ("csv" | "wav"), fileName, and for text: decimalComma,
+    // timeColumn, timeUnitSeconds, timeStepSeconds, header, titles, columns, lines, preview (first lines)}.
+    Q_INVOKABLE QVariantMap inspectImport(const QUrl &url) const;
     // Import by extension: .csv, .txt, .tsv, .dat (text) or .wav. Options: decimalComma (bool),
-    // timeColumn (bool), sampleRateHz (number), unit (string). Returns the id of the new signal, 0 on failure.
+    // timeColumn (bool), timeUnitSeconds (number), sampleRateHz (number), unit (string); the ones not given
+    // are those recognised in the file (inspectImport). Returns the id of the new signal, 0 on failure.
     Q_INVOKABLE qint64 importFile(const QUrl &url, const QVariantMap &options = QVariantMap());
     // Export by extension: .csv (decimalComma, timeColumn) or .wav (encoding "pcm16" | "pcm24" | "pcm32" |
     // "float32", fullScale, normalize).

@@ -117,6 +117,50 @@ bool Session::writeTo(const QString &localFile)
     return true;
 }
 
+QVariantMap Session::inspectImport(const QUrl &url) const
+{
+    QVariantMap m;
+    const QString local = localFileOf(url);
+    m.insert(QStringLiteral("fileName"), QFileInfo(local).fileName());
+    const QString suffix = QFileInfo(local).suffix().toLower();
+    if (local.isEmpty() || !QFileInfo::exists(local))
+    {
+        m.insert(QStringLiteral("ok"), false);
+        m.insert(QStringLiteral("error"), QStringLiteral("Fichier introuvable."));
+        return m;
+    }
+    if (suffix == QStringLiteral("wav"))
+    {
+        m.insert(QStringLiteral("ok"), true);
+        m.insert(QStringLiteral("kind"), QStringLiteral("wav"));
+        return m;
+    }
+    if (suffix != QStringLiteral("csv") && suffix != QStringLiteral("txt") && suffix != QStringLiteral("tsv") &&
+        suffix != QStringLiteral("dat"))
+    {
+        m.insert(QStringLiteral("ok"), false);
+        m.insert(QStringLiteral("error"), QStringLiteral("Format non reconnu : « .%1 » (CSV, texte ou WAV attendu).").arg(suffix));
+        return m;
+    }
+    const model::CsvSniff sniff = model::sniffCsv(toPath(local));
+    QStringList titles, preview;
+    for (const std::string &t : sniff.titles) titles << toQString(t);
+    for (const std::string &p : sniff.preview) preview << toQString(p);
+    m.insert(QStringLiteral("ok"), sniff.lines > 0);
+    if (sniff.lines == 0) m.insert(QStringLiteral("error"), QStringLiteral("Aucune ligne de nombres au début de ce fichier."));
+    m.insert(QStringLiteral("kind"), QStringLiteral("csv"));
+    m.insert(QStringLiteral("decimalComma"), sniff.decimalComma);
+    m.insert(QStringLiteral("timeColumn"), sniff.firstColumnIsTime);
+    m.insert(QStringLiteral("timeUnitSeconds"), sniff.timeUnitSeconds);
+    m.insert(QStringLiteral("timeStepSeconds"), sniff.timeStepSeconds);
+    m.insert(QStringLiteral("header"), sniff.header);
+    m.insert(QStringLiteral("titles"), titles);
+    m.insert(QStringLiteral("columns"), static_cast<int>(sniff.columns));
+    m.insert(QStringLiteral("lines"), static_cast<int>(sniff.lines));
+    m.insert(QStringLiteral("preview"), preview);
+    return m;
+}
+
 qint64 Session::importFile(const QUrl &url, const QVariantMap &options)
 {
     const QString local = localFileOf(url);
@@ -134,9 +178,11 @@ qint64 Session::importFile(const QUrl &url, const QVariantMap &options)
     else if (suffix == QStringLiteral("csv") || suffix == QStringLiteral("txt") || suffix == QStringLiteral("tsv") ||
              suffix == QStringLiteral("dat"))
     {
+        const model::CsvSniff sniff = model::sniffCsv(toPath(local));
         model::CsvImportOptions csv;
-        csv.decimalComma = options.value(QStringLiteral("decimalComma"), false).toBool();
-        csv.firstColumnIsTime = options.value(QStringLiteral("timeColumn"), false).toBool();
+        csv.decimalComma = options.value(QStringLiteral("decimalComma"), sniff.decimalComma).toBool();
+        csv.firstColumnIsTime = options.value(QStringLiteral("timeColumn"), sniff.firstColumnIsTime).toBool();
+        csv.timeUnitSeconds = options.value(QStringLiteral("timeUnitSeconds"), sniff.timeUnitSeconds).toDouble();
         csv.sampleRateHz = options.value(QStringLiteral("sampleRateHz"), 1.0).toDouble();
         csv.unit = toUtf8(options.value(QStringLiteral("unit")).toString());
         result = model::importCsv(toPath(local), csv);

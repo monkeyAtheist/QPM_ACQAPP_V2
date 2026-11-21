@@ -4,8 +4,10 @@ Outil pédagogique et utilitaire de développement : acquisition (carte à micro
 instrument SCPI, flux réseau, carte son) et traitement du signal.
 Ce dépôt est la réécriture de QtAcquisitionApp (« Architecture milestone 57 »), menée selon l'audit du 20/11/2026.
 
-**Statut : phase 2 (acquisition) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle
-de session et leurs tests sont en place ; l'application Qt Quick arrive en phase 3. L'ancienne application reste utilisable d'ici là.
+**Statut : phase 3 (l'application) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle de
+session, l'acquisition sur ses threads et leurs tests sont en place. La fenêtre Qt Quick existe, sur la coquille
+de QTsignalApp V2 : modules Signaux (visualiser) et Acquisition ; Analyse, Générateur, Filtres et Modulations
+arrivent en phase 4. L'ancienne application reste utilisable d'ici là.
 
 ## Décisions (20/11/2026)
 
@@ -61,6 +63,16 @@ app/                         qacq_app : couche applicative sur QtCore (sans fen�
   include/qacq/app/acquisition_source.h  les sources, chacune sur son thread : série, TCP, UDP, SCPI, carte son, simulateur
   include/qacq/app/acquisition_controller.h  démarrer, arrêter, statistiques, déclenchement, enregistrement continu
   include/qacq/app/serial_port_list.h  ports série présents, carte reconnue (Arduino, STM32, ESP32…), branchement détecté
+  include/qacq/app/units.h          quantités pour les champs de QML : « 48 kHz » affiché, « 44,1 kHz » saisi
+plot/                        qacq_plot : le moteur de tracé de toutes les vues, sans aucune dépendance Qt
+  include/qacq/plot/axis.h          graduations 1-2-5 et log, un préfixe par axe, quantités affichées et saisies
+  include/qacq/plot/trace.h         tracé à tout zoom : extrêmes par colonne de pixels, pyramide min/max, ruptures
+ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille de QTsignalApp V2)
+  signal_plot.h                    le tracé (QQuickPaintedItem) : signal de la session, défilement, captures
+  qml/Main.qml                     fenêtre, barre des modules, ruban, liste des signaux, propriétés
+  qml/AcquisitionView.qml          module Acquisition : tracé en direct, ruban, état et chiffres de la liaison
+  qml/AcquisitionSettings.qml      réglages de la source, du format, de la cadence, des voies ; préréglages
+  qml/SignalsView.qml              module Signaux : le signal choisi à tout zoom, avec la lecture au pointeur
 tests/                       qacq_tests (cœurs) et qacq_app_tests (couche Qt) : un groupe CTest par étiquette
   fixtures/scipy_reference.inc     résultats SciPy (générés, ne pas éditer)
   signals.h                        signaux d'essai déterministes, identiques en C++ et en Python
@@ -77,7 +89,9 @@ Sous Windows, avec Qt 6.11 et son compilateur MinGW :
 scripts\build.cmd        configure, compile et lance tous les tests (journaux dans build\logs\)
 ```
 
-En phase 0, `scripts\run.cmd` indique seulement que l'application n'existe pas encore.
+```
+scripts\run.cmd          compile ce qui a changé (l'application seule) puis la lance ; messages dans build\logs\app.txt
+```
 
 Ou directement, avec les préréglages de `CMakeUserPresets.json` (propres à ce PC) :
 
@@ -207,6 +221,25 @@ Sans Qt, déjà là et testé :
   sans une erreur.
 - **Enregistrement continu** sur disque en CSV ou WAV ; un WAV interrompu (plantage) se relit quand même.
 
+## Le tracé
+
+Un seul moteur pour toutes les vues (`plot/`, sans Qt, testé) ; l'élément Qt Quick `SignalPlot` ne fait que
+dessiner ce qu'il calcule.
+- **À tout zoom** : la durée visible est découpée en colonnes de pixels. Avec plus de deux échantillons par
+  colonne, chacune garde ses extrêmes, son premier et son dernier échantillon : aucun pic n'est jamais perdu,
+  quel que soit le zoom. Plus près, les échantillons eux-mêmes, avec un point sur chacun quand on les distingue.
+- **Vite** : une pyramide d'extrêmes par blocs (16, 64, 256… échantillons) donne les extrêmes de n'importe quel
+  intervalle en O(log n) : dix millions d'échantillons se tracent aussi vite que mille.
+- **Ruptures** (échantillons perdus, enregistrement repris) : le trait est coupé et marqué en pointillés.
+- **Axes** : graduations 1-2-5, un seul préfixe par axe (« Temps (ms) » : 0 ; 0,5 ; 1…), virgule décimale ; une
+  bande par voie à son échelle, ou toutes sur un même axe ; échelle automatique stable en direct (elle suit
+  aussitôt ce qui en sort, ne rétrécit que quand le signal n'occupe plus que 40 % de la hauteur).
+- **Souris** : molette pour le zoom du temps autour du pointeur (en direct : la largeur de la fenêtre), Ctrl +
+  molette pour les valeurs, glisser pour se déplacer, clic droit glissé pour zoomer sur un intervalle, double clic
+  pour tout voir ; la lecture suit le pointeur (instant et valeur de chaque voie à l'échantillon le plus proche).
+- **En direct** : défilement des dernières secondes, ou dernière capture du déclenchement (t = 0 à l'instant du
+  déclenchement, niveau marqué), « Figer » pour lire pendant que les données continuent d'arriver.
+
 ## Méthode de l'analyse de tonalité
 
 1. f0 approchée : pic d'un spectre de Hann (2^20 points au plus), interpolation gaussienne.
@@ -225,9 +258,13 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
    trames binaires, SCPI), tampon sans verrou.
 1. **Modèle et session** (fait) : sans Qt : signal, liste avec annuler/rétablir, fichier de session, CSV, WAV ;
    couche Qt : modèle de liste pour QML, session (ouvrir, enregistrer, importer, exporter), réglages mémorisés.
-2. **Acquisition** (en cours) : fait : réglages, tuyau, mémoire, fréquence mesurée, déclenchement, simulateur,
+2. **Acquisition** (fait, sauf VISA) : réglages, tuyau, mémoire, fréquence mesurée, déclenchement, simulateur,
    exemples de programme, enregistrement continu ; sources Qt sur leur thread (série, TCP, UDP, SCPI sur le
    réseau, carte son, simulateur), liste des ports, contrôleur d'acquisition. Reste : VISA pour l'USB.
-3. Coquille Qt Quick reprise de QTsignalApp V2 et moteur de tracé unique.
+3. **L'application** (en cours) : moteur de tracé unique (sans Qt, testé), coquille Qt Quick reprise de
+   QTsignalApp V2 (barre des modules, ruban, liste des signaux, propriétés, thème clair ou sombre), modules
+   Signaux et Acquisition ; glisser-déposer de fichiers, préréglages, réglages retenus d'une fois sur l'autre ;
+   import d'un fichier texte avec aperçu et reconnaissance de sa forme (virgule décimale, titres, colonne de
+   temps en s, ms ou µs).
 4. Modules : oscilloscope, analyse, générateur, filtres, modulations.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.
