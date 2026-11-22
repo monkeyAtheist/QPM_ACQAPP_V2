@@ -5,6 +5,7 @@
 #include "qacq/dsp/filtering.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 
@@ -15,17 +16,141 @@ double gaussianQ(double x) noexcept
     return 0.5 * std::erfc(x / std::sqrt(2.0));
 }
 
-double theoreticalBer(Modulation modulation, double ebN0Db) noexcept
+namespace
+{
+// Probability that the angle of a point of energy es (over N0) with noise passes alpha (0 < alpha < pi) on one
+// side, by Craig's form: (1 / 2 pi) integral from 0 to pi - alpha of exp(-es sin^2 alpha / sin^2 t) dt. The
+// integrand rises from 0 to its peak at pi/2 (or at the end of the range): Gauss-Legendre of 16 points on 64
+// pieces, exact to the last digits from 0 to 40 dB.
+double beyondAngle(double es, double alpha) noexcept
+{
+    static constexpr double x[8] = {0.0950125098376374, 0.2816035507792589, 0.4580167776572274, 0.6178762444026438,
+                                    0.7554044083550030, 0.8656312023878318, 0.9445750230732326, 0.9894009349916499};
+    static constexpr double w[8] = {0.1894506104550685, 0.1826034150449236, 0.1691565193950025, 0.1495959888165767,
+                                    0.1246289712555339, 0.0951585116824928, 0.0622535239386479, 0.0271524594117541};
+    const double upper = kPi - alpha;
+    const double s2 = std::sin(alpha) * std::sin(alpha);
+    constexpr int pieces = 64;
+    const double width = upper / pieces;
+    double sum = 0.0;
+    for (int piece = 0; piece < pieces; ++piece)
+    {
+        const double mid = (piece + 0.5) * width;
+        double part = 0.0;
+        for (int k = 0; k < 8; ++k)
+            for (double sign : {-1.0, 1.0})
+            {
+                const double t = mid + sign * 0.5 * width * x[k];
+                const double st = std::sin(t);
+                part += w[k] * std::exp(-es * s2 / (st * st));
+            }
+        sum += 0.5 * width * part;
+    }
+    return sum / (2.0 * kPi);
+}
+
+// Of the levels of a Gray-coded L-PAM, at r = half the distance between levels over the noise deviation: the
+// bit errors per symbol (averaged over the levels sent) and the probability that a level is wrong.
+void pamErrors(std::size_t levels, double r, double &bitErrors, double &symbolError) noexcept
+{
+    bitErrors = 0.0;
+    for (std::size_t i = 0; i < levels; ++i)
+        for (std::size_t j = 0; j < levels; ++j)
+        {
+            if (i == j) continue;
+            const std::size_t d = i < j ? j - i : i - j;
+            // Between its two edges, 2d - 1 and 2d + 1 half-distances away (the outer levels have one edge).
+            const bool outer = j == 0 || j + 1 == levels;
+            const double p = gaussianQ((2.0 * static_cast<double>(d) - 1.0) * r) -
+                             (outer ? 0.0 : gaussianQ((2.0 * static_cast<double>(d) + 1.0) * r));
+            bitErrors += p * static_cast<double>(std::popcount(grayCode(i) ^ grayCode(j)));
+        }
+    bitErrors /= static_cast<double>(levels);
+    symbolError = 2.0 * (1.0 - 1.0 / static_cast<double>(levels)) * gaussianQ(r);
+}
+
+// 8-PSK: the probability of each sector away from the one sent (by symmetry of the circle), from the
+// half-planes beyond its edges.
+void psk8Errors(double ebN0, double &ber, double &ser) noexcept
+{
+    const double es = 3.0 * ebN0;
+    double beyond[5]; // beyond (2j - 1) pi / 8, j = 1 to 4
+    for (int j = 1; j <= 4; ++j) beyond[j] = beyondAngle(es, (2.0 * j - 1.0) * kPi / 8.0);
+    // Sector j (centred on j pi / 4), j = 1, 2, 3 on each side, and 4 opposite.
+    double sector[5] = {0.0, beyond[1] - beyond[2], beyond[2] - beyond[3], beyond[3] - beyond[4], 2.0 * beyond[4]};
+    ser = 2.0 * beyond[1];
+    // The bits each offset changes, averaged over the eight points sent.
+    ber = 0.0;
+    for (int offset = 1; offset < 8; ++offset)
+    {
+        const int j = offset <= 4 ? offset : 8 - offset;
+        double flips = 0.0;
+        for (std::size_t p = 0; p < 8; ++p)
+            flips += std::popcount(grayCode(p) ^ grayCode((p + static_cast<std::size_t>(offset)) % 8));
+        ber += sector[j] * flips / 8.0;
+    }
+    ber /= 3.0;
+}
+
+void errorRates(Modulation modulation, double ebN0Db, double askLowLevel, double &ber, double &ser) noexcept
 {
     const double g = std::pow(10.0, ebN0Db / 10.0);
     switch (modulation)
     {
         case Modulation::Bpsk:
-        case Modulation::Qpsk: return gaussianQ(std::sqrt(2.0 * g));
-        case Modulation::Ask: return gaussianQ(std::sqrt(g));
-        case Modulation::Fsk: return 0.5 * std::exp(-0.5 * g);
-        default: return std::numeric_limits<double>::quiet_NaN();
+            ber = ser = gaussianQ(std::sqrt(2.0 * g));
+            return;
+        case Modulation::Qpsk:
+        {
+            ber = gaussianQ(std::sqrt(2.0 * g));
+            ser = 1.0 - (1.0 - ber) * (1.0 - ber);
+            return;
+        }
+        case Modulation::Ask:
+        {
+            const double l = askLowLevel;
+            ber = ser = gaussianQ(std::sqrt(g * (1.0 - l) * (1.0 - l) / (1.0 + l * l)));
+            return;
+        }
+        case Modulation::Fsk:
+            ber = ser = 0.5 * std::exp(-0.5 * g);
+            return;
+        case Modulation::Psk8:
+            psk8Errors(g, ber, ser);
+            return;
+        case Modulation::Qam16:
+        case Modulation::Qam64:
+        case Modulation::Qam256:
+        {
+            const int k = bitsPerSymbol(modulation);
+            const std::size_t levels = std::size_t{1} << (k / 2);
+            const double m = static_cast<double>(levels * levels);
+            const double r = std::sqrt(3.0 * k * g / (m - 1.0));
+            double perAxisBits = 0.0, perAxisSymbol = 0.0;
+            pamErrors(levels, r, perAxisBits, perAxisSymbol);
+            ber = perAxisBits / (0.5 * k); // each axis carries half the bits, and errs alike
+            ser = 1.0 - (1.0 - perAxisSymbol) * (1.0 - perAxisSymbol);
+            return;
+        }
+        default:
+            ber = ser = std::numeric_limits<double>::quiet_NaN();
+            return;
     }
+}
+} // namespace
+
+double theoreticalBer(Modulation modulation, double ebN0Db, double askLowLevel) noexcept
+{
+    double ber = 0.0, ser = 0.0;
+    errorRates(modulation, ebN0Db, askLowLevel, ber, ser);
+    return ber;
+}
+
+double theoreticalSer(Modulation modulation, double ebN0Db, double askLowLevel) noexcept
+{
+    double ber = 0.0, ser = 0.0;
+    errorRates(modulation, ebN0Db, askLowLevel, ber, ser);
+    return ser;
 }
 
 BitErrors countBitErrors(std::span<const std::uint8_t> sent, std::span<const std::uint8_t> received, std::size_t skip)
@@ -167,10 +292,11 @@ DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &
     const std::size_t n = ri.size();
     const double a = spec.carrierAmplitude != 0.0 ? spec.carrierAmplitude : 1.0;
     const auto symbols = static_cast<std::size_t>(std::floor(static_cast<double>(n) * rs / fs + 1e-9));
+    const double sps = fs / rs;
+    out.samplesPerSymbol = sps;
 
     if (rrc)
     {
-        const double sps = fs / rs;
         const auto spsInteger = static_cast<std::size_t>(std::llround(sps));
         if (std::abs(sps - static_cast<double>(spsInteger)) > 1e-9)
         {
@@ -178,11 +304,38 @@ DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &
             return out;
         }
         const std::vector<double> h = rootRaisedCosine(spec.rolloff, spsInteger, spec.pulseSpanSymbols);
-        const auto yi = firFilterAligned(h, out.basebandI); // image filter, then matched filter
-        const auto yq = firFilterAligned(h, out.basebandQ);
         const double scale = 1.0 / (a * std::sqrt(static_cast<double>(spsInteger)));
+        if (spec.matchedOutput)
+        {
+            out.matchedI = firFilterAligned(h, out.basebandI); // image filter, then matched filter
+            out.matchedQ = firFilterAligned(h, out.basebandQ);
+            for (double &v : out.matchedI) v *= scale;
+            for (double &v : out.matchedQ) v *= scale;
+        }
+        // The filter output at the symbol instants: sum of h[t] x[i + delay - t] (as firFilterAligned gives it).
+        const std::size_t delay = (h.size() - 1) / 2;
         for (std::size_t k = 0; k * spsInteger < n; ++k)
-            out.decisionPoints.emplace_back(yi[k * spsInteger] * scale, yq[k * spsInteger] * scale);
+        {
+            const std::size_t i = k * spsInteger;
+            std::complex<double> y;
+            if (spec.matchedOutput)
+            {
+                y = {out.matchedI[i], out.matchedQ[i]};
+            }
+            else
+            {
+                double yi = 0.0, yq = 0.0;
+                const std::size_t first = i + delay >= n ? i + delay - (n - 1) : 0; // taps beyond the last sample
+                for (std::size_t t = first; t < h.size() && t <= i + delay; ++t)
+                {
+                    yi += h[t] * out.basebandI[i + delay - t];
+                    yq += h[t] * out.basebandQ[i + delay - t];
+                }
+                y = {yi * scale, yq * scale};
+            }
+            out.decisionPoints.push_back(y);
+            out.decisionTimes.push_back(static_cast<double>(i));
+        }
     }
     else
     {
@@ -217,21 +370,41 @@ DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &
             else
                 out.decisionPoints[k] /= c * a;
         }
+        if (spec.type != Modulation::Fsk && spec.matchedOutput)
+        {
+            // For the eye: the mean over one symbol of the baseband (free of the image), whose value at the last
+            // sample of a symbol is that symbol integrated.
+            const auto window = std::max<std::size_t>(1, static_cast<std::size_t>(std::llround(sps)));
+            out.matchedI.assign(n, 0.0);
+            out.matchedQ.assign(n, 0.0);
+            double sumI = 0.0, sumQ = 0.0;
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                sumI += out.basebandI[i];
+                sumQ += out.basebandQ[i];
+                if (i >= window)
+                {
+                    sumI -= out.basebandI[i - window];
+                    sumQ -= out.basebandQ[i - window];
+                }
+                const double count = static_cast<double>(std::min(i + 1, window));
+                out.matchedI[i] = sumI / (count * a);
+                out.matchedQ[i] = sumQ / (count * a);
+            }
+            for (std::size_t k = 0; k < symbols; ++k)
+                out.decisionTimes.push_back(std::ceil(static_cast<double>(k + 1) * sps - 1e-9) - 1.0);
+        }
     }
 
+    const int bps = std::max(1, bitsPerSymbol(spec.type));
+    out.symbols.reserve(out.decisionPoints.size());
+    out.bits.reserve(out.decisionPoints.size() * static_cast<std::size_t>(bps));
     for (const auto &p : out.decisionPoints)
     {
-        switch (spec.type)
-        {
-            case Modulation::Bpsk: out.bits.push_back(p.real() < 0.0 ? 1 : 0); break;
-            case Modulation::Qpsk:
-                out.bits.push_back(p.imag() < 0.0 ? 1 : 0);
-                out.bits.push_back(p.real() < 0.0 ? 1 : 0);
-                break;
-            case Modulation::Ask: out.bits.push_back(p.real() > 0.5 * (1.0 + spec.askLowLevel) ? 1 : 0); break;
-            case Modulation::Fsk: out.bits.push_back(p.real() > p.imag() ? 1 : 0); break;
-            default: break;
-        }
+        const std::size_t symbol = spec.type == Modulation::Fsk ? (p.real() > p.imag() ? 1u : 0u)
+                                                                 : decideSymbol(spec.type, p, spec.askLowLevel);
+        out.symbols.push_back(symbol);
+        for (int b = bps - 1; b >= 0; --b) out.bits.push_back(static_cast<std::uint8_t>((symbol >> b) & 1u));
     }
     return out;
 }

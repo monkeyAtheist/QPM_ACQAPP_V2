@@ -1,8 +1,8 @@
 import QtQuick
 
 // Group "Vue" of the tool header, the same in every module: everything on screen, zoom in and out, the
-// view before. Zoom acts on `target` (a SignalPlot or a SpectrumPlot: the plot pointed at last),
-// "Tout voir" on every plot of `plots`, "Précédente" on `backTarget`.
+// view before. Zoom acts on `target` (a SignalPlot, a SpectrumPlot or a ModulationPlot: the plot pointed at
+// last), "Tout voir" on every plot of `plots`, "Précédente" on `backTarget`.
 RibbonGroup {
     id: group
     property Item target: null
@@ -15,7 +15,9 @@ RibbonGroup {
     function zoom(factor) {
         if (!target)
             return
-        if (typeof target.zoomFrequency === "function")
+        if (typeof target.zoomView === "function")
+            target.zoomView(factor)
+        else if (typeof target.zoomFrequency === "function")
             target.zoomFrequency(factor)
         else
             target.zoomTime(factor)

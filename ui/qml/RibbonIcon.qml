@@ -563,6 +563,73 @@ Canvas {
             c.closePath()
             c.fill()
             break
+        // ---- Modulations ----
+        case "constellation":
+            // The I/Q plane, four points.
+            c.lineWidth = 1.0
+            line([2, 12, 22, 12], false)
+            line([12, 2, 12, 22], false)
+            circle(7, 7, 1.8, true)
+            circle(17, 7, 1.8, true)
+            circle(7, 17, 1.8, true)
+            circle(17, 17, 1.8, true)
+            break
+        case "eye":
+            // Traces crossing between two symbols: an eye open in the middle.
+            c.lineWidth = 1.3
+            c.beginPath()
+            c.moveTo(2, 6)
+            c.bezierCurveTo(8, 6, 8, 18, 12, 18)
+            c.bezierCurveTo(16, 18, 16, 6, 22, 6)
+            c.stroke()
+            c.beginPath()
+            c.moveTo(2, 18)
+            c.bezierCurveTo(8, 18, 8, 6, 12, 6)
+            c.bezierCurveTo(16, 6, 16, 18, 22, 18)
+            c.stroke()
+            line([2, 6, 22, 6], false)
+            line([2, 18, 22, 18], false)
+            break
+        case "ber":
+            // A rate falling along Eb/N0, faster and faster (logarithmic), points on it.
+            line([3, 21, 21, 21], false)
+            line([3, 21, 3, 3], false)
+            c.beginPath()
+            c.moveTo(5, 5)
+            c.quadraticCurveTo(13, 6, 18, 19)
+            c.stroke()
+            circle(7, 5.3, 1.3, true)
+            circle(12, 8, 1.3, true)
+            circle(16, 13.5, 1.3, true)
+            break
+        case "noise":
+            line([2, 12, 4, 7, 6, 15, 8, 9, 10, 17, 12, 6, 14, 14, 16, 10, 18, 16, 20, 8, 22, 12], false)
+            break
+        case "pulse":
+            // A pulse that rings out on both sides (root raised cosine).
+            c.beginPath()
+            for (let i = 0; i <= 40; ++i) {
+                const t = (i / 40 - 0.5) * 6
+                const v = Math.abs(t) < 1e-6 ? 1 : Math.sin(Math.PI * t) / (Math.PI * t)
+                const x = 2 + 20 * i / 40
+                const y = 19 - 14 * v
+                if (i === 0)
+                    c.moveTo(x, y)
+                else
+                    c.lineTo(x, y)
+            }
+            c.stroke()
+            break
+        case "bits":
+            c.font = "bold 10px sans-serif"
+            c.fillText("01", 3, 11)
+            c.fillText("10", 9, 21)
+            break
+        case "carrier":
+            // A carrier whose phase jumps.
+            wave(2, 12, 12, 6, 2)
+            wave(12, 22, 12, -6, 2)
+            break
         }
     }
 }

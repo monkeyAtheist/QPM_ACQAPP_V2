@@ -2,7 +2,8 @@
 # undo, the session (files, import, export), the remembered settings, and the acquisition: the sources on
 # their threads (serial port, TCP, UDP, SCPI, sound card, simulator), the list of serial ports and the
 # controller; the generator (its preview apart); the filters (designed, tried on a signal, its preview
-# apart); quantities for the fields (Units). Testable without any window.
+# apart); the modulations (a digital link simulated, its curves of the bit error rate); quantities for the
+# fields (Units). Testable without any window.
 qt_add_library(qacq_app STATIC
     include/qacq/app/acquisition_controller.h
     include/qacq/app/analysis_controller.h
@@ -14,6 +15,7 @@ qt_add_library(qacq_app STATIC
     include/qacq/app/filter_controller.h
     include/qacq/app/format.h
     include/qacq/app/generator_controller.h
+    include/qacq/app/modulation_controller.h
     include/qacq/app/qt_convert.h
     include/qacq/app/serial_port_list.h
     include/qacq/app/session.h
@@ -29,6 +31,7 @@ qt_add_library(qacq_app STATIC
     src/filter_controller.cpp
     src/format.cpp
     src/generator_controller.cpp
+    src/modulation_controller.cpp
     src/qt_convert.cpp
     src/serial_port_list.cpp
     src/session.cpp

@@ -7,8 +7,9 @@ Ce dépôt est la réécriture de QtAcquisitionApp (« Architecture milestone 57
 **Statut : phase 4 (les modules) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle de
 session, l'acquisition sur ses threads et leurs tests sont en place. La fenêtre Qt Quick existe, sur la coquille
 de QTsignalApp V2 : modules Signaux (visualiser, mesurer, ajouter des courbes et des spectres),
-Acquisition, Générateur et Filtres ; Modulations arrive ensuite. L'ancienne application reste utilisable
-d'ici là.
+Acquisition, Générateur, Filtres et Modulations (sa base : une liaison numérique simulée de bout en bout ; canal
+réaliste et synchronisation, codage, OFDM et démodulation d'un signal réel suivent). L'ancienne application
+reste utilisable d'ici là.
 
 ## Décisions (20/11/2026)
 
@@ -35,10 +36,12 @@ dsp/                         qacq_dsp : cœur de traitement du signal C++20, san
                                     SciPy), prédiction linéaire, FIR par FFT
   include/qacq/dsp/random.h        aléatoire reproductible (xoshiro256**, même suite sur tout compilateur)
   include/qacq/dsp/generator.h     générateur : formes échantillonnées ou limitées en bande (série de Fourier)
-  include/qacq/dsp/modulation.h    AM, FM, PM, ASK, FSK, BPSK, QPSK ; porteuse réelle ou bande de base I/Q ;
+  include/qacq/dsp/modulation.h    AM, FM, PM, ASK, FSK, BPSK, QPSK, 8-PSK, 16/64/256-QAM (Gray) ; porteuse réelle
+                                    ou bande de base I/Q ; constellations, décision au plus proche ;
                                     AnalogModulator, partagé avec la porteuse modulée du générateur
   include/qacq/dsp/channel.h       bruit blanc gaussien réglé en SNR ou en Eb/N0
-  include/qacq/dsp/receiver.h      récepteurs (corrélation, filtre adapté RRC, FSK non cohérente), TEB
+  include/qacq/dsp/receiver.h      récepteurs (corrélation, filtre adapté RRC, FSK non cohérente), sortie du
+                                    filtre adapté (diagramme de l'œil), TEB et TES théoriques exacts
 io/                          qacq_io : décodage des données acquises, sans aucune dépendance Qt
   include/qacq/io/decoder.h        interface commune : octets reçus découpés n'importe où -> trames
   include/qacq/io/text_decoder.h   lignes de nombres (CSV, virgule décimale, « nom:valeur », en-tête)
@@ -73,6 +76,7 @@ app/                         qacq_app : couche applicative sur QtCore (sans fen�
   include/qacq/app/curves_controller.h    courbes ajoutées : liste (session), courbes du temps sur un thread
   include/qacq/app/generator_controller.h module Générateur : recette, aperçu sur son thread (session à part), ajout
   include/qacq/app/filter_controller.h    module Filtres : recette, conception, aperçu avant/après sur son thread, ajout
+  include/qacq/app/modulation_controller.h module Modulations : recette, liaison sur son thread, courbes TEB, ajout
   include/qacq/app/audio_player.h  écoute d'un signal sur la carte son (Qt Multimedia, préparée sur un thread)
 plot/                        qacq_plot : le moteur de tracé de toutes les vues, sans aucune dépendance Qt
   include/qacq/plot/axis.h          graduations 1-2-5 et log, un préfixe par axe, quantités affichées et saisies
@@ -93,11 +97,14 @@ analysis/                    qacq_analysis : l'analyse sans Qt (spectre d'une zo
                                     tient, application à un signal (causale, à phase nulle, alignée), JSON, exemples
   include/qacq/analysis/filter_code.h le filtre pour microcontrôleur : flottant ou virgule fixe (Q15, Q31), mise à
                                     l'échelle, arithmétique simulée au bit près, ce que l'arrondi fait, le C
+  include/qacq/analysis/link.h        module Modulations : la liaison (bits, modulateur, bruit, récepteur), TEB
+                                    mesuré et théorique, EVM, texte reçu, points d'une courbe TEB, JSON, exemples
 ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille de QTsignalApp V2)
   signal_plot.h                    le tracé (QQuickPaintedItem) : signal de la session, défilement, captures
   spectrum_plot.h                  le spectre : fréquences linéaires ou log, niveaux en dB ou linéaires, harmoniques
   motif_editor.h                   l'éditeur d'un motif dessiné du générateur : points, tracés à main levée, grille
   response_plot.h                  les réponses d'un filtre : gain, phase, retard, impulsion, indice, plan z
+  modulation_plot.h                la constellation reçue, le diagramme de l'œil, les courbes TEB
   qml/Main.qml                     fenêtre, barre des modules, ruban, liste des signaux, propriétés
   qml/AcquisitionView.qml          module Acquisition : tracé en direct, ruban, état et chiffres de la liaison
   qml/AcquisitionSettings.qml      réglages de la source, du format, de la cadence, des voies ; préréglages
@@ -108,6 +115,9 @@ ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille d
   qml/FiltersView.qml              module Filtres : réponses du filtre (Concevoir), avant et après (Appliquer)
   qml/FilterPanel.qml              onglet Filtre : la recette en détail, ce qu'il fait, ses coefficients
   qml/FilterCodeDialog.qml         le filtre en C pour microcontrôleur : format, mise à l'échelle, nom, .h et .c
+  qml/ModulationsView.qml          module Modulations : la liaison (signaux, spectres, constellation, œil), courbes TEB
+  qml/ModulationPanel.qml          onglet Liaison : l'émetteur, les données, le canal, le résultat, le texte reçu
+  qml/FitMenu.qml                  un menu aussi large que son plus long article
   qml/ViewGroup.qml                groupe « Vue » du ruban, le même dans chaque module
 tests/                       qacq_tests (cœurs) et qacq_app_tests (couche Qt) : un groupe CTest par étiquette
   fixtures/scipy_reference.inc     résultats SciPy (générés, ne pas éditer)
@@ -190,6 +200,17 @@ Taux d'erreur mesurés sur 200 000 bits (`[ber]`), tous dans 5 écarts-types de 
 | ASK tout ou rien, porteuse réelle | 9 dB | 2,45e-3 | 2,41e-3 |
 | FSK non cohérente, porteuse réelle | 10 dB | 3,57e-3 | 3,37e-3 |
 | BPSK en cosinus surélevé (0,35), bande de base | 5 dB | 5,87e-3 | 5,95e-3 |
+| 8-PSK, porteuse réelle | 10 dB | 1,04e-3 | 1,01e-3 |
+| 16-QAM en cosinus surélevé, porteuse réelle | 10 dB | 1,78e-3 | 1,75e-3 |
+| 64-QAM, porteuse réelle | 14 dB | 2,23e-3 | 2,15e-3 |
+| 256-QAM en cosinus surélevé, bande de base | 18 dB | 3,55e-3 | 3,47e-3 |
+
+8-PSK et QAM carrées en code de Gray : 8-PSK, le point à l'angle p·π/4 porte les bits p xor (p >> 1) ; QAM, la
+première moitié des bits d'un symbole fixe I, la seconde Q, chacune un niveau de Gray parmi ±1, ±3… ramenés à
+une énergie moyenne de 1. Leurs TEB théoriques sont exacts, pas approchés : 8-PSK, la probabilité de chaque
+secteur par l'intégrale de Craig des demi-plans, chaque secteur pondéré par les bits qu'il change ; QAM, chaque
+axe une MAI à L niveaux, chaque mauvais niveau pondéré par ses bits. Contre SciPy (intégrale de la phase reçue
+pour la 8-PSK, formule fermée de Cho et Yoon 2002 pour la QAM), de 0 à 22 dB : 1e-14 près.
 
 Le récepteur à corrélation est adapté à l'impulsion réellement émise, image à 2 fc comprise. Quand 2 fc/Rs
 n'est pas entier, l'énergie de chaque symbole dépend de la phase de la porteuse à son début : un léger excès
@@ -632,6 +653,49 @@ b[k] et a[k] divisés par a[0], puis les sections) ; **Copier les
 coefficients** les copie tous, en pleine précision, avec ce qu'est le filtre en tête. **Mesures** donne celles
 de l'aperçu, avant et après. La recette est retenue d'une fois sur l'autre.
 
+## Le module Modulations
+
+Une liaison numérique simulée de bout en bout, recalculée sur son propre thread un instant après chaque
+modification (la plus récente l'emporte) :
+
+- **Émetteur** : **ASK** (tout ou rien, ou un niveau bas), **FSK** (deux tonalités à fc ± Δf, phase continue),
+  **BPSK**, **QPSK**, **8-PSK**, **16-QAM**, **64-QAM**, **256-QAM** (code de Gray) ; impulsions
+  **rectangulaires** ou en **racine de cosinus surélevé** (α ; un nombre entier d'échantillons par symbole) ;
+  **sur une porteuse** (un signal réel, ce que joue une carte son) ou **en I/Q** (l'enveloppe complexe) ; débit
+  de symboles, porteuse, amplitude et phase, fs, longueur de l'enregistrement (2^20 échantillons au plus).
+- **Données** : des bits **au hasard** (une graine), **un texte** (ses octets UTF-8 à la suite, ou en trame série
+  **8N1**) dont on lit le texte reçu à côté, sans faute ou avec ses lettres fausses (« � » pour un octet qui ne se
+  lit pas), ou **des bits tapés**, répétés. Le texte commence là où le compte commence : les premiers symboles
+  portent sa fin, comme si l'émission durait déjà.
+- **Canal** : bruit blanc gaussien réglé en **Eb/N0** sur la puissance du signal (Eb = P/débit binaire) ; Eb/N0
+  mesuré sur le bruit tiré.
+- **Récepteur cohérent** (porteuse, phase et rythme connus) : filtre adapté (racine de cosinus surélevé, ou
+  intégration sur le symbole), décision au point le plus proche (FSK : l'énergie de chaque tonalité). Les 6
+  premiers et derniers symboles d'une racine de cosinus surélevé ne comptent pas (l'impulsion y est coupée).
+- **Liaison** (onglet) : les signaux émis et reçu (porteuse : deux voies ; I/Q : quatre) et leurs spectres, la
+  **constellation** reçue (les points décidés à tort en rouge, les points de la constellation avec leurs bits,
+  les frontières de décision en tirets ; FSK : le plan des deux énergies, la diagonale décide), le **diagramme de
+  l'œil** (la sortie du filtre adapté sur deux symboles autour de chaque instant de décision, I et Q), le **TEB
+  mesuré** avec son intervalle à 95 % contre la **théorie exacte**, le TES, l'**EVM** et le MER, le débit binaire
+  et la bande occupée. **Écouter** le signal émis ou reçu sur la carte son.
+- **Courbe TEB** (onglet) : le TEB le long d'Eb/N0, mesuré point par point sur la même chaîne (des bits au
+  hasard), chaque point avec autant de bits qu'il en faut pour compter environ 200 erreurs d'après la théorie
+  (au plus « Bits par point ») : s'arrêter à la 200e erreur fausserait le taux vers le haut (environ +8 % vu
+  ici). Chaque point a son intervalle à 95 % (Wilson) ; un point sans erreur est un triangle sous sa borne
+  haute. Plusieurs courbes (six au plus) se comparent, chacune avec sa théorie ; la liaison en cours y est un
+  losange. QPSK en racine de cosinus surélevé à 48 kHz : 200 000 bits en 0,55 s (l'émission et le filtre adapté
+  ne calculent que là où il y a des symboles).
+- **Ajouter** : le signal émis, ou reçu avec son bruit, devient un signal de la session (« QPSK 1 kBd (émis) »,
+  une voie sur une porteuse, I et Q sinon), à écouter, filtrer, mesurer ; ses notes et sa provenance gardent la
+  recette.
+- **Exemples** : BPSK rectangulaire, QPSK en cosinus surélevé, 8-PSK, 16-QAM, 64-QAM et 256-QAM en I/Q, un texte
+  en ASK et trame série, un modem FSK comme le Bell 202 (1 200 Bd, 1 200 et 2 200 Hz : des tonalités non
+  orthogonales, plus d'erreurs que la théorie), un texte en QPSK sans bruit.
+
+Le panneau de droite (**Liaison**) reprend la recette champ par champ et donne le résultat en détail (et le texte
+envoyé et reçu) ; **Mesures** celles des signaux émis et reçu. La recette et les réglages de la courbe sont
+retenus d'une fois sur l'autre.
+
 ## Outils des tracés
 
 - **Curseurs A et B** (Signaux, Acquisition figée ou déclenchée) : on les glisse, ou Ctrl + clic
@@ -717,8 +781,10 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
    porteuses AM, FM, PM), filtres (RII Butterworth, Chebyshev I et II, Bessel, elliptique ; RIF fenêtré ou en
    équiondulation de Parks-McClellan ; coefficients tapés ; gain en sortie ; réponses, plan z, application
    causale, à phase nulle aux bords prédits ou alignée ; code C pour microcontrôleur, flottant ou virgule fixe ;
-   conception par gabarit, l'ordre calculé) : faits ; puis modulations numériques, démodulation et taux d'erreur (module Modulations, sur
-   `dsp/modulation` et `dsp/receiver`) ; VISA pour les instruments en USB. À étudier : réponse en fréquence
+   conception par gabarit, l'ordre calculé) : faits ; modulations (la base : une liaison numérique de bout en
+   bout, constellation, œil, TEB mesuré et courbes contre la théorie exacte) : faite ; puis, décidé le 22/11 :
+   canal réaliste et synchronisation, codage de canal, OFDM, démodulation d'un signal réel, puis HARQ et
+   adaptation de lien ; VISA pour les instruments en USB. À étudier : réponse en fréquence
    entre deux voies (gain, phase, marges), distorsion pondérée A ; opérations sur un signal de la session
    (×k, +c, entre voies) dans Signaux.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.

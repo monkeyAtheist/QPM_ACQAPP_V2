@@ -1,7 +1,7 @@
 #pragma once
 
-// Analog and digital modulations (AM, FM, PM, ASK, FSK, BPSK, QPSK), as a real passband signal or as a
-// complex baseband (I/Q) signal.
+// Analog and digital modulations (AM, FM, PM, ASK, FSK, BPSK, QPSK, 8-PSK, 16-, 64- and 256-QAM), as a real
+// passband signal or as a complex baseband (I/Q) signal.
 //
 // Conventions (kept from the old application):
 //   passband(t) = Re{ b(t) exp(j 2 pi fc t) },  b = I + jQ is the complex baseband signal, which already
@@ -9,6 +9,10 @@
 //   BPSK: bit 0 -> +1, bit 1 -> -1. QPSK (Gray): bits (b0 b1) 00 -> (+,+), 01 -> (-,+), 11 -> (-,-),
 //   10 -> (+,-), each component 1/sqrt(2). ASK: bit 1 -> A, bit 0 -> askLowLevel * A. FSK: continuous
 //   phase, f = fc + deltaF (bit 1) or fc - deltaF (bit 0).
+//   8-PSK (Gray): the point at angle p pi/4 carries the bits p xor (p >> 1) (000, 001, 011, 010, 110, 111,
+//   101, 100 around the circle: neighbours differ by one bit). Square QAM (Gray): the first half of the bits
+//   of a symbol sets I, the second half Q, each a Gray-coded level among -(L-1) ... -1, +1 ... L-1 (L = sqrt M),
+//   scaled to a mean energy of 1. The bits of a symbol are read most significant first.
 // Symbol k covers the samples n with floor(n * Rs / fs) = k (rectangular pulses; any fs / Rs ratio).
 // Root-raised-cosine pulses need an integer number of samples per symbol.
 
@@ -30,7 +34,11 @@ enum class Modulation
     Ask,
     Fsk,
     Bpsk,
-    Qpsk
+    Qpsk,
+    Psk8,
+    Qam16,
+    Qam64,
+    Qam256
 };
 
 enum class Representation
@@ -48,6 +56,19 @@ enum class PulseShape
 std::string_view modulationName(Modulation modulation) noexcept;
 bool isAnalog(Modulation modulation) noexcept;
 int bitsPerSymbol(Modulation modulation) noexcept; // 0 for analog modulations
+
+// The digital modulations whose symbols are points of a constellation, decided by the nearest one (ASK, BPSK,
+// QPSK, 8-PSK, QAM; not FSK, detected by the energies of its two tones).
+bool hasConstellation(Modulation modulation) noexcept;
+// Its points, at a unit amplitude: index = the value of the bits of the symbol read most significant first
+// (ASK: {askLowLevel, 1}; the PSK and QAM at a mean energy of 1). Empty for the others.
+std::vector<std::complex<double>> constellation(Modulation modulation, double askLowLevel = 0.0);
+// The symbol decided for a point received at that scale: the nearest point of the constellation (QAM: each
+// axis on its own; PSK: the sector of its angle; ASK: the threshold half-way).
+std::size_t decideSymbol(Modulation modulation, std::complex<double> point, double askLowLevel = 0.0) noexcept;
+// Gray code of a number, and back (gray(p) = p xor (p >> 1)).
+std::size_t grayCode(std::size_t value) noexcept;
+std::size_t grayDecode(std::size_t code) noexcept;
 
 // ------------------------------------------------------------------ payloads (one bit per byte, 0 or 1)
 std::vector<std::uint8_t> bitsFromText(std::string_view text); // keeps the '0' and '1' characters

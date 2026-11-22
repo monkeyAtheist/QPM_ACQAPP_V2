@@ -53,6 +53,8 @@ qt_add_qml_module(QTacquisitionApp
         qml/FiltersView.qml
         qml/FilterPanel.qml
         qml/FilterCodeDialog.qml
+        qml/ModulationsView.qml
+        qml/ModulationPanel.qml
     SOURCES
         signal_plot.h
         signal_plot.cpp
@@ -66,6 +68,8 @@ qt_add_qml_module(QTacquisitionApp
         motif_editor.cpp
         response_plot.h
         response_plot.cpp
+        modulation_plot.h
+        modulation_plot.cpp
 )
 target_link_libraries(QTacquisitionApp PRIVATE qacq_app Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Qml)
 # Qt's generated QML-cache loader trips GCC's -Wnull-dereference inside qhash.h (inlined Qt code):

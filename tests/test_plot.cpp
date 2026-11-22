@@ -131,6 +131,7 @@ TEST_CASE("Quantities as shown: significant digits, prefixes, minus sign, comma"
     CHECK(formatCompact(0.25, "") == "0,25");
     // Units already prefixed, or not SI, stay as written.
     CHECK(takesPrefix("A"));
+    CHECK(takesPrefix("Bd")); // "1 kBd" of a symbol rate
     CHECK(takesPrefix("Pa"));
     CHECK(takesPrefix("m"));
     CHECK(takesPrefix("\xCE\xA9"));

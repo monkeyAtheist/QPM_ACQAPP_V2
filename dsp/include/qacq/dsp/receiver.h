@@ -7,8 +7,9 @@
 //      that removes the 2 fc image (passband), or r = b exp(-j phi) (complex baseband);
 //   2. matched filter: mean over each symbol (rectangular pulses) or root-raised-cosine filter sampled at
 //      the symbol centres;
-//   3. decisions: sign (BPSK, QPSK), threshold halfway between the two levels (ASK); FSK is detected
-//      without phase reference, by comparing the energies at fc + deltaF and fc - deltaF.
+//   3. decisions: the nearest point of the constellation (sign for BPSK and QPSK, threshold halfway between
+//      the two levels for ASK, the sector of the angle for 8-PSK, each axis on its own for QAM); FSK is
+//      detected without phase reference, by comparing the energies at fc + deltaF and fc - deltaF.
 //   Rectangular pulses and FSK are integrated on the raw mixer output (correlation receiver, matched to
 //   the passband pulse itself). When 2 fc / Rs is not an integer the image term makes the energy of each
 //   symbol depend on the carrier phase at its start (about +-Rs / (2 pi fc)): slightly more errors than
@@ -46,6 +47,9 @@ struct ReceiverSpec
     double amIndex = 0.8;
     double frequencyDeviationHz = 5000.0;
     double phaseDeviationRad = 1.0;
+    // The output of the matched filter at every sample (the eye diagram); false: only at the decision instants
+    // (a curve of the bit error rate: the root raised cosine sps times faster).
+    bool matchedOutput = true;
 };
 
 // The received signal: passband (RealPassband) or inPhase + quadrature (ComplexBaseband).
@@ -59,8 +63,16 @@ struct ReceivedInput
 struct DigitalReception
 {
     std::vector<std::complex<double>> decisionPoints; // matched-filter outputs, unit scale (constellation)
+    std::vector<std::size_t> symbols;                  // decided (constellations; FSK: the bit)
     std::vector<std::uint8_t> bits;
-    std::vector<double> basebandI, basebandQ;         // after the image filter (eye diagram, display)
+    std::vector<double> basebandI, basebandQ;         // after the image filter (display)
+    // The output of the matched filter, unit scale, sample after sample (the eye diagram): the root-raised-
+    // cosine filter, or for rectangular pulses the mean over one symbol of the baseband; each decision point is
+    // its value at decisionTimes[k] (in samples: k fs/Rs for the root raised cosine, the last sample of symbol
+    // k for rectangular pulses). Empty for FSK.
+    std::vector<double> matchedI, matchedQ;
+    std::vector<double> decisionTimes;
+    double samplesPerSymbol = 0.0;
     std::vector<std::string> warnings;
     std::string error;
 
@@ -91,10 +103,15 @@ struct BitErrors
 BitErrors countBitErrors(std::span<const std::uint8_t> sent, std::span<const std::uint8_t> received,
                          std::size_t skip = 0);
 
-// Theoretical bit error rate in AWGN for the receivers above:
-// BPSK, QPSK: Q(sqrt(2 Eb/N0)); ASK on-off with the half-way threshold: Q(sqrt(Eb/N0));
-// FSK non-coherent with orthogonal tones: exp(-Eb/N0 / 2) / 2. NaN for analog modulations.
-double theoreticalBer(Modulation modulation, double ebN0Db) noexcept;
+// Theoretical bit error rate in AWGN for the receivers above, exact (Gray mapping):
+// BPSK, QPSK: Q(sqrt(2 Eb/N0)); ASK with the half-way threshold: Q(sqrt(Eb/N0 (1 - l)^2 / (1 + l^2))), l the
+// low level (on-off: Q(sqrt(Eb/N0))); FSK non-coherent with orthogonal tones: exp(-Eb/N0 / 2) / 2;
+// 8-PSK: the probability of each sector (Craig's integral of the half-planes), each weighted by the bits it
+// changes; square QAM: each axis an L-level PAM, every wrong level weighted by its bits. NaN for analog
+// modulations.
+double theoreticalBer(Modulation modulation, double ebN0Db, double askLowLevel = 0.0) noexcept;
+// The same for the symbols (a symbol wrong: one bit or more).
+double theoreticalSer(Modulation modulation, double ebN0Db, double askLowLevel = 0.0) noexcept;
 
 // Gaussian tail Q(x) = 0.5 erfc(x / sqrt(2)).
 double gaussianQ(double x) noexcept;

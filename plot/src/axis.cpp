@@ -241,9 +241,9 @@ bool takesPrefix(std::string_view unit)
     // SI units (and a few customary ones) that are written with a prefix. Anything else keeps its unit as
     // written: one already prefixed ("hPa", "kHz", "mA", "km"), decibels, "%", "\xC2\xB0C", "rpm",
     // "ppm", "LSB"... so a pressure in hPa never becomes "1,013 khPa".
-    static constexpr std::array<std::string_view, 40> kPrefixable = {
+    static constexpr std::array<std::string_view, 41> kPrefixable = {
         "s", "Hz", "V", "A", "W", "J", "N", "C", "F", "H", "T", "S", "Pa", "m", "g", "l", "L", "K", "mol", "cd",
-        "Wb", "lx", "lm", "Gy", "Sv", "Bq", "eV", "bar", "Wh", "VA", "var", "Ah", "o", "B", "bit",
+        "Wb", "lx", "lm", "Gy", "Sv", "Bq", "eV", "bar", "Wh", "VA", "var", "Ah", "o", "B", "bit", "Bd",
         "\xCE\xA9", "ohm", "m/s", "V/m", "A/m"};
     // A spectral density takes the prefix of its unit: "µV/√Hz", "nA/√Hz".
     constexpr std::string_view kPerRootHertz = "/\xE2\x88\x9AHz";

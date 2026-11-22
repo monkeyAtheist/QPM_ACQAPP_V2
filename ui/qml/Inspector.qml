@@ -5,8 +5,8 @@ import QtQuick.Layouts
 // Right panel: the pages of the module on screen (for "Signaux", the measurements of the zone and the
 // settings of the computations; for "Acquisition", the source and the format; for "Générateur", the
 // composition of the signal and the measurements of its preview; for "Filtres", the filter in detail and
-// the measurements of its preview, before and after), then the properties of the selected signal (always
-// the last tab: signalTab). The session itself is in the top bar (its name, "Ouvrir ▾" for the recent ones).
+// the measurements of its preview, before and after; for "Modulations", the link in detail and the measurements
+// of its signals sent and received), then the properties of the selected signal (always the last tab: signalTab). The session itself is in the top bar (its name, "Ouvrir ▾" for the recent ones).
 Rectangle {
     id: root
     required property var session
@@ -17,12 +17,14 @@ Rectangle {
     property var curves: null // the curves added in "Signaux" (their spectrograms have settings here)
     property var generator: null
     property var filters: null
-    property int module: 0 // 0 Signaux, 1 Acquisition, 2 Générateur, 3 Filtres
+    property var modulations: null
+    property int module: 0 // 0 Signaux, 1 Acquisition, 2 Générateur, 3 Filtres, 4 Modulations
     property var signalId: 0
     property int tab: 0
     property int generatorChannel: 0 // the channel edited in the composition
-    // The generator and the filters have three tabs: their page, the measurements of their preview, the signal.
-    readonly property bool threeTabs: module === 2 || module === 3
+    // The generator, the filters and the modulations have three tabs: their page, the measurements of their
+    // preview, the signal.
+    readonly property bool threeTabs: module === 2 || module === 3 || module === 4
     readonly property int signalTab: threeTabs ? 2 : 1
     signal tabSelected(int index)
     signal collapseRequested()
@@ -77,7 +79,7 @@ Rectangle {
                 visible: root.threeTabs
                 Layout.fillWidth: true
                 onCurrentIndexChanged: if (visible && currentIndex !== root.tab) root.tabSelected(currentIndex)
-                TabButton { text: root.module === 3 ? qsTr("Filtre") : qsTr("Composition") }
+                TabButton { text: root.module === 4 ? qsTr("Liaison") : root.module === 3 ? qsTr("Filtre") : qsTr("Composition") }
                 TabButton { text: qsTr("Mesures") }
                 TabButton { text: qsTr("Signal") }
             }
@@ -157,6 +159,23 @@ Rectangle {
                 appSettings: root.appSettings
                 sampleRate: root.filters ? ((root.filters.input.sampleRate ?? 0) > 0 ? root.filters.input.sampleRate : 0) : 0
                 settingsKey: "filters/analysis"
+                zoneHint: qsTr("Sur tout l'aperçu, %1")
+            }
+
+            ModulationPanel {
+                anchors.fill: parent
+                visible: root.tab === 0 && root.module === 4 && root.modulations !== null
+                modulations: root.modulations
+            }
+
+            // The measurements of the preview of the modulations (sent and received), and the settings of their spectra.
+            AnalysisPanel {
+                anchors.fill: parent
+                visible: root.tab === 1 && root.module === 4 && root.modulations !== null
+                analysis: root.modulations ? root.modulations.previewAnalysis : root.analysis
+                appSettings: root.appSettings
+                sampleRate: root.modulations ? (root.modulations.recipe.sampleRate ?? 0) : 0
+                settingsKey: "modulations/analysis"
                 zoneHint: qsTr("Sur tout l'aperçu, %1")
             }
 

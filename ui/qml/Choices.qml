@@ -239,4 +239,39 @@ QtObject {
         { key: "none", name: qsTr("Non prolongés"), short: qsTr("non prolongés"),
           tip: qsTr("Le filtre part du régime établi du premier échantillon : le début et la fin gardent leur transitoire") }
     ]
+
+    // ---- Modulations ----
+    readonly property var linkModulations: [
+        { key: "ask", name: qsTr("ASK (amplitude)"), short: "ASK", bits: 1,
+          tip: qsTr("La porteuse allumée pour un 1, éteinte (ou plus faible) pour un 0 : un bit par symbole, détection simple, la moins économe en énergie") },
+        { key: "fsk", name: qsTr("FSK (deux fréquences)"), short: "FSK", bits: 1,
+          tip: qsTr("Une tonalité pour un 1, une autre pour un 0 (à fc ± Δf, phase continue) : reçue sans connaître la phase, par l'énergie de chaque tonalité") },
+        { key: "bpsk", name: qsTr("BPSK (deux phases)"), short: "BPSK", bits: 1,
+          tip: qsTr("La porteuse à 0° ou 180° : un bit par symbole, le plus robuste au bruit") },
+        { key: "qpsk", name: qsTr("QPSK (quatre phases)"), short: "QPSK", bits: 2,
+          tip: qsTr("Deux bits par symbole (un sur I, un sur Q) pour le même TEB que la BPSK à Eb/N0 égal : deux fois plus de débit dans la même bande") },
+        { key: "8psk", name: qsTr("8-PSK (huit phases)"), short: "8-PSK", bits: 3,
+          tip: qsTr("Trois bits par symbole sur un cercle, code de Gray : des voisins plus proches, il faut environ 4 dB de plus que la QPSK") },
+        { key: "16qam", name: qsTr("16-QAM"), short: "16-QAM", bits: 4,
+          tip: qsTr("Quatre bits par symbole : 4 niveaux sur I, 4 sur Q, code de Gray sur chaque axe") },
+        { key: "64qam", name: qsTr("64-QAM"), short: "64-QAM", bits: 6,
+          tip: qsTr("Six bits par symbole : 8 niveaux par axe (Wi-Fi, TNT, câble)") },
+        { key: "256qam", name: qsTr("256-QAM"), short: "256-QAM", bits: 8,
+          tip: qsTr("Huit bits par symbole : 16 niveaux par axe, il faut un excellent rapport signal sur bruit") }
+    ]
+    readonly property var linkPulses: [
+        { key: "rrc", name: qsTr("Racine de cosinus surélevé"), short: qsTr("RCS"),
+          tip: qsTr("Une impulsion lisse, la même à l'émission et à la réception (filtre adapté) : la bande tenue à (1 + α) Rs, sans interférence entre symboles ; il faut un nombre entier d'échantillons par symbole") },
+        { key: "rect", name: qsTr("Rectangulaire"), short: qsTr("rect."),
+          tip: qsTr("Chaque symbole maintenu pendant sa durée : le plus simple, mais un spectre en sinus cardinal (un lobe principal de 2 Rs et des lobes secondaires)") }
+    ]
+    readonly property var linkData: [
+        { key: "random", name: qsTr("Bits au hasard"), tip: qsTr("Des bits tirés au hasard (une graine) : ce que mesure la théorie") },
+        { key: "text", name: qsTr("Un texte"), tip: qsTr("Les octets d'un texte (UTF-8), envoyés à la suite ou en trame série 8N1, et le texte reçu à côté") },
+        { key: "bits", name: qsTr("Des bits tapés"), tip: qsTr("Une suite de 0 et de 1, répétée") }
+    ]
+    readonly property var linkRepresentations: [
+        { key: "passband", name: qsTr("Sur une porteuse"), tip: qsTr("Un signal réel, Re{(I + jQ) e^(j2πfc t)} : ce que joue une carte son, ce que capte une antenne") },
+        { key: "iq", name: qsTr("En I/Q (enveloppe complexe)"), tip: qsTr("Les voies I et Q seules, sans porteuse : ce que traite un récepteur numérique après sa descente en fréquence") }
+    ]
 }

@@ -8,6 +8,7 @@
 #include "qacq/dsp/spectrum.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -142,11 +143,61 @@ TEST_CASE("Constellations: BPSK and Gray-coded QPSK of the old application", "[m
     CHECK(b.warnings.size() == 1); // payload shorter than the record, padded with 0
 }
 
+TEST_CASE("Constellations: 8-PSK and square QAM, Gray-coded, unit energy, decided by the nearest point", "[modulation]")
+{
+    for (Modulation type : {Modulation::Bpsk, Modulation::Qpsk, Modulation::Psk8, Modulation::Qam16, Modulation::Qam64,
+                            Modulation::Qam256})
+    {
+        const auto points = constellation(type);
+        const std::size_t m = std::size_t{1} << bitsPerSymbol(type);
+        REQUIRE(points.size() == m);
+        double energy = 0.0, nearest = 1e9;
+        for (const auto &p : points) energy += std::norm(p);
+        CHECK_NEAR(energy / static_cast<double>(m), 1.0, 0, 1e-12);
+        for (std::size_t a = 0; a < m; ++a)
+            for (std::size_t b = a + 1; b < m; ++b) nearest = std::min(nearest, std::abs(points[a] - points[b]));
+        // Gray: two points at the least distance differ by one bit; every point decided as itself, and still when
+        // moved by 0.49 of that distance in any direction.
+        std::size_t pairs = 0;
+        for (std::size_t a = 0; a < m; ++a)
+        {
+            CHECK(decideSymbol(type, points[a]) == a);
+            for (int turn = 0; turn < 16; ++turn)
+                CHECK(decideSymbol(type, points[a] + std::polar(0.49 * nearest, kTwoPi * turn / 16.0)) == a);
+            for (std::size_t b = a + 1; b < m; ++b)
+            {
+                if (std::abs(points[a] - points[b]) > nearest * (1.0 + 1e-9)) continue;
+                ++pairs;
+                CHECK(std::popcount(a ^ b) == 1);
+            }
+        }
+        CHECK(pairs >= m - 1);
+    }
+    // 8-PSK: 000 at 0°, 001 at 45°, 011 at 90°… 100 at 315°; 16-QAM: the first two bits on I (00 at -3, 01 at -1,
+    // 11 at +1, 10 at +3), the last two on Q.
+    const auto psk = constellation(Modulation::Psk8);
+    CHECK_NEAR(std::arg(psk[0b011]), kPi / 2.0, 0, 1e-15);
+    CHECK_NEAR(std::arg(psk[0b100]), -kPi / 4.0, 0, 1e-15);
+    const auto qam = constellation(Modulation::Qam16);
+    const double unit = 1.0 / std::sqrt(10.0);
+    CHECK_NEAR(qam[0b0000].real(), -3.0 * unit, 0, 1e-15);
+    CHECK_NEAR(qam[0b0000].imag(), -3.0 * unit, 0, 1e-15);
+    CHECK_NEAR(qam[0b1101].real(), unit, 0, 1e-15);
+    CHECK_NEAR(qam[0b1101].imag(), -unit, 0, 1e-15);
+    CHECK_NEAR(qam[0b1001].real(), 3.0 * unit, 0, 1e-15);
+    CHECK(decideSymbol(Modulation::Qam16, {10.0, -10.0}) == 0b1000); // far out: the corner
+    CHECK(decideSymbol(Modulation::Ask, {0.61, 0.0}, 0.2) == 1);
+    CHECK(decideSymbol(Modulation::Ask, {0.59, 0.0}, 0.2) == 0);
+    CHECK(constellation(Modulation::Fsk).empty());
+    for (std::size_t v = 0; v < 300; ++v) CHECK(grayDecode(grayCode(v)) == v);
+}
+
 TEST_CASE("Error-free links: every modulation, passband and baseband, odd ratios", "[modulation]")
 {
     for (Representation representation : {Representation::RealPassband, Representation::ComplexBaseband})
     {
-        for (Modulation type : {Modulation::Ask, Modulation::Fsk, Modulation::Bpsk, Modulation::Qpsk})
+        for (Modulation type : {Modulation::Ask, Modulation::Fsk, Modulation::Bpsk, Modulation::Qpsk, Modulation::Psk8,
+                                Modulation::Qam16, Modulation::Qam64, Modulation::Qam256})
         {
             ModulationSpec spec;
             spec.type = type;
@@ -305,6 +356,48 @@ TEST_CASE("Root-raised-cosine pulses: unit energy, no intersymbol interference, 
     CHECK(!modulate(spec).ok()); // 7.27 samples per symbol: refused for RRC
 }
 
+TEST_CASE("8-PSK and QAM: bit error rates match the exact theory", "[ber]")
+{
+    struct Case
+    {
+        Modulation type;
+        Representation representation;
+        PulseShape pulse;
+        double ebN0Db;
+        const char *label;
+    };
+    const Case cases[] = {
+        {Modulation::Psk8, Representation::RealPassband, PulseShape::Rectangular, 10.0, "8-PSK passband 10 dB"},
+        {Modulation::Psk8, Representation::ComplexBaseband, PulseShape::RootRaisedCosine, 8.0, "8-PSK RRC baseband 8 dB"},
+        {Modulation::Qam16, Representation::RealPassband, PulseShape::RootRaisedCosine, 10.0, "16-QAM RRC passband 10 dB"},
+        {Modulation::Qam16, Representation::ComplexBaseband, PulseShape::Rectangular, 8.0, "16-QAM baseband 8 dB"},
+        {Modulation::Qam64, Representation::RealPassband, PulseShape::Rectangular, 14.0, "64-QAM passband 14 dB"},
+        {Modulation::Qam64, Representation::ComplexBaseband, PulseShape::RootRaisedCosine, 12.0, "64-QAM RRC baseband 12 dB"},
+        {Modulation::Qam256, Representation::ComplexBaseband, PulseShape::RootRaisedCosine, 18.0, "256-QAM RRC baseband 18 dB"},
+    };
+    for (const Case &c : cases)
+    {
+        ModulationSpec spec;
+        spec.type = c.type;
+        spec.representation = c.representation;
+        spec.pulse = c.pulse;
+        spec.rolloff = 0.35;
+        spec.sampleRateHz = 16000.0;
+        spec.symbolRate = 1000.0;
+        spec.carrierFrequencyHz = 3500.0; // 2 fc T = 7
+        spec.carrierPhaseDegrees = 20.0;
+        const std::size_t symbols = 60000;
+        spec.bits = randomBits(symbols * static_cast<std::size_t>(bitsPerSymbol(c.type)), 17);
+        spec.repeatBits = false;
+        spec.sampleCount = symbols * 16;
+        const std::size_t skip = c.pulse == PulseShape::RootRaisedCosine ? 12 * static_cast<std::size_t>(bitsPerSymbol(c.type)) : 0;
+        const Link link = runLink(spec, c.ebN0Db, skip);
+        REQUIRE(link.rx.ok());
+        CHECK_NEAR(link.noise.measuredEbN0Db, c.ebN0Db, 0, 0.05);
+        checkBer(link, theoreticalBer(c.type, c.ebN0Db), c.label);
+    }
+}
+
 TEST_CASE("RRC spectrum stays inside (1 + rolloff) Rs", "[modulation]")
 {
     ModulationSpec spec;
@@ -399,6 +492,41 @@ TEST_CASE("Analog modulations: envelope, deviation and warnings", "[modulation]"
     spec.type = Modulation::Bpsk;
     spec.bits.clear();
     CHECK(!modulate(spec).ok());
+}
+
+TEST_CASE("Theoretical BER of 8-PSK and QAM, exact (against SciPy)", "[modulation]")
+{
+    // tools: an independent computation in Python (SciPy quad over the angle of the received point for 8-PSK;
+    // the closed form of Cho and Yoon, 2002, for square QAM).
+    struct Reference
+    {
+        Modulation type;
+        double ebN0Db;
+        double ber;
+    };
+    const Reference references[] = {
+        {Modulation::Psk8, 0.0, 0.12269276107850498},     {Modulation::Psk8, 4.0, 0.04589491846553633},
+        {Modulation::Psk8, 8.0, 0.0061810560837676325},   {Modulation::Psk8, 12.0, 6.337878823300316e-05},
+        {Modulation::Psk8, 16.0, 1.1098699782314876e-09}, {Modulation::Qam16, 4.0, 0.058623737283404406},
+        {Modulation::Qam16, 10.0, 0.0017541506178927301}, {Modulation::Qam16, 14.0, 2.763208001687779e-06},
+        {Modulation::Qam16, 18.0, 4.5223090048184457e-13}, {Modulation::Qam16, 22.0, 7.738404045698097e-30},
+        {Modulation::Qam64, 8.0, 0.05233386284889217},     {Modulation::Qam64, 14.0, 0.0021540037571801227},
+        {Modulation::Qam64, 22.0, 4.9744412172460104e-12}, {Modulation::Qam256, 10.0, 0.07859627551807417},
+        {Modulation::Qam256, 18.0, 0.0034720959081667047}, {Modulation::Qam256, 22.0, 2.6336099443566805e-05},
+    };
+    for (const Reference &r : references) CHECK_NEAR(theoreticalBer(r.type, r.ebN0Db), r.ber, 1e-12, 0);
+    // Symbols: 8-PSK at 0 dB (SciPy: 1 - P(right sector)); QPSK 1 - (1 - p)^2; 16-QAM per axis 2 (1 - 1/4) Q(r).
+    CHECK_NEAR(theoreticalSer(Modulation::Psk8, 0.0), 0.3478008711998929, 1e-12, 0);
+    const double p = theoreticalBer(Modulation::Qpsk, 6.0);
+    CHECK_NEAR(theoreticalSer(Modulation::Qpsk, 6.0), 1.0 - (1.0 - p) * (1.0 - p), 1e-14, 0);
+    const double axis = 1.5 * gaussianQ(std::sqrt(3.0 * 4.0 * 10.0 / 15.0));
+    CHECK_NEAR(theoreticalSer(Modulation::Qam16, 10.0), 1.0 - (1.0 - axis) * (1.0 - axis), 1e-14, 0);
+    // Far out on the tail, still a number (8-PSK at 30 dB: 1.4e-193), then 0.
+    CHECK(theoreticalBer(Modulation::Psk8, 30.0) > 1e-200);
+    CHECK(theoreticalBer(Modulation::Psk8, 30.0) < 1e-190);
+    // ASK: the low level costs (1 - l)^2 / (1 + l^2) of Eb/N0.
+    CHECK_NEAR(theoreticalBer(Modulation::Ask, 10.0, 0.2), gaussianQ(std::sqrt(10.0 * 0.64 / 1.04)), 1e-14, 0);
+    CHECK(theoreticalBer(Modulation::Ask, 10.0) == gaussianQ(std::sqrt(10.0)));
 }
 
 TEST_CASE("Theoretical BER and Q function", "[modulation]")

@@ -17,7 +17,7 @@ Rectangle {
         { icon: "acquire", label: qsTr("Acqui-\nsition"), ready: true, tip: "" },
         { icon: "generator", label: qsTr("Généra-\nteur"), ready: true, tip: "" },
         { icon: "filter", label: qsTr("Filtres"), ready: true, tip: "" },
-        { icon: "modulation", label: qsTr("Modula-\ntions"), ready: false, tip: qsTr("Modulations numériques et analogiques : phase 4 de la refonte") }
+        { icon: "modulation", label: qsTr("Modula-\ntions"), ready: true, tip: "" }
     ]
 
     Rectangle {
