@@ -186,7 +186,7 @@ Item {
                 dropDown: true
                 tip: qsTr("Des recettes toutes prêtes : sinus et bruit, multiton, carré avec ou sans repliement, balayage, échelon, Dirac, réseau 50 Hz…")
                 onClicked: examplesMenu.popup(examplesButton, 0, examplesButton.height)
-                Menu {
+                FitMenu {
                     id: examplesMenu
                     Instantiator {
                         model: root.generator.examples
@@ -250,7 +250,7 @@ Item {
                 dropDown: true
                 tip: qsTr("Ajouter une forme d'onde à « %1 » : les formes d'onde d'une voie s'additionnent (sinus + bruit, multiton…)").arg(root.channelName)
                 onClicked: componentMenu.popup(componentButton, 0, componentButton.height)
-                Menu {
+                FitMenu {
                     id: componentMenu
                     Instantiator {
                         model: Choices.generatorWaveforms

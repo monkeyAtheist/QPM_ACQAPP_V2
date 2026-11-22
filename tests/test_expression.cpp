@@ -145,7 +145,7 @@ TEST_CASE("formulas: variables, each one from those before it", "[analysis]")
     CHECK(contains(parseVariables("E 10", names, values).error, "il faut « nom = valeur »"));
     CHECK(contains(parseVariables("2E = 1", names, values).error, "n'est pas un nom"));
     CHECK(contains(parseVariables("sin = 1", names, values).error, "déjà une fonction ou une constante"));
-    CHECK(contains(parseVariables("n = 1", names, values).error, "déjà défini ici"));
+    CHECK(contains(parseVariables("n = 1", names, values).error, "« n » est déjà un nom des formules (n"));
     CHECK(contains(parseVariables("E = 1; E = 2", names, values).error, "défini deux fois"));
     CHECK(contains(parseVariables("E =", names, values).error, "sans valeur"));
     CHECK(contains(parseVariables("E = F + 1", names, values).error, "Variables, E : Nom inconnu « F »"));

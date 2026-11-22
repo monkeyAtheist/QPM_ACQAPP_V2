@@ -14,7 +14,7 @@ from scipy import signal
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 OUT = ROOT / "tests" / "fixtures" / "scipy_reference.inc"
 
-FAMILY = {"butter": 0, "cheby1": 1, "cheby2": 2, "bessel": 3}
+FAMILY = {"butter": 0, "cheby1": 1, "cheby2": 2, "bessel": 3, "ellip": 4}
 RESPONSE = {"lowpass": 0, "highpass": 1, "bandpass": 2, "bandstop": 3}
 WINDOW = {"boxcar": 0, "hann": 1, "hamming": 2, "blackman": 3, "blackmanharris": 4, "flattop": 5, "kaiser": 6}
 
@@ -59,6 +59,14 @@ IIR_CASES = [
     ("cheby1_bp6_300_400hz", "cheby1", "bandpass", 6, 48000.0, 300.0, 400.0, 1.0, 40.0),
     ("cheby1_lp10_500hz", "cheby1", "lowpass", 10, 48000.0, 500.0, 0.0, 1.0, 40.0),
     ("butter_lp16_1khz", "butter", "lowpass", 16, 48000.0, 1000.0, 0.0, 1.0, 40.0),
+    # Elliptic (Cauer): ripple rp in the pass band, at least rs down in the stop band.
+    ("ellip_lp1", "ellip", "lowpass", 1, 10000.0, 1000.0, 0.0, 1.0, 40.0),
+    ("ellip_lp4", "ellip", "lowpass", 4, 10000.0, 1000.0, 0.0, 1.0, 40.0),
+    ("ellip_lp5", "ellip", "lowpass", 5, 48000.0, 3000.0, 0.0, 0.5, 60.0),
+    ("ellip_hp6", "ellip", "highpass", 6, 48000.0, 2000.0, 0.0, 0.1, 80.0),
+    ("ellip_bp4", "ellip", "bandpass", 4, 10000.0, 1000.0, 2000.0, 1.0, 50.0),
+    ("ellip_bs3", "ellip", "bandstop", 3, 48000.0, 900.0, 1100.0, 0.5, 60.0),
+    ("ellip_lp8_100hz", "ellip", "lowpass", 8, 48000.0, 100.0, 0.0, 0.1, 100.0),
 ]
 
 FIR_CASES = [
@@ -68,6 +76,40 @@ FIR_CASES = [
     ("hann_hp63", "highpass", 63, 10000.0, 2000.0, 0.0, "hann", 0.0),
     ("blackman_bs81", "bandstop", 81, 10000.0, 1500.0, 2500.0, "blackman", 0.0),
     ("boxcar_lp32", "lowpass", 32, 1000.0, 100.0, 0.0, "boxcar", 0.0),
+]
+
+REMEZ_CASES = [
+    # name, taps, fs, band edges, desired per band, weight per band
+    ("lp_odd_51", 51, 10000.0, [0, 1000, 1500, 5000], [1, 0], [1, 1]),
+    ("lp_even_64", 64, 48000.0, [0, 4000, 5000, 24000], [1, 0], [1, 10]),
+    ("hp_65", 65, 10000.0, [0, 1500, 2000, 5000], [0, 1], [10, 1]),
+    ("bp_101", 101, 10000.0, [0, 800, 1000, 2000, 2200, 5000], [0, 1, 0], [10, 1, 10]),
+    ("bs_81", 81, 10000.0, [0, 900, 1200, 1800, 2100, 5000], [1, 0, 1], [1, 20, 1]),
+    ("lp_long_301", 301, 48000.0, [0, 1000, 1200, 24000], [1, 0], [1, 100]),
+    # Far better than asked (about 160 dB): extremal frequencies packed together.
+    ("lp_overdesigned_101", 101, 10000.0, [0, 1300, 2700, 5000], [1, 0], [1, 5.7728]),
+]
+
+ORDER_CASES = [
+    # name, family, response, fs, pass band edges, stop band edges, gpass (Ap), gstop (As)
+    ("butter_lp", "butter", "lowpass", 48000.0, [1000.0], [2000.0], 1.0, 40.0),
+    ("butter_hp", "butter", "highpass", 10000.0, [1500.0], [1000.0], 0.5, 50.0),
+    ("butter_bp", "butter", "bandpass", 48000.0, [1000.0, 2000.0], [500.0, 4000.0], 1.0, 40.0),
+    ("butter_bs_mains", "butter", "bandstop", 48000.0, [45.0, 55.0], [49.0, 51.0], 1.0, 30.0),
+    ("butter_lp_1mhz", "butter", "lowpass", 1e6, [20000.0], [30000.0], 3.0, 60.0),
+    ("cheby1_lp", "cheby1", "lowpass", 48000.0, [1000.0], [1500.0], 0.5, 60.0),
+    ("cheby1_hp", "cheby1", "highpass", 44100.0, [300.0], [200.0], 0.1, 40.0),
+    ("cheby1_bp_phone", "cheby1", "bandpass", 8000.0, [300.0, 3400.0], [200.0, 3600.0], 0.5, 40.0),
+    ("cheby1_bs", "cheby1", "bandstop", 10000.0, [1000.0, 2500.0], [1500.0, 2000.0], 1.0, 50.0),
+    ("cheby2_lp", "cheby2", "lowpass", 48000.0, [1000.0], [2000.0], 1.0, 40.0),
+    ("cheby2_hp", "cheby2", "highpass", 48000.0, [100.0], [50.0], 0.5, 60.0),
+    ("cheby2_bp", "cheby2", "bandpass", 48000.0, [1000.0, 3000.0], [600.0, 3600.0], 0.5, 50.0),
+    ("cheby2_bs_mains", "cheby2", "bandstop", 48000.0, [45.0, 55.0], [49.0, 51.0], 1.0, 30.0),
+    ("ellip_lp", "ellip", "lowpass", 48000.0, [1000.0], [1500.0], 0.5, 60.0),
+    ("ellip_hp", "ellip", "highpass", 48000.0, [2000.0], [1800.0], 0.1, 80.0),
+    ("ellip_bp", "ellip", "bandpass", 48000.0, [1000.0, 3000.0], [600.0, 3600.0], 0.5, 50.0),
+    ("ellip_bs", "ellip", "bandstop", 10000.0, [1000.0, 2500.0], [1500.0, 2000.0], 1.0, 50.0),
+    ("ellip_lp_narrow", "ellip", "lowpass", 48000.0, [1000.0], [1100.0], 0.1, 80.0),
 ]
 
 WELCH_CASES = [
@@ -98,6 +140,8 @@ def main():
             sos = signal.cheby1(order, rp, wn, btype=resp, fs=fs, output="sos")
         elif fam == "cheby2":
             sos = signal.cheby2(order, rs, wn, btype=resp, fs=fs, output="sos")
+        elif fam == "ellip":
+            sos = signal.ellip(order, rp, rs, wn, btype=resp, fs=fs, output="sos")
         else:
             sos = signal.bessel(order, wn, btype=resp, fs=fs, output="sos", norm="mag")
         freqs = np.geomspace(fs * 1e-4, fs * 0.49, 48)
@@ -123,11 +167,53 @@ def main():
         )
     lines.append("};")
     lines.append("")
+    lines.append("inline const std::vector<RemezReference> kRemezReferences = {")
+    for name, taps, fs, bands, desired, weights in REMEZ_CASES:
+        h = signal.remez(taps, bands, desired, weight=weights, fs=fs)
+        lines.append(
+            '    {"%s", %d, %r, %s, %s, %s, %s},'
+            % (name, taps, fs, fmt(bands), fmt(desired), fmt(weights), fmt(h))
+        )
+    lines.append("};")
+    lines.append("")
+    lines.append("inline const std::vector<OrderReference> kOrderReferences = {")
+    order_functions = {"butter": signal.buttord, "cheby1": signal.cheb1ord, "cheby2": signal.cheb2ord, "ellip": signal.ellipord}
+    for name, fam, resp, fs, passband, stopband, gpass, gstop in ORDER_CASES:
+        wp = passband[0] if len(passband) == 1 else passband
+        ws = stopband[0] if len(stopband) == 1 else stopband
+        order, wn = order_functions[fam](wp, ws, gpass, gstop, fs=fs)
+        lines.append('    {"%s", %d, %d, %r, %s, %s, %r, %r, %d, %s},'
+                     % (name, FAMILY[fam], RESPONSE[resp], fs, fmt(passband), fmt(stopband), gpass, gstop, order,
+                        fmt(np.atleast_1d(wn))))
+    lines.append("};")
+    lines.append("")
     lines.append("inline const std::vector<WelchReference> kWelchReferences = {")
     for name, win, nperseg, noverlap in WELCH_CASES:
         f, p = signal.welch(x, fs=fs_signal, window=win, nperseg=nperseg, noverlap=noverlap, detrend="constant",
                             scaling="density")
         lines.append('    {"%s", %d, %d, %d, %s},' % (name, WINDOW[win], nperseg, noverlap, fmt(p)))
+    lines.append("};")
+    lines.append("")
+    lines.append("inline const std::vector<FiltFiltReference> kFiltFiltReferences = {")
+    fs_ff = 48000.0
+    t = np.arange(400) / fs_ff
+    am = (1 + 0.5 * np.sin(2 * np.pi * 500 * t)) * np.cos(2 * np.pi * 10000 * t)  # starts on a crest
+    ramp = 5 * t / t[-1] + np.sin(2 * np.pi * 200 * t)
+    cases = [
+        ("am_bandpass10", signal.butter(10, [10500, 15000], btype="bandpass", fs=fs_ff, output="sos"), None, am),
+        ("ramp_lowpass4", signal.butter(4, 1000, fs=fs_ff, output="sos"), None, ramp),
+        ("am_fir31", None, signal.firwin(31, 6000, fs=fs_ff), am),
+    ]
+    for name, sos, taps, xs in cases:
+        for padtype in ("odd", "even", "constant", None):
+            if sos is not None:
+                y = signal.sosfiltfilt(sos, xs, padtype=padtype)
+                coeffs, fir = sos.ravel(), []
+            else:
+                y = signal.filtfilt(taps, [1.0], xs, padtype=padtype)
+                coeffs, fir = [], taps
+            lines.append('    {"%s", "%s", %s, %s, %s, %s},'
+                         % (name, padtype or "none", fmt(coeffs), fmt(fir), fmt(xs), fmt(y)))
     lines.append("};")
     lines.append("")
     lines.append("inline const std::vector<BesselPoleReference> kBesselPoles = {")

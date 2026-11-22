@@ -6,6 +6,7 @@ add_executable(qacq_tests
     test_tone.cpp
     test_filters.cpp
     test_filter_module.cpp
+    test_filter_code.cpp
     test_generator.cpp
     test_modulation.cpp
     test_io.cpp
@@ -48,10 +49,47 @@ qacq_add_test_group(session    "[session]"    fast)
 qacq_add_test_group(csv        "[csv]"        fast)
 qacq_add_test_group(plot       "[plot]"       fast)
 qacq_add_test_group(analysis   "[analysis]"   fast)
+qacq_add_test_group(code       "[code]"       fast)
 qacq_add_test_group(wav        "[wav]"        fast)
 qacq_add_test_group(acquisition "[acquisition]" fast)
 qacq_add_test_group(ber        "[ber]"        slow)
 qacq_add_test_group(audit      "[audit]"      slow)
+
+# The C written for microcontrollers (module Filtres): qacq_codegen writes it for a few filters in every number
+# format, the C compiler of the build compiles it all as C99 with strict warnings (one translation unit, so that
+# no two names clash), and the self-tests run: bit for bit in fixed point. Left out where no C compiler is found.
+include(CheckLanguage)
+check_language(C)
+if(CMAKE_C_COMPILER)
+    enable_language(C)
+    add_executable(qacq_codegen codegen/generate.cpp)
+    target_link_libraries(qacq_codegen PRIVATE qacq::analysis)
+    qacq_set_warnings(qacq_codegen)
+    set(_qacq_generated "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    add_custom_command(
+        OUTPUT "${_qacq_generated}/codegen_main.c"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_qacq_generated}"
+        COMMAND qacq_codegen "${_qacq_generated}"
+        DEPENDS qacq_codegen
+        COMMENT "C des filtres pour microcontrôleur"
+        VERBATIM)
+    add_executable(qacq_generated_c "${_qacq_generated}/codegen_main.c")
+    target_include_directories(qacq_generated_c PRIVATE "${_qacq_generated}")
+    set_target_properties(qacq_generated_c PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+    if(MSVC)
+        target_compile_options(qacq_generated_c PRIVATE /W4 /utf-8)
+        if(QACQ_WARNINGS_AS_ERRORS)
+            target_compile_options(qacq_generated_c PRIVATE /WX)
+        endif()
+    else()
+        target_compile_options(qacq_generated_c PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wdouble-promotion)
+        if(QACQ_WARNINGS_AS_ERRORS)
+            target_compile_options(qacq_generated_c PRIVATE -Werror)
+        endif()
+    endif()
+    add_test(NAME codegen COMMAND qacq_generated_c)
+    set_tests_properties(codegen PROPERTIES LABELS fast)
+endif()
 
 # Application layer (needs Qt): signal list model, session files, remembered settings.
 if(TARGET qacq_app)

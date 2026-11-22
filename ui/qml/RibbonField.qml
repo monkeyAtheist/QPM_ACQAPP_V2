@@ -5,6 +5,7 @@ import Qacq.App
 
 // Small quantity field of the tool header: a name above a slim box, so that it fits the height of the
 // buttons. Shows "2 s", accepts "500 ms", "1,5" (read with the prefix shown)... like QuantityField.
+// `readOnly`: a value computed, shown in grey, its tip kept.
 // Place it in a group with `anchors.verticalCenter: parent.verticalCenter`.
 ColumnLayout {
     id: root
@@ -16,6 +17,7 @@ ColumnLayout {
     property string tip: ""
     property int fieldWidth: 80
     property bool invalid: false
+    property bool readOnly: false
     signal edited(real value)
 
     spacing: 3
@@ -49,11 +51,14 @@ ColumnLayout {
             verticalAlignment: TextInput.AlignVCenter
             clip: true
             selectByMouse: true
-            color: Theme.text
+            readOnly: root.readOnly
+            color: root.readOnly ? Theme.textMuted : Theme.text
             selectionColor: Qt.alpha(Theme.accent, 0.4)
             font.pixelSize: Theme.smallText + 1
             text: root.shown()
             onEditingFinished: {
+                if (root.readOnly)
+                    return
                 const r = Units.parse(text, root.unit, Units.shownFactor(root.value, root.unit))
                 if (!r.ok || r.value < root.minimum || r.value > root.maximum) {
                     root.invalid = true

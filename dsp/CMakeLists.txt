@@ -7,6 +7,7 @@ add_library(qacq_dsp STATIC
     src/generator.cpp
     src/modulation.cpp
     src/receiver.cpp
+    src/remez.cpp
     src/spectrum.cpp
     src/tone.cpp
     src/window.cpp

@@ -166,7 +166,7 @@ Rectangle {
         }
     }
 
-    Menu {
+    FitMenu {
         id: contextMenu
         property var targetId: 0
         property string targetName: ""

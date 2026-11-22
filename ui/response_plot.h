@@ -6,7 +6,8 @@
 //   "impulse"   h[n], and "step" its running sum, along the samples
 //   "polezero"  its poles (×) and zeros (○) in the z-plane, with the unit circle
 // The filter as designed in a solid line; as applied (at zero phase, a FIR aligned) dashed, where that
-// changes what is shown (`showApplied`). The edges of the band are marked along the frequencies.
+// changes what is shown (`showApplied`). The edges of the band are marked along the frequencies; a filter
+// designed from a template has it drawn on its gain (where the gain must not go, shaded).
 //
 // Mouse, as on the spectra: the wheel zooms the horizontal axis about the pointer (Ctrl, or over the scale:
 // the vertical one; in the z-plane, both); a drag moves the view (sideways, up or down, or both); a right
@@ -187,6 +188,8 @@ private:
     void changed(); // update(), viewChanged()
 
     void paintFrequencies(QPainter &p, const QRectF &area);
+    bool templateShown() const;
+    void paintTemplate(QPainter &p, const QRectF &area, const qacq::plot::YMap &map);
     void paintSamples(QPainter &p, const QRectF &area);
     void paintPlane(QPainter &p, const QRectF &area);
     void paintLevelAxis(QPainter &p, const QRectF &area, const QString &title);

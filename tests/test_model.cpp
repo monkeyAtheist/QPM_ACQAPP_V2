@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -49,9 +50,29 @@ bool sameBits(double a, double b)
     return std::bit_cast<std::uint64_t>(a) == std::bit_cast<std::uint64_t>(b) || (std::isnan(a) && std::isnan(b));
 }
 
+// In a directory of this run's own: two groups of tests may run at once (ctest -j), the same case in both ("[csv][wav]");
+// with the same file they would write and remove it under each other. The directory goes at the end (if empty).
 std::filesystem::path tempFile(const std::string &name)
 {
-    return std::filesystem::temp_directory_path() / ("qacq_test_" + name);
+    struct Directory
+    {
+        std::filesystem::path path;
+        Directory()
+        {
+            std::random_device device;
+            const auto tick = static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count());
+            path = std::filesystem::temp_directory_path() /
+                   ("qacq_tests_" + std::to_string(device()) + "_" + std::to_string(tick % 1000000007ULL));
+            std::filesystem::create_directories(path);
+        }
+        ~Directory()
+        {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    };
+    static const Directory directory;
+    return directory.path / ("qacq_test_" + name);
 }
 } // namespace
 

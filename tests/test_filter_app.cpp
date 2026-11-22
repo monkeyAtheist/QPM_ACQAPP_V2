@@ -9,6 +9,10 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
+#include <QTemporaryDir>
+#include <QUrl>
 
 #include <algorithm>
 #include <cmath>
@@ -107,6 +111,72 @@ TEST_CASE("Filter controller: the design follows the recipe, and says what it is
     CHECK(filter.recipe().value(QStringLiteral("application")).toString() == QStringLiteral("causal"));
     filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("fir")}, {QStringLiteral("application"), QStringLiteral("zerophase")}});
     CHECK(filter.recipe().value(QStringLiteral("application")).toString() == QStringLiteral("zerophase"));
+    // At zero phase, the edges: predicted unless another extension is chosen, as the summary says.
+    CHECK(filter.recipe().value(QStringLiteral("edges")).toString() == QStringLiteral("predicted"));
+    const auto summary = [&filter] {
+        return filter.designInfo().value(QStringLiteral("summary")).toStringList().join(QStringLiteral(" "));
+    };
+    CHECK(summary().contains(QStringLiteral("prédiction linéaire")));
+    filter.setRecipe({{QStringLiteral("edges"), QStringLiteral("even")}});
+    CHECK(filter.recipe().value(QStringLiteral("edges")).toString() == QStringLiteral("even"));
+    CHECK(summary().contains(QStringLiteral("Bords prolongés en miroir")));
+    filter.setRecipe({{QStringLiteral("edges"), QStringLiteral("predicted")}});
+
+    // Equiripple (Parks-McClellan), as the interface asks for it; then a window again.
+    filter.setRecipe({{QStringLiteral("firDesign"), QStringLiteral("equiripple")},
+                      {QStringLiteral("frequency1"), 2000.0},
+                      {QStringLiteral("transition"), 1400.0},
+                      {QStringLiteral("ripple"), 0.1},
+                      {QStringLiteral("attenuation"), 60.0}});
+    CHECK(filter.recipe().value(QStringLiteral("firDesign")).toString() == QStringLiteral("equiripple"));
+    CHECK(filter.designInfo().value(QStringLiteral("ok")).toBool());
+    CHECK(filter.designInfo().value(QStringLiteral("text")).toString().contains(QStringLiteral("équiondulation")));
+    CHECK(filter.designInfo().value(QStringLiteral("summary")).toStringList().join(QStringLiteral(" ")).contains(QStringLiteral("Parks-McClellan")));
+    filter.setRecipe({{QStringLiteral("firDesign"), QStringLiteral("window")}, {QStringLiteral("window"), QStringLiteral("blackman")}});
+    CHECK(filter.recipe().value(QStringLiteral("firDesign")).toString() == QStringLiteral("window"));
+    CHECK(filter.designInfo().value(QStringLiteral("text")).toString().contains(QStringLiteral("Blackman")));
+    // A gain at the output: in the text, before the coefficients.
+    filter.setRecipe({{QStringLiteral("gain"), 6.0}});
+    CHECK(filter.designInfo().value(QStringLiteral("text")).toString().contains(QStringLiteral("gain +6 dB")));
+    CHECK(filter.designInfo().value(QStringLiteral("coefficients")).toString().startsWith(QStringLiteral("# Gain en sortie (+6 dB)")));
+    CHECK(filter.coefficientsText().contains(QStringLiteral("g*(h[0]*x[n]")));
+    filter.setRecipe({{QStringLiteral("gain"), 0.0}});
+    CHECK(!filter.coefficientsText().contains(QStringLiteral("g = ")));
+    // Elliptic.
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")}, {QStringLiteral("family"), QStringLiteral("elliptic")}});
+    CHECK(filter.designInfo().value(QStringLiteral("text")).toString().contains(QStringLiteral("elliptique")));
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("fir")}, {QStringLiteral("frequency1"), 1000.0}});
+
+    // Coefficients typed: a FIR when a = 1, else sections; what was typed, as evaluated; unstable, not applied.
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("typed")}, {QStringLiteral("b"), QStringLiteral("1/N")},
+                      {QStringLiteral("bCount"), QStringLiteral("N")}, {QStringLiteral("a"), QStringLiteral("1")},
+                      {QStringLiteral("variables"), QStringLiteral("N = 4")}});
+    CHECK(filter.recipe().value(QStringLiteral("kind")).toString() == QStringLiteral("typed"));
+    CHECK(filter.recipe().value(QStringLiteral("application")).toString() == QStringLiteral("causal"));
+    CHECK(filter.designInfo().value(QStringLiteral("ok")).toBool());
+    CHECK(filter.designInfo().value(QStringLiteral("fir")).toBool());
+    CHECK(filter.designInfo().value(QStringLiteral("numeratorOfK")).toBool());
+    CHECK(filter.designInfo().value(QStringLiteral("typedBCount")).toInt() == 4);
+    CHECK(filter.designInfo().value(QStringLiteral("typedB")).toList().value(3).toDouble() == 0.25);
+    CHECK(filter.designInfo().value(QStringLiteral("text")).toString() == QStringLiteral("Coefficients tapés, RIF de 4 coefficients"));
+    CHECK(filter.coefficientsText().contains(QStringLiteral("h[3] = 0.25")));
+    filter.setRecipe({{QStringLiteral("b"), QStringLiteral("alpha")}, {QStringLiteral("bCount"), QString()},
+                      {QStringLiteral("a"), QStringLiteral("2 ; 2*(alpha - 1)")}, {QStringLiteral("variables"), QStringLiteral("alpha = 0,1")}});
+    CHECK(!filter.designInfo().value(QStringLiteral("fir")).toBool());
+    CHECK(filter.designInfo().value(QStringLiteral("typedACount")).toInt() == 2);
+    const QString typedText = filter.coefficientsText();
+    CHECK(typedText.contains(QStringLiteral("# b et a tapés, divisés par a[0] = 2")));
+    CHECK(typedText.contains(QStringLiteral("b[0] = 0.050000000000000003")));
+    CHECK(typedText.contains(QStringLiteral("a[1] = -0.90000000000000002")));
+    CHECK(typedText.contains(QStringLiteral("# Section 1")));
+    filter.setRecipe({{QStringLiteral("a"), QStringLiteral("1 ; -1,5")}});
+    CHECK(filter.designInfo().value(QStringLiteral("ok")).toBool());
+    CHECK(filter.designInfo().value(QStringLiteral("applicationError")).toString().contains(QStringLiteral("instable")));
+    filter.setRecipe({{QStringLiteral("b"), QStringLiteral("k")}});
+    CHECK(!filter.designInfo().value(QStringLiteral("ok")).toBool());
+    CHECK(filter.designInfo().value(QStringLiteral("numeratorOfK")).toBool()); // the count is asked for
+    CHECK(filter.designInfo().value(QStringLiteral("error")).toString().contains(QStringLiteral("combien de coefficients")));
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")}});
 
     // A band whose upper edge is below the lower one gets one above.
     filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")},
@@ -143,6 +213,71 @@ TEST_CASE("Filter controller: the design follows the recipe, and says what it is
     CHECK(filter.currentImpulse()->impulse.empty());
     filter.addToSession();
     CHECK(!filter.lastError().isEmpty());
+}
+
+TEST_CASE("Filter controller: an order computed from a template, and back", "[app]")
+{
+    Session session;
+    FilterController filter(&session);
+    const auto value = [&filter](const char *key) { return filter.recipe().value(QString::fromLatin1(key)); };
+    // The recipe as designed: what the template computed.
+    const auto designed = [&filter](const char *key) {
+        return filter.designInfo().value(QStringLiteral("recipe")).toMap().value(QString::fromLatin1(key));
+    };
+    // Switched on: a template the filter holds, read on its gain (a Butterworth of order 4 at 1 kHz: 1 dB at most up
+    // to 844 Hz, 40 dB at least from 3,13 kHz), and the least order for it: the same.
+    filter.setRecipe({{QStringLiteral("fromTemplate"), true}});
+    CHECK(value("fromTemplate").toBool());
+    CHECK(value("pass1").toDouble() == 844.0);
+    CHECK(value("stop1").toDouble() == 3130.0);
+    QVariantMap design = filter.designInfo();
+    CHECK(design.value(QStringLiteral("ok")).toBool());
+    CHECK(design.value(QStringLiteral("templateHeld")).toBool());
+    CHECK(designed("order").toInt() == 4);
+    // A template typed: the order computed; the recipe keeps the order chosen.
+    filter.setRecipe({{QStringLiteral("pass1"), 1000.0}, {QStringLiteral("stop1"), 2000.0}});
+    design = filter.designInfo();
+    CHECK(designed("order").toInt() == 8); // Butterworth, 1 dB up to 1 kHz, 40 dB from 2 kHz
+    CHECK(value("order").toInt() == 4);
+    CHECK(design.value(QStringLiteral("text")).toString() ==
+          QStringLiteral("Passe-bas Butterworth d'ordre 8, gabarit 1 dB jusqu'à 1 kHz, 40 dB dès 2 kHz"));
+    CHECK(design.value(QStringLiteral("templateText")).toString().startsWith(QStringLiteral("Gabarit : au plus 1 dB")));
+    CHECK(design.value(QStringLiteral("templateAttenuation")).toDouble() > 40.0);
+    // An edge typed wrong stays as typed: the design says why.
+    filter.setRecipe({{QStringLiteral("stop1"), 900.0}});
+    CHECK(value("stop1").toDouble() == 900.0);
+    CHECK(!filter.designInfo().value(QStringLiteral("ok")).toBool());
+    CHECK(filter.designInfo().value(QStringLiteral("error")).toString().contains(QStringLiteral("Gabarit d'un passe-bas")));
+    filter.setRecipe({{QStringLiteral("stop1"), 2000.0}});
+    // Another response: edges in its own order.
+    filter.setRecipe({{QStringLiteral("response"), QStringLiteral("highpass")}});
+    CHECK(value("stop1").toDouble() < value("pass1").toDouble());
+    CHECK(filter.designInfo().value(QStringLiteral("ok")).toBool());
+    filter.setRecipe({{QStringLiteral("response"), QStringLiteral("lowpass")}});
+    CHECK(value("pass1").toDouble() < value("stop1").toDouble());
+    CHECK(filter.designInfo().value(QStringLiteral("ok")).toBool());
+    // A FIR from the same template.
+    filter.setRecipe({{QStringLiteral("pass1"), 1000.0}, {QStringLiteral("stop1"), 2000.0}});
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("fir")}, {QStringLiteral("firDesign"), QStringLiteral("equiripple")}});
+    design = filter.designInfo();
+    CHECK(design.value(QStringLiteral("ok")).toBool());
+    CHECK(design.value(QStringLiteral("templateHeld")).toBool());
+    const int taps = designed("taps").toInt();
+    CHECK(taps == 81);
+    // Back to an order chosen: from the filter computed.
+    filter.setRecipe({{QStringLiteral("fromTemplate"), false}});
+    CHECK(!value("fromTemplate").toBool());
+    CHECK(value("taps").toInt() == taps);
+    CHECK(filter.designInfo().value(QStringLiteral("tapCount")).toInt() == taps);
+    // Switched on again with the template given: that one.
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")}, {QStringLiteral("fromTemplate"), true},
+                      {QStringLiteral("pass1"), 1000.0}, {QStringLiteral("stop1"), 2000.0}});
+    CHECK(value("stop1").toDouble() == 2000.0);
+    CHECK(designed("order").toInt() == 8);
+    filter.setRecipe({{QStringLiteral("fromTemplate"), false}});
+    CHECK(value("order").toInt() == 8);
+    CHECK_NEAR(value("frequency1").toDouble(), 1087.8339627761857, 1e-9, 0.0); // −3 dB, as buttord gives it
+    CHECK(filter.designInfo().value(QStringLiteral("text")).toString() == QStringLiteral("Passe-bas Butterworth d'ordre 8, 1,088 kHz"));
 }
 
 TEST_CASE("Filter controller: tried on a signal, before and after, then into the session", "[app]")
@@ -254,4 +389,40 @@ TEST_CASE("Filter controller: a long signal previewed on its start, the module a
     // Back to the signal's.
     filter.setRecipe({{QStringLiteral("rateOfSignal"), true}});
     CHECK(filter.recipe().value(QStringLiteral("sampleRate")).toDouble() == 48000.0);
+}
+
+TEST_CASE("Filter controller: the C for a microcontroller, shown and saved", "[app]")
+{
+    FilterController filter(nullptr);
+    filter.setRecipe({{QStringLiteral("order"), 4}, {QStringLiteral("frequency1"), 1000.0}});
+    const QVariantMap options{{QStringLiteral("format"), QStringLiteral("q15")}, {QStringLiteral("name"), QStringLiteral("pb")}};
+    const QVariantMap code = filter.code(options);
+    REQUIRE(code.value(QStringLiteral("ok")).toBool());
+    CHECK(code.value(QStringLiteral("headerName")).toString() == QStringLiteral("pb.h"));
+    CHECK(code.value(QStringLiteral("sourceName")).toString() == QStringLiteral("pb.c"));
+    CHECK(code.value(QStringLiteral("format")).toString() == QStringLiteral("q15"));
+    CHECK(code.value(QStringLiteral("scaling")).toString() == QStringLiteral("sum"));
+    CHECK(code.value(QStringLiteral("fixed")).toBool());
+    CHECK(code.value(QStringLiteral("header")).toString().contains(QStringLiteral("int16_t pb_echantillon(pb_t *f, int16_t x);")));
+    CHECK(code.value(QStringLiteral("source")).toString().contains(QStringLiteral("int pb_autotest(void)")));
+    CHECK(!code.value(QStringLiteral("notes")).toStringList().isEmpty());
+    // Asked again: the same; another design: another code.
+    CHECK(filter.code(options) == code);
+    filter.setRecipe({{QStringLiteral("order"), 2}});
+    CHECK(filter.code(options).value(QStringLiteral("header")).toString().contains(QStringLiteral("#define PB_SECTIONS 1")));
+    // A name C cannot take.
+    const QVariantMap wrong = filter.code({{QStringLiteral("name"), QStringLiteral("passe-bas")}});
+    CHECK(!wrong.value(QStringLiteral("ok")).toBool());
+    CHECK(wrong.value(QStringLiteral("error")).toString().contains(QStringLiteral("ne peut pas nommer le code")));
+    // Saved: both files in the folder.
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QString written = filter.saveCode(QUrl::fromLocalFile(dir.path()), options);
+    CHECK(written.endsWith(QStringLiteral("pb.c")));
+    CHECK(QFileInfo::exists(dir.filePath(QStringLiteral("pb.h"))));
+    QFile source(dir.filePath(QStringLiteral("pb.c")));
+    REQUIRE(source.open(QIODevice::ReadOnly));
+    CHECK(QString::fromUtf8(source.readAll()).contains(QStringLiteral("#include \"pb.h\"")));
+    CHECK(filter.saveCode(QUrl::fromLocalFile(dir.filePath(QStringLiteral("absent"))), options).isEmpty());
+    CHECK(filter.lastError().contains(QStringLiteral("n'existe pas")));
 }

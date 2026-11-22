@@ -1,11 +1,15 @@
 #include "qacq/app/filter_controller.h"
 
+#include "qacq/analysis/filter_code.h"
 #include "qacq/app/format.h"
 #include "qacq/app/qt_convert.h"
 #include "qacq/app/signal_list_model.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QSaveFile>
 
 #include <algorithm>
 #include <limits>
@@ -100,6 +104,33 @@ void FilterController::refreshDesignInfo()
     info.insert(QStringLiteral("poleCount"), static_cast<int>(d.poles.size()));
     info.insert(QStringLiteral("zeroCount"), static_cast<int>(d.zeros.size()));
     info.insert(QStringLiteral("rootsKnown"), d.rootsKnown);
+    info.insert(QStringLiteral("fir"), d.fir());
+    info.insert(QStringLiteral("applicationError"), toQString(d.applicationError));
+    // The recipe as designed: from a template, the order, the taps, the frequencies and β it computed.
+    info.insert(QStringLiteral("recipe"), jsonToVariant(analysis::toJson(d.recipe)).toMap());
+    if (d.recipe.fromTemplate && d.recipe.kind != analysis::FilterKind::Typed)
+    {
+        info.insert(QStringLiteral("templateHeld"), d.templateHeld);
+        info.insert(QStringLiteral("templateLoss"), d.templateLossDb);
+        info.insert(QStringLiteral("templateAttenuation"), d.templateAttenuationDb);
+        info.insert(QStringLiteral("exactOrder"), d.exactOrder);
+        info.insert(QStringLiteral("templateText"), toQString(analysis::templateText(d.recipe)));
+    }
+    if (d.recipe.kind == analysis::FilterKind::Typed)
+    {
+        // What was typed, as evaluated: shown under the fields (the first ones of a long list).
+        const auto values = [](const std::vector<double> &v) {
+            QVariantList list;
+            for (std::size_t i = 0; i < v.size() && i < kShownTypedValues; ++i) list.append(v[i]);
+            return list;
+        };
+        info.insert(QStringLiteral("typedB"), values(d.typedNumerator));
+        info.insert(QStringLiteral("typedA"), values(d.typedDenominator));
+        info.insert(QStringLiteral("typedBCount"), static_cast<int>(d.typedNumerator.size()));
+        info.insert(QStringLiteral("typedACount"), static_cast<int>(d.typedDenominator.size()));
+        info.insert(QStringLiteral("numeratorOfK"), d.numeratorOfK);
+        info.insert(QStringLiteral("denominatorOfK"), d.denominatorOfK);
+    }
     if (d.ok() && !d.fir())
     {
         QVariantList sections;
@@ -116,7 +147,8 @@ void FilterController::refreshDesignInfo()
     // The coefficients to read in the panel: the first ones of a long FIR (« Copier » copies them all).
     const QStringList lines = coefficientLines(kShownCoefficientLines + 1);
     QStringList shown = lines.mid(0, kShownCoefficientLines);
-    const qsizetype total = d.fir() ? static_cast<qsizetype>(d.taps.size()) : 0;
+    const qsizetype total = d.fir() ? static_cast<qsizetype>(d.taps.size())
+                                    : static_cast<qsizetype>(d.typedNumerator.size() + d.typedDenominator.size());
     if (lines.size() > kShownCoefficientLines)
         shown << tr("… %1 coefficients en tout : « Copier les coefficients » les copie tous.")
                      .arg(formatCount(static_cast<qint64>(total)));
@@ -129,8 +161,25 @@ QStringList FilterController::coefficientLines(qsizetype maximum) const
     QStringList lines;
     const analysis::FilterDesign &d = *m_design;
     if (!d.ok()) return lines;
+    // The gain at the output first: the coefficients that follow are those of the filter at 0 dB.
+    if (d.gain != 1.0)
+        lines << QStringLiteral("# Gain en sortie (%1) : la sortie du filtre multipliée par g")
+                     .arg(toQString(analysis::filterGainText(d.recipe.gainDb)))
+              << QStringLiteral("g = %1").arg(number(d.gain)) << QString();
     if (!d.fir())
     {
+        // Coefficients typed: b and a as they are applied (divided by a[0]), then the sections they make.
+        if (d.recipe.kind == analysis::FilterKind::Typed && !d.typedDenominator.empty())
+        {
+            const double a0 = d.typedDenominator.front();
+            lines << (a0 != 1.0 ? QStringLiteral("# b et a tapés, divisés par a[0] = %1").arg(number(a0))
+                                : QStringLiteral("# b et a tapés"));
+            for (std::size_t k = 0; k < d.typedNumerator.size() && lines.size() < maximum; ++k)
+                lines << QStringLiteral("b[%1] = %2").arg(static_cast<qint64>(k)).arg(number(d.typedNumerator[k] / a0));
+            for (std::size_t k = 0; k < d.typedDenominator.size() && lines.size() < maximum; ++k)
+                lines << QStringLiteral("a[%1] = %2").arg(static_cast<qint64>(k)).arg(number(d.typedDenominator[k] / a0));
+            lines << QString() << QStringLiteral("# En sections du second ordre, l'une après l'autre") << QString();
+        }
         int index = 0;
         for (const dsp::Biquad &s : d.sections)
         {
@@ -154,11 +203,19 @@ QString FilterController::coefficientsText() const
     if (!d.ok()) return {};
     QStringList lines;
     lines << QStringLiteral("# %1, fs = %2 Hz").arg(toQString(analysis::filterText(d.recipe)), number(d.recipe.sampleRateHz));
+    const bool gain = d.gain != 1.0;
     if (d.fir())
-        lines << QStringLiteral("# y[n] = h[0]*x[n] + h[1]*x[n-1] + ... + h[N-1]*x[n-N+1], N = %1").arg(static_cast<qint64>(d.taps.size()));
+        lines << QStringLiteral("# y[n] = %1h[0]*x[n] + h[1]*x[n-1] + ... + h[N-1]*x[n-N+1]%2, N = %3")
+                     .arg(gain ? QStringLiteral("g*(") : QString(), gain ? QStringLiteral(")") : QString())
+                     .arg(static_cast<qint64>(d.taps.size()));
+    else if (d.recipe.kind == analysis::FilterKind::Typed)
+        lines << QStringLiteral("# y[n] = b[0]*x[n] + ... + b[M]*x[n-M] - a[1]*y[n-1] - ... - a[N]*y[n-N] (a[0] = 1),")
+              << QStringLiteral("# ou les %1 sections du second ordre l'une après l'autre (plus juste) :").arg(static_cast<qint64>(d.sections.size()))
+              << QStringLiteral("# y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]");
     else
         lines << QStringLiteral("# %1 sections du second ordre l'une après l'autre, a0 = 1 :").arg(static_cast<qint64>(d.sections.size()))
               << QStringLiteral("# y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]");
+    if (gain && !d.fir()) lines << QStringLiteral("# puis la sortie de la dernière section multipliée par g");
     lines << coefficientLines(std::numeric_limits<qsizetype>::max());
     return lines.join(QStringLiteral("\n")) + QStringLiteral("\n");
 }
@@ -270,6 +327,52 @@ void FilterController::setRecipe(const QVariantMap &changes)
     if (band && !(r.frequency2Hz > r.frequency1Hz))
         r.frequency2Hz = std::min(2.0 * r.frequency1Hz, 0.45 * r.sampleRateHz);
     if (r.rateOfSignal && m_inputRate > 0.0) r.sampleRateHz = m_inputRate;
+    const analysis::FilterDesign *designed = m_design.get();
+    const bool computed = designed && designed->ok() && designed->recipe.fromTemplate;
+    // A template switched on: the one it had if the filter as it is holds it (back from a template, nothing changed),
+    // else one the filter holds, read on its gain (its least order is then at most the order chosen).
+    const bool switchedOn = r.fromTemplate && !m_recipe.fromTemplate && r.kind != analysis::FilterKind::Typed;
+    const bool edgesGiven = changes.contains(QStringLiteral("pass1")) || changes.contains(QStringLiteral("pass2")) ||
+                            changes.contains(QStringLiteral("stop1")) || changes.contains(QStringLiteral("stop2"));
+    bool templateSet = edgesGiven;
+    if (switchedOn && !edgesGiven && designed && designed->ok() && r.response == designed->recipe.response)
+    {
+        if (analysis::templateEdgesValid(r))
+        {
+            analysis::FilterDesign probe;
+            probe.recipe = r;
+            probe.sections = designed->sections;
+            probe.taps = designed->taps;
+            templateSet = analysis::measureTemplate(probe).held;
+        }
+        if (!templateSet) templateSet = analysis::templateFromDesign(*designed, r);
+    }
+    // Or another response for it: edges in the order the response wants, from the frequencies of the filter as
+    // designed, unless those it had hold (edges typed wrong are left as typed: the design says what is wrong).
+    if (!templateSet && r.fromTemplate && (switchedOn || r.response != m_recipe.response) && !analysis::templateEdgesValid(r))
+    {
+        if (computed && !changes.contains(QStringLiteral("frequency1")) && !changes.contains(QStringLiteral("frequency2")))
+        {
+            r.frequency1Hz = designed->recipe.frequency1Hz;
+            r.frequency2Hz = designed->recipe.frequency2Hz;
+            if (band && !(r.frequency2Hz > r.frequency1Hz))
+                r.frequency2Hz = std::min(2.0 * r.frequency1Hz, 0.45 * r.sampleRateHz);
+        }
+        analysis::setTemplateFromFrequencies(r);
+    }
+    // Back from a template: the order, the frequencies, the taps and β it computed stay (unless changed at the same
+    // time), so that the filter goes on from there.
+    if (m_recipe.fromTemplate && !r.fromTemplate && computed)
+    {
+        const analysis::FilterRecipe &c = designed->recipe;
+        const auto keep = [&changes](const char *key) { return !changes.contains(QString::fromLatin1(key)); };
+        if (keep("order")) r.order = c.order;
+        if (keep("taps")) r.taps = c.taps;
+        if (keep("frequency1")) r.frequency1Hz = c.frequency1Hz;
+        if (keep("frequency2") && band) r.frequency2Hz = c.frequency2Hz;
+        if (keep("kaiserBeta")) r.kaiserBeta = c.kaiserBeta;
+        if (keep("transition")) r.transitionHz = c.transitionHz;
+    }
     replace(std::move(r));
 }
 
@@ -507,6 +610,83 @@ void FilterController::clearPreview()
     if (!m_previewSignal) return;
     m_previewSignal.reset();
     m_preview.signalList()->resetSignals({});
+}
+
+namespace
+{
+analysis::CodeOptions codeOptions(const QVariantMap &options)
+{
+    analysis::CodeOptions o;
+    analysis::CodeFormat format = o.format;
+    if (analysis::codeFormatFromKey(toUtf8(options.value(QStringLiteral("format")).toString()), format)) o.format = format;
+    analysis::CodeScaling scaling = o.scaling;
+    if (analysis::codeScalingFromKey(toUtf8(options.value(QStringLiteral("scaling")).toString()), scaling)) o.scaling = scaling;
+    const QString name = options.value(QStringLiteral("name")).toString().trimmed();
+    if (!name.isEmpty()) o.name = toUtf8(name);
+    return o;
+}
+} // namespace
+
+QVariantMap FilterController::code(const QVariantMap &options) const
+{
+    if (m_codeDesign == m_design && m_codeOptions == options && !m_code.isEmpty()) return m_code;
+    const analysis::CodeOptions o = codeOptions(options);
+    const analysis::EmbeddedFilter embedded = analysis::embedFilter(*m_design, o);
+    const analysis::GeneratedCode generated = analysis::generateCode(embedded, *m_design);
+    QVariantMap out;
+    out.insert(QStringLiteral("ok"), embedded.ok() && generated.error.empty());
+    out.insert(QStringLiteral("error"), toQString(embedded.ok() ? generated.error : embedded.error));
+    out.insert(QStringLiteral("header"), toQString(generated.header));
+    out.insert(QStringLiteral("source"), toQString(generated.source));
+    out.insert(QStringLiteral("headerName"), toQString(generated.headerName));
+    out.insert(QStringLiteral("sourceName"), toQString(generated.sourceName));
+    out.insert(QStringLiteral("notes"), toQStringList(embedded.notes));
+    out.insert(QStringLiteral("warnings"), toQStringList(embedded.warnings));
+    out.insert(QStringLiteral("format"), toQString(std::string(analysis::codeFormatKey(o.format))));
+    out.insert(QStringLiteral("scaling"), toQString(std::string(analysis::codeScalingKey(o.scaling))));
+    out.insert(QStringLiteral("name"), toQString(o.name));
+    out.insert(QStringLiteral("fixed"), embedded.fixed);
+    m_codeDesign = m_design;
+    m_codeOptions = options;
+    m_code = out;
+    return out;
+}
+
+QString FilterController::saveCode(const QUrl &folder, const QVariantMap &options)
+{
+    const QVariantMap generated = code(options);
+    if (!generated.value(QStringLiteral("ok")).toBool())
+    {
+        setLastError(generated.value(QStringLiteral("error")).toString());
+        return {};
+    }
+    const QString directory = folder.isLocalFile() ? folder.toLocalFile() : folder.toString();
+    if (directory.isEmpty() || !QDir(directory).exists())
+    {
+        setLastError(tr("Le dossier « %1 » n'existe pas.").arg(directory));
+        return {};
+    }
+    const QDir dir(directory);
+    const auto write = [this](const QString &path, const QString &text) {
+        QSaveFile file(path);
+        if (!file.open(QIODevice::WriteOnly))
+        {
+            setLastError(tr("Impossible d'écrire « %1 » : %2").arg(QDir::toNativeSeparators(path), file.errorString()));
+            return false;
+        }
+        file.write(text.toUtf8());
+        if (!file.commit())
+        {
+            setLastError(tr("Impossible d'écrire « %1 » : %2").arg(QDir::toNativeSeparators(path), file.errorString()));
+            return false;
+        }
+        return true;
+    };
+    const QString header = dir.filePath(generated.value(QStringLiteral("headerName")).toString());
+    const QString source = dir.filePath(generated.value(QStringLiteral("sourceName")).toString());
+    if (!write(header, generated.value(QStringLiteral("header")).toString())) return {};
+    if (!write(source, generated.value(QStringLiteral("source")).toString())) return {};
+    return QDir::toNativeSeparators(source);
 }
 
 void FilterController::setLastError(const QString &message)

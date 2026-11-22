@@ -41,6 +41,7 @@ qt_add_qml_module(QTacquisitionApp
         qml/PlotMenu.qml
         qml/ViewGroup.qml
         qml/ScaleMenu.qml
+        qml/FitMenu.qml
         qml/WindowField.qml
         qml/SpectrumSettings.qml
         qml/SpectrogramSettings.qml
@@ -51,6 +52,7 @@ qt_add_qml_module(QTacquisitionApp
         qml/ListenGroup.qml
         qml/FiltersView.qml
         qml/FilterPanel.qml
+        qml/FilterCodeDialog.qml
     SOURCES
         signal_plot.h
         signal_plot.cpp

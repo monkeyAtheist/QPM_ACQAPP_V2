@@ -327,7 +327,7 @@ Rectangle {
                     ToolTip.delay: 500
                     ToolTip.text: root.operation ? qsTr("Une opération toute prête des deux premières autres voies : somme, différence, produit, quotient, moyenne, module…")
                                                  : qsTr("Un message tout prêt : un sinus ou un carré de fréquence fm, les formes d'onde au-dessus, une autre voie")
-                    Menu {
+                    FitMenu {
                         id: operationModelMenu
                         Instantiator {
                             model: root.operationChoices
@@ -421,7 +421,7 @@ Rectangle {
                     ToolTip.visible: hovered
                     ToolTip.delay: 500
                     ToolTip.text: qsTr("Une récurrence toute prête : oscillateur, passe-bas, résonateur, moyenne glissante, marche aléatoire, suite logistique")
-                    Menu {
+                    FitMenu {
                         id: recurrenceModelMenu
                         Instantiator {
                             model: Choices.recurrenceModels
@@ -585,7 +585,7 @@ Rectangle {
                     ToolTip.visible: hovered
                     ToolTip.delay: 500
                     ToolTip.text: qsTr("Un motif tout prêt, à retoucher : rampe, escalier, trapèze, charge RC, cardiogramme")
-                    Menu {
+                    FitMenu {
                         id: motifModelMenu
                         Instantiator {
                             model: Choices.motifModels
@@ -648,7 +648,7 @@ Rectangle {
                     ToolTip.visible: hovered
                     ToolTip.delay: 500
                     ToolTip.text: qsTr("Les coefficients d'une forme connue (carré, triangle, redressé…), avec le E et le D des variables")
-                    Menu {
+                    FitMenu {
                         id: modelMenu
                         Instantiator {
                             model: Choices.seriesModels

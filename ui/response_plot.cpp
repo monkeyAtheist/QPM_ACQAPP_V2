@@ -257,7 +257,13 @@ ResponsePlot::Range ResponsePlot::frequencyLimits() const
     if (!m_log) return {0.0, nyquist};
     // Three decades below fs/2, or a decade below the lowest edge.
     double low = std::pow(10.0, std::floor(std::log10(nyquist)) - 3.0);
-    const double f1 = m_design ? m_design->recipe.frequency1Hz : 0.0;
+    // (Coefficients typed: no edge. A template: its lowest edge.)
+    double f1 = 0.0;
+    if (m_design && m_design->recipe.kind != analysis::FilterKind::Typed)
+    {
+        const analysis::FilterRecipe &r = m_design->recipe;
+        f1 = r.fromTemplate ? std::min(r.passEdge1Hz, r.stopEdge1Hz) : r.frequency1Hz;
+    }
     if (f1 > 0.0) low = std::min(low, std::pow(10.0, std::floor(std::log10(f1 / 10.0))));
     return {low, nyquist};
 }
@@ -462,7 +468,12 @@ ResponsePlot::Range ResponsePlot::automaticLevels(const QRectF &area)
             low = values[values.size() / 100];
             high = values[values.size() - 1 - values.size() / 100];
         }
-        if (m_kind == Kind::Gain && m_decibels) low = std::max(low, high - 100.0);
+        // In dB, a hundred down at most; a template's stop band line in view (20 dB under it).
+        if (m_kind == Kind::Gain && m_decibels)
+        {
+            const double span = templateShown() ? std::max(100.0, m_design->recipe.stopbandAttenuationDb + 20.0) : 100.0;
+            low = std::max(low, high - span);
+        }
         if (m_kind == Kind::Gain && !m_decibels) low = std::min(0.0, low);
         return plot::paddedRange(low, high, 0.06);
     }
@@ -923,28 +934,74 @@ void ResponsePlot::paintFrequencies(QPainter &p, const QRectF &area)
     p.setBrush(Qt::NoBrush);
     p.drawRect(area.adjusted(0.5, 0.5, -0.5, -0.5));
 
-    // The edges of the band.
+    // The edges of the band. A band's labels outside it (f₁ to the left of its line, f₂ to the right), on the
+    // other side where there is no room; a label that would cover the one before goes a line higher (the edges
+    // of a template 200 Hz apart at 10 kHz), and is left out only when it would cover one there too.
     const analysis::FilterRecipe &r = m_design->recipe;
     const bool band = r.response == qacq::dsp::FilterResponse::BandPass || r.response == qacq::dsp::FilterResponse::BandStop;
     QPen edgePen(faded(m_text, 0.45), 1.0, Qt::DotLine);
     p.setPen(edgePen);
-    const auto edge = [&](double f, const QString &name) {
+    double labelRight[2] = {-1e9, -1e9}; // where the labels end, on the bottom line and on the one above
+    const auto edge = [&](double f, const QString &name, bool leftward) {
         const double x = std::round(xOf(f, area)) + 0.5;
         if (x < area.left() || x > area.right()) return;
         p.setPen(edgePen);
         p.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()));
-        p.setPen(m_muted);
-        p.drawText(QPointF(x + 3.0, area.bottom() - 4.0), name);
+        const double w = metrics.horizontalAdvance(name);
+        double at = leftward ? x - 3.0 - w : x + 3.0;
+        if (at < area.left() + 2.0) at = x + 3.0;
+        if (at + w > area.right() - 2.0) at = x - 3.0 - w;
+        if (at < area.left() + 2.0) return;
+        for (int line = 0; line < 2; ++line)
+        {
+            if (at < labelRight[line] + 4.0) continue;
+            p.setPen(m_muted);
+            p.drawText(QPointF(at, area.bottom() - 4.0 - line * (metrics.height() + 2.0)), name);
+            labelRight[line] = at + w;
+            return;
+        }
     };
-    if (band)
+    if (r.kind == analysis::FilterKind::Typed)
     {
-        edge(r.frequency1Hz, QStringLiteral("f₁"));
-        edge(r.frequency2Hz, QStringLiteral("f₂"));
+        // Coefficients typed: no edge was given.
+    }
+    else if (r.fromTemplate)
+    {
+        // A template: its edges, in the order along the frequencies (each label on the side of its band).
+        switch (r.response)
+        {
+            case qacq::dsp::FilterResponse::LowPass:
+                edge(r.passEdge1Hz, QStringLiteral("fp"), true);
+                edge(r.stopEdge1Hz, QStringLiteral("fa"), false);
+                break;
+            case qacq::dsp::FilterResponse::HighPass:
+                edge(r.stopEdge1Hz, QStringLiteral("fa"), true);
+                edge(r.passEdge1Hz, QStringLiteral("fp"), false);
+                break;
+            case qacq::dsp::FilterResponse::BandPass:
+                edge(r.stopEdge1Hz, QStringLiteral("fa₁"), true);
+                edge(r.passEdge1Hz, QStringLiteral("fp₁"), false);
+                edge(r.passEdge2Hz, QStringLiteral("fp₂"), true);
+                edge(r.stopEdge2Hz, QStringLiteral("fa₂"), false);
+                break;
+            case qacq::dsp::FilterResponse::BandStop:
+                edge(r.passEdge1Hz, QStringLiteral("fp₁"), true);
+                edge(r.stopEdge1Hz, QStringLiteral("fa₁"), false);
+                edge(r.stopEdge2Hz, QStringLiteral("fa₂"), true);
+                edge(r.passEdge2Hz, QStringLiteral("fp₂"), false);
+                break;
+        }
+    }
+    else if (band)
+    {
+        edge(r.frequency1Hz, QStringLiteral("f₁"), true);
+        edge(r.frequency2Hz, QStringLiteral("f₂"), false);
     }
     else
     {
-        edge(r.frequency1Hz, QStringLiteral("fc"));
+        edge(r.frequency1Hz, QStringLiteral("fc"), false);
     }
+    if (templateShown()) paintTemplate(p, area, map);
 
     // The curves.
     p.setRenderHint(QPainter::Antialiasing, true);
@@ -1000,6 +1057,56 @@ void ResponsePlot::paintFrequencies(QPainter &p, const QRectF &area)
     paintLegend(p, area);
     if (m_kind == Kind::Phase && !m_design->phaseUnwrapped())
         paintNote(p, area, tr("Phase entre ±180° : ce FIR n'est pas symétrique, et ses zéros ne sont pas calculés."));
+}
+
+bool ResponsePlot::templateShown() const
+{
+    return m_kind == Kind::Gain && m_design && m_design->ok() && m_design->recipe.fromTemplate &&
+           m_design->recipe.kind != analysis::FilterKind::Typed;
+}
+
+// The template on the gain: where it must not go, shaded (above its pass band, below it, above its stop band),
+// edged by a line; at the gain of the output (the zones are those of the filter at 0 dB, times g).
+void ResponsePlot::paintTemplate(QPainter &p, const QRectF &area, const plot::YMap &map)
+{
+    const analysis::TemplateZones z = analysis::templateZones(m_design->recipe);
+    const double g = m_design->gain;
+    const auto y = [&](double linear) {
+        const double v = linear * g;
+        const double shown = m_decibels ? (v > 0.0 ? std::max(kFloorDb, 20.0 * std::log10(v)) : kFloorDb) : v;
+        return std::clamp(map.toPixel(shown), area.top(), area.bottom());
+    };
+    const auto x = [&](double f) { return std::clamp(xOf(f, area), area.left(), area.right()); };
+    const QColor fill = faded(m_warning, 0.12);
+    const QPen line(faded(m_warning, 0.75), 1.2);
+    p.save();
+    p.setClipRect(area);
+    p.setRenderHint(QPainter::Antialiasing, false);
+    const auto zone = [&](double f0, double f1, double top, double bottom) {
+        const double x0 = x(f0), x1 = x(f1);
+        if (x1 - x0 < 0.5 || bottom - top < 0.5) return;
+        p.fillRect(QRectF(x0, top, x1 - x0, bottom - top), fill);
+    };
+    const auto bound = [&](double f0, double f1, double level) {
+        p.setPen(line);
+        const double at = std::round(level) + 0.5;
+        p.drawLine(QPointF(x(f0), at), QPointF(x(f1), at));
+    };
+    for (const std::array<double, 2> &b : z.passBands)
+    {
+        const double high = y(z.passHigh), low = y(z.passLow);
+        zone(b[0], b[1], area.top(), high);
+        zone(b[0], b[1], low, area.bottom());
+        bound(b[0], b[1], high);
+        bound(b[0], b[1], low);
+    }
+    for (const std::array<double, 2> &b : z.stopBands)
+    {
+        const double high = y(z.stopHigh);
+        zone(b[0], b[1], area.top(), high);
+        bound(b[0], b[1], high);
+    }
+    p.restore();
 }
 
 void ResponsePlot::paintSamples(QPainter &p, const QRectF &area)
@@ -1203,9 +1310,12 @@ void ResponsePlot::paintPlane(QPainter &p, const QRectF &area)
         }
     };
     p.setPen(QPen(faded(m_text, 0.45), 1.0));
-    mark(r.frequency1Hz);
-    if (r.response == qacq::dsp::FilterResponse::BandPass || r.response == qacq::dsp::FilterResponse::BandStop)
-        mark(r.frequency2Hz);
+    if (r.kind != analysis::FilterKind::Typed)
+    {
+        mark(r.frequency1Hz);
+        if (r.response == qacq::dsp::FilterResponse::BandPass || r.response == qacq::dsp::FilterResponse::BandStop)
+            mark(r.frequency2Hz);
+    }
 
     // Zeros (○) and poles (×), how many where several meet.
     int outside = 0;

@@ -339,7 +339,7 @@ Item {
                 enabled: root.hasTimeCurves || (root.hasSpectra && root.analysis.hasResult)
                 tip: qsTr("Les courbes du temps ou les spectres en CSV, pour un tableur (virgule décimale) ; le signal lui-même : Exporter… en haut")
                 onClicked: exportMenu.popup(exportButton, 0, exportButton.height)
-                Menu {
+                FitMenu {
                     id: exportMenu
                     MenuItem {
                         text: qsTr("Courbes du temps (CSV)…")

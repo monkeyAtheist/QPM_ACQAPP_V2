@@ -179,10 +179,12 @@ QtObject {
 
     // ---- Filters ----
     readonly property var filterKinds: [
-        { key: "iir", name: qsTr("RII : récursif (Butterworth, Chebyshev, Bessel)"),
+        { key: "iir", name: qsTr("RII : récursif (Butterworth, Chebyshev, Bessel, elliptique)"),
           tip: qsTr("Réponse impulsionnelle infinie : des flancs raides pour peu de calcul ; phase non linéaire") },
-        { key: "fir", name: qsTr("RIF : non récursif (méthode de la fenêtre)"),
-          tip: qsTr("Réponse impulsionnelle finie : phase linéaire et toujours stable ; plus de coefficients") }
+        { key: "fir", name: qsTr("RIF : non récursif (fenêtre ou équiondulation)"),
+          tip: qsTr("Réponse impulsionnelle finie : phase linéaire et toujours stable ; plus de coefficients") },
+        { key: "typed", name: qsTr("Coefficients tapés (b, a)"),
+          tip: qsTr("H(z) = Σ b[k] z⁻ᵏ / Σ a[k] z⁻ᵏ, comme lfilter(b, a) de SciPy : des nombres ou des formules de k, des variables ; un RIF si a = 1") }
     ]
     readonly property var filterResponses: [
         { key: "lowpass", name: qsTr("Passe-bas"), tip: qsTr("Garde ce qui est en dessous de la coupure") },
@@ -194,7 +196,8 @@ QtObject {
         { key: "butterworth", name: "Butterworth", tip: qsTr("Le plus plat possible dans la bande passante, sans ondulation ; −3 dB à la coupure") },
         { key: "chebyshev1", name: "Chebyshev I", tip: qsTr("Une ondulation dans la bande passante pour un flanc plus raide ; à la coupure, −ondulation") },
         { key: "chebyshev2", name: "Chebyshev II", tip: qsTr("Plat dans la bande passante, ondulation dans la bande coupée (des zéros) ; à la fréquence donnée, l'atténuation") },
-        { key: "bessel", name: "Bessel", tip: qsTr("Un retard presque constant dans la bande : les formes passent sans dépassement ; flanc plus doux") }
+        { key: "bessel", name: "Bessel", tip: qsTr("Un retard presque constant dans la bande : les formes passent sans dépassement ; flanc plus doux") },
+        { key: "elliptic", name: qsTr("Elliptique (Cauer)"), tip: qsTr("Une ondulation dans les deux bandes pour le flanc le plus raide à ordre donné ; à la coupure, −ondulation, puis au moins l'atténuation dès la fréquence d'arrêt") }
     ]
     readonly property var firWindows: [
         { key: "rectangular", name: qsTr("Rectangulaire"), tip: qsTr("La transition la plus étroite, mais des lobes à −21 dB seulement") },
@@ -204,6 +207,17 @@ QtObject {
         { key: "blackmanHarris", name: qsTr("Blackman-Harris"), tip: qsTr("Lobes au-delà de −90 dB, la transition la plus large") },
         { key: "kaiser", name: qsTr("Kaiser (β)"), tip: qsTr("Le compromis réglé par β : 5 vers −54 dB, 8,6 vers −87 dB") }
     ]
+    // How a FIR is designed: one of the windows (as firWindows), or equiripple.
+    readonly property var firDesigns: [
+        { key: "rectangular", name: qsTr("Rectangulaire"), tip: qsTr("La transition la plus étroite, mais des lobes à −21 dB seulement") },
+        { key: "hann", name: qsTr("Hann"), tip: qsTr("Lobes vers −44 dB") },
+        { key: "hamming", name: qsTr("Hamming"), tip: qsTr("Lobes vers −53 dB : le choix habituel") },
+        { key: "blackman", name: qsTr("Blackman"), tip: qsTr("Lobes vers −74 dB, transition plus large") },
+        { key: "blackmanHarris", name: qsTr("Blackman-Harris"), tip: qsTr("Lobes au-delà de −90 dB, la transition la plus large") },
+        { key: "kaiser", name: qsTr("Kaiser (β)"), tip: qsTr("Le compromis réglé par β : 5 vers −54 dB, 8,6 vers −87 dB") },
+        { key: "equiripple", name: qsTr("Équiondulation (Parks-McClellan)"),
+          tip: qsTr("Les transitions données, l'erreur répartie au mieux entre les bandes (poids tirés de l'ondulation et de l'atténuation) : le RIF optimal à nombre de coefficients donné") }
+    ]
     readonly property var filterApplications: [
         { key: "causal", name: qsTr("Causale (comme en temps réel)"), short: qsTr("en causal"),
           tip: qsTr("Échantillon après échantillon : le retard et la phase du filtre, ce que ferait un microcontrôleur") },
@@ -211,5 +225,18 @@ QtObject {
           tip: qsTr("Une fois dans chaque sens : ni retard ni déphasage, gain au carré ; sur un enregistrement seulement") },
         { key: "aligned", name: qsTr("Alignée (RIF sans son retard)"), short: qsTr("aligné, sans retard"),
           tip: qsTr("Un RIF une fois, son retard de (N − 1)/2 échantillons retiré : le résultat reste en face de l'original") }
+    ]
+    // How a record is prolonged beyond its ends before filtering it at zero phase (forward, then backward).
+    readonly property var edgeExtensions: [
+        { key: "predicted", name: qsTr("Prédits (le signal continue)"), short: qsTr("prédits"),
+          tip: qsTr("Prédiction linéaire d'après les échantillons proches de chaque bord : une somme de sinusoïdes continue telle quelle, ce qui s'éteint continue de s'éteindre ; pas de bouffée aux bords") },
+        { key: "odd", name: qsTr("Symétrie impaire (comme SciPy)"), short: qsTr("impairs"),
+          tip: qsTr("2·x[0] − x[k], le choix de filtfilt de SciPy et MATLAB : garde une tendance ; un signal qui commence sur une crête y fait une bouffée") },
+        { key: "even", name: qsTr("Miroir (symétrie paire)"), short: qsTr("en miroir"),
+          tip: qsTr("x[k] : garde une crête ; un signal qui commence en pente y fait une bouffée") },
+        { key: "constant", name: qsTr("Constants (premier et dernier échantillon)"), short: qsTr("constants"),
+          tip: qsTr("Le premier et le dernier échantillon répétés") },
+        { key: "none", name: qsTr("Non prolongés"), short: qsTr("non prolongés"),
+          tip: qsTr("Le filtre part du régime établi du premier échantillon : le début et la fin gardent leur transitoire") }
     ]
 }

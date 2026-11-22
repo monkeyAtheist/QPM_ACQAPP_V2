@@ -742,7 +742,9 @@ Variables parseVariables(std::string_view text, std::span<const std::string> nam
         }
         if (std::find(names.begin(), names.end(), name) != names.end())
         {
-            out.error = "Variables : « " + name + " » est déjà défini ici (rang de l'harmonique, f0…) : choisissez un autre nom.";
+            std::string listed;
+            for (const std::string &reserved : names) listed += (listed.empty() ? "" : ", ") + reserved;
+            out.error = "Variables : « " + name + " » est déjà un nom des formules (" + listed + ") : choisissez un autre nom.";
             return out;
         }
         if (std::find(out.names.begin(), out.names.end(), name) != out.names.end())

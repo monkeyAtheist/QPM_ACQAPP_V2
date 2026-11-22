@@ -60,7 +60,7 @@ Item {
                 enabled: !root.running
                 tip: qsTr("D'où viennent les données ; leurs réglages sont à droite")
                 onClicked: sourceMenu.popup(sourceButton, 0, sourceButton.height)
-                Menu {
+                FitMenu {
                     id: sourceMenu
                     Instantiator {
                         model: Choices.sources
@@ -88,7 +88,7 @@ Item {
                 enabled: !root.running
                 tip: qsTr("Le port série de la carte (la liste suit les branchements)")
                 onClicked: portMenu.popup(portButton, 0, portButton.height)
-                Menu {
+                FitMenu {
                     id: portMenu
                     Instantiator {
                         model: root.serialPorts
@@ -162,7 +162,7 @@ Item {
                 dropDown: true
                 tip: Choices.nameOf(Choices.edges, root.trig.edge)
                 onClicked: edgeMenu.popup(edgeButton, 0, edgeButton.height)
-                Menu {
+                FitMenu {
                     id: edgeMenu
                     Instantiator {
                         model: Choices.edges
@@ -185,7 +185,7 @@ Item {
                 dropDown: true
                 tip: Choices.triggerModes[Choices.indexOf(Choices.triggerModes, root.trig.mode)].tip
                 onClicked: modeMenu.popup(modeButton, 0, modeButton.height)
-                Menu {
+                FitMenu {
                     id: modeMenu
                     Instantiator {
                         model: Choices.triggerModes
@@ -217,7 +217,7 @@ Item {
                 enabled: root.acquisition.channelNames.length > 1
                 tip: qsTr("La voie qui déclenche")
                 onClicked: channelMenu.popup(channelButton, 0, channelButton.height)
-                Menu {
+                FitMenu {
                     id: channelMenu
                     Instantiator {
                         model: root.acquisition.channelNames

@@ -41,8 +41,15 @@ Dialog {
                 id: tabs
                 currentIndex: root.target
                 onCurrentIndexChanged: root.target = currentIndex
-                TabButton { text: qsTr("Arduino") }
-                TabButton { text: qsTr("C portable (STM32, ESP32, PIC…)") }
+                // Each tab as wide as its name (shared out equally, the longer one was cut).
+                TabButton {
+                    text: qsTr("Arduino")
+                    width: implicitWidth
+                }
+                TabButton {
+                    text: qsTr("C portable (STM32, ESP32, PIC…)")
+                    width: implicitWidth
+                }
             }
             Item { Layout.fillWidth: true }
             Label {

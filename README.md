@@ -28,8 +28,11 @@ dsp/                         qacq_dsp : cœur de traitement du signal C++20, san
   include/qacq/dsp/window.h        fenêtres périodiques (analyse) et symétriques (conception de FIR)
   include/qacq/dsp/spectrum.h      spectre d'amplitude et DSP, spectre I/Q centré, Welch, spectrogramme
   include/qacq/dsp/tone.h          fondamentale, harmoniques, THD, SINAD, SNR, SFDR, ENOB
-  include/qacq/dsp/filter_design.h IIR (Butterworth, Chebyshev I et II, Bessel) en sections, FIR fenêtrés
-  include/qacq/dsp/filtering.h     filtrage en sections, aller-retour sans déphasage, FIR par FFT
+  include/qacq/dsp/filter_design.h IIR (Butterworth, Chebyshev I et II, Bessel, elliptique) en sections, FIR
+                                    fenêtrés ou équiondulation (Parks-McClellan, `src/remez.cpp`), ordre minimal
+                                    d'un gabarit (comme buttord, cheb1ord, cheb2ord, ellipord)
+  include/qacq/dsp/filtering.h     filtrage en sections, aller-retour sans déphasage (bords prédits ou comme
+                                    SciPy), prédiction linéaire, FIR par FFT
   include/qacq/dsp/random.h        aléatoire reproductible (xoshiro256**, même suite sur tout compilateur)
   include/qacq/dsp/generator.h     générateur : formes échantillonnées ou limitées en bande (série de Fourier)
   include/qacq/dsp/modulation.h    AM, FM, PM, ASK, FSK, BPSK, QPSK ; porteuse réelle ou bande de base I/Q ;
@@ -84,9 +87,12 @@ analysis/                    qacq_analysis : l'analyse sans Qt (spectre d'une zo
                                     voies, porteuses modulées, ordre des voies, JSON, exemples
   include/qacq/analysis/expression.h  formules tapées (coefficients de Fourier…) : opérateurs, fonctions, variables
   include/qacq/analysis/playback.h    un signal prêt pour la carte son : voies, rééchantillonnage, niveau, format
-  include/qacq/analysis/filters.h     module Filtres : recette (RII, RIF fenêtré), conception, réponses (gain, phase
-                                    dépliée, retard, impulsion, indice), pôles et zéros, application à un signal
-                                    (causale, à phase nulle, alignée), JSON, exemples
+  include/qacq/analysis/filters.h     module Filtres : recette (RII, RIF fenêtré ou équiondulation, coefficients
+                                    tapés ; ordre choisi ou calculé d'après un gabarit), conception, réponses (gain,
+                                    phase dépliée, retard, impulsion, indice), pôles et zéros, ce qu'un gabarit
+                                    tient, application à un signal (causale, à phase nulle, alignée), JSON, exemples
+  include/qacq/analysis/filter_code.h le filtre pour microcontrôleur : flottant ou virgule fixe (Q15, Q31), mise à
+                                    l'échelle, arithmétique simulée au bit près, ce que l'arrondi fait, le C
 ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille de QTsignalApp V2)
   signal_plot.h                    le tracé (QQuickPaintedItem) : signal de la session, défilement, captures
   spectrum_plot.h                  le spectre : fréquences linéaires ou log, niveaux en dB ou linéaires, harmoniques
@@ -101,9 +107,11 @@ ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille d
   qml/GeneratorPanel.qml           onglet Composition : signal, voies, formes d'onde (WaveCard.qml), préréglages
   qml/FiltersView.qml              module Filtres : réponses du filtre (Concevoir), avant et après (Appliquer)
   qml/FilterPanel.qml              onglet Filtre : la recette en détail, ce qu'il fait, ses coefficients
+  qml/FilterCodeDialog.qml         le filtre en C pour microcontrôleur : format, mise à l'échelle, nom, .h et .c
   qml/ViewGroup.qml                groupe « Vue » du ruban, le même dans chaque module
 tests/                       qacq_tests (cœurs) et qacq_app_tests (couche Qt) : un groupe CTest par étiquette
   fixtures/scipy_reference.inc     résultats SciPy (générés, ne pas éditer)
+  codegen/generate.cpp             écrit le C de 52 filtres que le test codegen compile et dont il lance l'autotest
   signals.h                        signaux d'essai déterministes, identiques en C++ et en Python
 tools/reference/             make_scipy_reference.py : régénère les références SciPy
 scripts/                     build.cmd et run.cmd : compiler, tester et lancer sous Windows
@@ -152,9 +160,20 @@ Pour régénérer les références : `python tools/reference/make_scipy_referenc
 | SCPI | réponses ASCII seulement | blocs binaires IEEE 488.2 (formes d'onde d'oscilloscope), valeurs spéciales SCPI-99 (`[scpi]`) |
 | Tampon d'acquisition | verrou lecture-écriture, 65 536 échantillons par voie | tampon sans verrou, un producteur et un consommateur, vérifié sous ThreadSanitizer (`[ring]`) |
 
-Comparaison à SciPy 1.18 (19 filtres IIR, dont les cinq cas qui faisaient défaut) : réponse en fréquence à
-moins de 4e-9 dB, sortie de `sosfilt` et de `sosfiltfilt` à moins de 3e-12 en valeur relative ;
-coefficients `firwin` à 1e-13 ; Welch à 1e-9.
+Comparaison à SciPy 1.18 (26 filtres IIR, dont les cinq cas qui faisaient défaut et sept elliptiques) :
+réponse en fréquence à moins de 4e-9 dB, sortie de `sosfilt` et de `sosfiltfilt` à moins de 3e-12 en valeur
+relative ; `sosfiltfilt` et `filtfilt` avec chacun des `padtype` (odd, even, constant, None) à 1e-14 ; coefficients `firwin` à 1e-13 ; Parks-McClellan (`remez`) : le programme d'origine de McClellan,
+Parks et Rabiner (1973), celui que SciPy exécute, mêmes coefficients à 1e-16 sur les 7 cas de référence et
+sur 680 cas tirés au hasard, mêmes échecs aux mêmes itérations ; là où SciPy échoue sur un filtre long
+(« Failure to converge at iteration 2 » : le départ régulier égalise l'erreur à 1e-16, au niveau de
+l'arrondi), l'échange repart des fréquences extrêmes d'un filtre deux fois plus court et converge ; robuste à
+des cosinus faux de quelques unités du dernier chiffre (une autre bibliothèque mathématique) ; ordres minimaux
+d'un gabarit (`buttord`, `cheb1ord`, `cheb2ord`, `ellipord`) : 18 cas de référence et 12 000 tirés au hasard,
+mêmes ordres, mêmes fréquences à 1e-12, sauf pour des coupe-bande : environ un sur quarante a ici un ordre de
+moins (la minimisation bornée de SciPy, arrêtée à 1e-5 près sur tan(πf/fs), s'arrête loin du bord à basse
+fréquence quand le mieux est le bord lui-même : il est alors laissé où il était ; le gabarit tenu, vérifié sur
+chacun), et un sur mille a ses fréquences à 1e-4 près (la même minimisation, arrêtée ailleurs selon le dernier
+chiffre de la bibliothèque mathématique) ; Welch à 1e-9.
 
 ## Modulations, canal et taux d'erreur
 
@@ -475,40 +494,141 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
 
 Un filtre conçu, regardé, puis essayé sur un signal de la session. Deux onglets au ruban :
 
-- **Concevoir** : le type (**RII**, récursif : Butterworth, Chebyshev I, Chebyshev II, Bessel ; **RIF**, non
-  récursif, par la méthode de la fenêtre : rectangulaire, Hann, Hamming, Blackman, Blackman-Harris, Kaiser
-  de β réglable), la réponse (passe-bas, passe-haut, passe-bande, coupe-bande), la coupure ou les deux bords de
-  la bande, l'ordre (1 à 32 ; une bande en a deux fois plus) ou le nombre de coefficients (3 à 65 535),
-  l'ondulation (Chebyshev I) ou l'atténuation (Chebyshev II). Il est conçu pour la fréquence d'échantillonnage
+- **Concevoir** : le type (**RII**, récursif : Butterworth, Chebyshev I, Chebyshev II, Bessel, elliptique ;
+  **RIF**, non récursif, par la méthode de la fenêtre : rectangulaire, Hann, Hamming, Blackman,
+  Blackman-Harris, Kaiser de β réglable, ou en **équiondulation** par l'algorithme de Parks-McClellan ; ou des
+  **coefficients tapés**, voir plus bas), la
+  réponse (passe-bas, passe-haut, passe-bande, coupe-bande), la coupure ou les deux bords de la bande, l'ordre
+  (1 à 32 ; une bande en a deux fois plus) ou le nombre de coefficients (3 à 65 535 ; 4 095 en équiondulation),
+  l'ondulation (Chebyshev I, elliptique, équiondulation), l'atténuation (Chebyshev II, elliptique,
+  équiondulation) et la largeur des transitions (équiondulation). L'**elliptique** (Cauer) ondule dans les deux
+  bandes pour le flanc le plus raide à ordre donné : le panneau dit la fréquence d'arrêt calculée, à partir de
+  laquelle l'atténuation est tenue. L'**équiondulation** place les bandes à une demi-transition de part et
+  d'autre de chaque fréquence, pèse l'erreur de chacune d'après l'ondulation et l'atténuation demandées, et dit
+  ce qu'elle atteint (mesuré sur la réponse) et combien de coefficients le gabarit demande (estimation de
+  Kaiser) ; un gabarit qu'elle ne tient pas est signalé, avec ce qu'il faudrait. Des coefficients qui
+  mèneraient bien au-delà de 170 dB (au-delà de la précision des calculs, où l'échange ne converge plus) :
+  le filtre est calculé sur ceux du milieu, les autres valent 0, et c'est dit. **Sortie ▸ Gain** (dans les deux
+  onglets) : le signal filtré multiplié par 10^(gain/20), une fois quelle que soit l'application (à phase
+  nulle aussi, où le reste du filtre compte deux fois), de −120 à +120 dB ; les réponses le montrent, les
+  coefficients restent ceux du filtre à 0 dB, avec g en tête. Il est conçu pour la fréquence d'échantillonnage
   du signal choisi dans la liste (**fs du signal**), ou pour celle qu'on tape. Le RII est réalisé en sections
   du second ordre (la forme qui reste stable en pratique) ; un pôle à moins de 1e-5 du cercle unité est
   signalé. **Afficher** : le gain (dB ou linéaire), la phase (dépliée à partir des racines de chaque section,
   la même à tout zoom ; un saut de 180° là où un zéro est sur le cercle ; repliée sur demande), le temps de
   propagation de groupe (en échantillons), les réponses impulsionnelle et indicielle, les pôles (×) et les
   zéros (○) dans le plan z avec le cercle unité (ceux d'un RIF de plus de 512 coefficients ne sont pas
-  calculés). Le filtre tel qu'il sera appliqué s'y ajoute en pointillé quand il diffère (à phase nulle : le
+  calculés ; 0,3 s pour 511, chaque racine laissée dès qu'elle est trouvée). Le filtre tel qu'il sera appliqué s'y ajoute en pointillé quand il diffère (à phase nulle : le
   gain au carré, ni phase ni retard ; RIF aligné : sans son retard). Sur le tracé, la molette zoome, un
   glissement déplace, un glissement du bouton droit zoome sur ce qu'il couvre ; les valeurs sous le pointeur
   s'affichent en haut à droite (dans le plan z : le pôle ou le zéro le plus proche, son module, sa
-  fréquence). **Exemples** : passe-bas Butterworth 1 kHz, coupe-bande 50 Hz du secteur et passe-haut 0,5 Hz
-  contre la dérive (tous deux à phase nulle), bande téléphone 300 Hz à 3,4 kHz (Chebyshev I), Bessel 1 kHz,
-  RIF passe-bas de Hamming, RIF passe-bande de Kaiser.
+  fréquence). Les fréquences suivent le filtre, ici et dans les spectres d'Appliquer : logarithmiques quand son
+  bord le plus haut passe sous 3 % de fs/2 (20 Hz à 10 kHz, une bande autour de 50 Hz), linéaires quand il
+  repasse au-dessus ; entre deux, le bouton **Log** décide. **Exemples** : passe-bas Butterworth 1 kHz,
+  coupe-bande 50 Hz du secteur et passe-haut 0,5 Hz contre la dérive (tous deux à phase nulle), bande
+  téléphone 300 Hz à 3,4 kHz (Chebyshev I), elliptique 1 kHz d'ordre 5, Bessel 1 kHz, RIF passe-bas de
+  Hamming, RIF équiondulation 2 kHz, RIF passe-bande de Kaiser ; et, en coefficients tapés, moyenne glissante
+  sur 8 points, lissage exponentiel, encoche à 50 Hz (biquad), dérivée.
+- **Gabarit** (Concevoir ▸ Réglage) : l'ordre (un RIF : le nombre de coefficients) n'est plus choisi mais
+  calculé, le plus petit qui tient un gabarit : jusqu'où le filtre passe avec au plus **Amax** d'atténuation
+  (un RIF : d'ondulation, d'un extrême à l'autre), d'où il coupe avec au moins **Amin** (fp et fa ; fa₁, fp₁,
+  fp₂, fa₂ pour une bande, dans leur ordre le long des fréquences). RII : comme `buttord`, `cheb1ord`,
+  `cheb2ord` et `ellipord` de SciPy (mêmes ordres, mêmes fréquences ; un coupe-bande rapproche d'abord ses bords
+  de passage de sa bande coupée quand cela fait baisser l'ordre, par la même minimisation bornée que SciPy et
+  MATLAB, un bord laissé où il était quand cette recherche coûterait un ordre) : −Amax tombe juste sur les bords
+  de la bande passante, l'excédent va à la bande coupée ; Bessel, qui
+  n'a pas de formule, par sa réponse résolue (jusqu'à l'ordre 12). RIF : par une fenêtre, les coupures au milieu
+  des transitions (Kaiser : β tiré de l'écart demandé, comme `kaiserord`), ou en équiondulation sur les bandes
+  du gabarit (poids tirés de Amax et Amin) ; le plus petit nombre qui le tient est cherché à partir de
+  l'estimation de Kaiser, puis retenu (un long RIF en équiondulation demande quelques conceptions la première
+  fois : une demi-seconde à 2 000 coefficients). Le gabarit est tracé sur le gain (où le gain ne doit pas aller,
+  ombré) ; le panneau dit ce qui est tenu (mesuré), l'ordre réel que demande le gabarit, et ce qu'il faudrait
+  avec les autres familles et en RIF (« Butterworth d'ordre 8, Chebyshev d'ordre 5, elliptique d'ordre 4… »). Un
+  ordre au-delà de ce qui se conçoit (32, Bessel 12), une fenêtre qui ne descend pas assez (Hamming : guère plus
+  de 60 dB), plus de coefficients que le maximum : refusés, avec ce qui le tiendrait. Passer au gabarit part du
+  filtre tel qu'il est : le gabarit qu'il tient, lu sur son gain (où il sort de la bande passante, où il entre
+  dans la bande coupée, arrondi à 3 chiffres vers un gabarit plus facile ; un RIF par fenêtre : ses transitions
+  rendues symétriques autour de ses coupures), d'où un ordre au plus égal ; ou le gabarit qu'il avait, si le
+  filtre le tient encore. Revenir à l'ordre choisi part du filtre calculé (son ordre, ses fréquences, ses
+  coefficients). Exemples : passe-bas elliptique par
+  gabarit (1 kHz, 60 dB dès 1,5 kHz : ordre 6), RIF passe-bande en équiondulation (1 kHz à 3 kHz).
+- **Coefficients tapés** (type **b, a**) : H(z) = Σ b[k] z⁻ᵏ / Σ a[k] z⁻ᵏ, soit y[n] = b[0] x[n] + b[1] x[n − 1]
+  + … − a[1] y[n − 1] − …, comme `lfilter(b, a)` de SciPy ; un RIF si a = 1. Dans le panneau Filtre : b et a
+  en listes de nombres ou de formules séparés par « ; » (ou « , » suivie d'une espace, ou un par ligne ; une
+  liste de SciPy, de NumPy, `array([…])` compris, ou de MATLAB, `[1 -2 1]`, se colle telle quelle ; « 0,5 »
+  est un nombre, « 1,2,3 » trois), ou une seule formule de k avec le nombre de coefficients (b = 1/N, N fois :
+  une moyenne glissante) ; des variables (« N = 8 ; w0 = 2 pi 50/fs ») ; les formules connaissent k, fs,
+  Te = 1/fs, pi, e et les fonctions du générateur. Ce que donne chaque liste s'affiche sous elle. Tout est
+  divisé par a[0] (nul : refusé) ; les zéros en tête de b sont un retard. Un RII tapé est réalisé en sections
+  du second ordre à partir de ses racines (un biquad tel quel) : les racines en z = ±1 du numérateur, souvent
+  multiples (le (1 + z⁻¹)^N d'un Butterworth), sont mises à part exactement, les autres affinées en long
+  double ; un Butterworth d'ordre 6 tapé depuis SciPy redonne le filtre à 1e-12, un d'ordre 8 à 1 kHz sur
+  48 kHz à 7e-8. Des pôles que b et a placent mal (une coupure très basse, un ordre élevé : chaque chiffre
+  compte) sont signalés. Un pôle hors du cercle unité : instable, signalé, ses réponses montrées (la réponse
+  impulsionnelle tant qu'elle grandit d'un facteur un million), mais il n'est pas appliqué ; sur le cercle (un
+  intégrateur, un oscillateur) : appliqué en causal seulement. Au plus 257 b et 257 a pour un RII (ordre
+  256), 65 535 b pour un RIF.
 - **Appliquer** : le signal choisi dans la liste, une de ses voies, **avant et après** (superposés, ou une
   bande chacun) et leurs spectres ; l'aperçu porte sur les 4 194 304 premiers échantillons et se calcule sur
   son propre thread, le plus récent l'emportant. **Application** : **causale** (échantillon après échantillon,
   ce que ferait un microcontrôleur : avec le retard et la phase du filtre), **à phase nulle** (aller puis
-  retour sur l'enregistrement prolongé par symétrie impaire à ses deux bouts, comme `filtfilt` de SciPy : ni
-  retard ni déphasage, l'atténuation doublée) ou **alignée** (un RIF une fois, son retard de (N − 1)/2
-  retiré). **Écouter** l'aperçu, avant ou après. Un signal échantillonné autrement que le filtre est refusé
+  retour, comme `filtfilt` de SciPy : ni retard ni déphasage, l'atténuation doublée) ou **alignée** (un RIF
+  une fois, son retard de (N − 1)/2 retiré). À phase nulle, **Bords** : comment l'enregistrement est prolongé
+  au-delà de ses bouts pour que le filtre y démarre comme si le signal continuait. **Prédits** (par défaut) :
+  par prédiction linéaire d'ordre 96 sur les 4 096 échantillons de chaque bord, en moindres carrés (avant et
+  arrière pour un signal régulier, avant seulement pour un signal qui s'éteint ou qui grandit), aussi loin que
+  le filtre sonne (sa réponse retombée à 1e-6) ; une somme de sinusoïdes continue telle quelle, ce qui s'éteint
+  continue de s'éteindre jusqu'à zéro, un enregistrement au repos reste au repos. **Symétrie impaire**
+  (2·x[0] − x[k], le choix de SciPy et de MATLAB : garde une tendance, mais un signal qui commence sur une
+  crête y fait une bouffée), **miroir**, **constants** ou **non prolongés** (`padtype` odd, even, constant et
+  None de SciPy : mêmes résultats à 1e-14). Mesuré sur des enregistrements de quelques secondes comparés au
+  même signal filtré au milieu d'un enregistrement bien plus long (écart au pire près des bords, rapporté au
+  signal filtré) : l'AM d'une porteuse qui commence sur une crête, 1e-6 prédit contre 4 en symétrie impaire ;
+  trois sinus à travers un passe-bande étroit, 0,002 contre 1 ; une dérive lente sous un passe-haut à 0,5 Hz,
+  de 0,05 à 0,4 selon fs contre 0,4 à 0,7 ; un carré, du bruit : jamais plus mal que la symétrie impaire. Un
+  filtre qui sonne sur plus d'un dixième de l'enregistrement est signalé, avec sa durée même quand elle dépasse
+  l'enregistrement : à moins de cette durée des bords, le résultat dépend de ce que faisait le signal avant et
+  après, que l'enregistrement ne dit pas ; et quand les bords sont prolongés bien moins longtemps (comme SciPy,
+  ou pas du tout), c'est la mise en route du filtre qu'on voit. Ainsi 40 Hz de bande à 10,5 kHz (ordre 10) sur
+  20 ms d'AM : le filtre sonne 234 ms ; prédits, seule la bande latérale sort, 0,25 V partout ; prolongés de
+  63 échantillons comme SciPy, ou pas du tout, le filtre n'a pas le temps de démarrer (0,2 µV au plus, comme
+  `sosfiltfilt`).
+  **Écouter** l'aperçu, avant ou après. Un signal échantillonné autrement que le filtre est refusé
   (le filtre ne ferait pas ce que montrent ses réponses) ; un signal à trous est filtré d'un seul tenant, et
   c'est dit.
+- **Code C** (Concevoir ▸ Microcontrôleur) : le filtre tel qu'une carte l'exécute, en causal, échantillon
+  après échantillon, en C99 que prend tout compilateur pour microcontrôleur (déclarations en tête de bloc,
+  pas de débordement d'un `int` de 16 bits) : un `nom.h` et un `nom.c` (`nom_init`, `nom_echantillon`,
+  `nom_bloc`, `nom_autotest`), à copier ou à enregistrer dans un dossier. **Flottant** `float` ou `double` :
+  sections en forme directe II transposée, RIF sur une ligne à retard doublée (les N derniers échantillons
+  toujours à la suite), coefficients symétriques repliés (moitié moins de multiplications). **Virgule fixe**
+  Q15 (échantillons et coefficients `int16_t`, accumulateur `int32_t`, ou `int64_t` quand 32 bits coûteraient
+  de la précision, comme CMSIS-DSP) ou Q31 (`int32_t`, accumulateur `int64_t`) : sections en forme directe I,
+  chacune dans son format Qd choisi pour que l'accumulateur ne puisse pas déborder quels que soient les
+  échantillons, sortie arrondie et saturée ; b2 = b0 gardé à l'arrondi (un coupe-bande garde ses zéros sur le
+  cercle) ; mise à l'échelle **somme** (par défaut : la somme des |h| de l'entrée à chaque section au plus
+  0,99, rien ne peut déborder, aucune oscillation de débordement) ou **crête** (le gain au plus 0,99 à toute
+  fréquence : un sinus établi pleine échelle ne déborde pas, quelques dB de bruit en moins, mais un
+  transitoire peut déborder, et c'est dit) ; le gain que la dernière section ne peut prendre sans déborder va
+  dans un étage de sortie. Ce que l'arrondi fait est dit : réponse des coefficients arrondis (près du maximum,
+  au pire, plancher de la bande coupée), pôle le plus proche du cercle, bruit de calcul (rapport signal sur
+  bruit sur un bruit blanc contre le calcul en double), saturations d'un sinus pleine échelle, gain crête ; ce
+  qui ne suffit pas est signalé (« prenez Q31 ou du flottant »), ce qui serait instable une fois arrondi est
+  refusé. `nom_autotest()` passe 32 échantillons et compare aux sorties calculées ici par la même
+  arithmétique, puis une impulsion suivie de zéros aussi longtemps que le filtre répond, dont il compare la
+  somme des (n + 1) y[n] (tous les coefficients y comptent) : au bit près en virgule fixe, à l'arrondi près en
+  flottant (une multiplication-addition fusionnée, un autre ordre des calculs : 1e-4 près pour un RII en float).
+  Vérifié par le test `codegen` : 52 filtres dans les quatre formats et les deux mises à l'échelle, compilés
+  en C99 par le compilateur C du build avec ses avertissements stricts, leurs autotests sans écart (et ici
+  aussi en C89, avec Clang `-Weverything`, en C++ et avec FMA).
 - **Ajouter** (dans les deux onglets) : le signal choisi, toutes ses voies filtrées, devient un signal de la
-  session (« Signal · passe-bas 1 kHz »), en une étape d'annulation ; ses notes disent le filtre et ce qu'il
-  fait, sa provenance garde la recette.
+  session (« Signal · passe-bas 1 kHz », « AM · passe-bande 10 kHz à 12 kHz, +6 dB »), en une étape
+  d'annulation ; ses notes disent le filtre et ce qu'il fait, sa provenance garde la recette.
 
-Le panneau de droite (**Filtre**) reprend la recette champ par champ, dit ce que fait le filtre (sections,
-stabilité, retards à quelques fréquences) et montre ses coefficients, un par ligne (« b0 = … » à « a2 = … »
-pour chaque section d'un RII, a0 = 1 ; « h[k] = … » pour un RIF, les 600 premiers) ; **Copier les
+Le panneau de droite (**Filtre**) reprend la recette champ par champ (gain en sortie compris), dit ce que fait
+le filtre (sections, stabilité, retards à quelques fréquences, ce qu'il atteint) et montre ses coefficients, un par ligne (« b0 = … » à « a2 = … »
+pour chaque section d'un RII, a0 = 1 ; « h[k] = … » pour un RIF, les 600 premiers ; des coefficients tapés :
+b[k] et a[k] divisés par a[0], puis les sections) ; **Copier les
 coefficients** les copie tous, en pleine précision, avec ce qu'est le filtre en tête. **Mesures** donne celles
 de l'aperçu, avant et après. La recette est retenue d'une fois sur l'autre.
 
@@ -594,10 +714,11 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
    Analyse en un module (audit du 21/11), export des courbes, garde-fou de la fréquence d'échantillonnage,
    spectrogramme en courbe ajoutée, générateur (voies, formes d'onde additionnées, aperçu, séries de Fourier
    par leurs coefficients, motif dessiné, récurrence, écoute sur la carte son, opérations entre voies,
-   porteuses AM, FM, PM), filtres (RII Butterworth, Chebyshev I et II, Bessel ; RIF fenêtré ; réponses, plan z,
-   application causale, à phase nulle ou alignée) : faits ; puis, pour les filtres, elliptique et Parks-McClellan,
-   coefficients tapés, code C pour microcontrôleur et conception par gabarit ; modulations numériques,
-   démodulation et taux d'erreur (module Modulations, sur `dsp/modulation` et `dsp/receiver`) ; VISA pour les
-   instruments en USB. À étudier : réponse en fréquence entre deux voies (gain, phase, marges),
-   distorsion pondérée A.
+   porteuses AM, FM, PM), filtres (RII Butterworth, Chebyshev I et II, Bessel, elliptique ; RIF fenêtré ou en
+   équiondulation de Parks-McClellan ; coefficients tapés ; gain en sortie ; réponses, plan z, application
+   causale, à phase nulle aux bords prédits ou alignée ; code C pour microcontrôleur, flottant ou virgule fixe ;
+   conception par gabarit, l'ordre calculé) : faits ; puis modulations numériques, démodulation et taux d'erreur (module Modulations, sur
+   `dsp/modulation` et `dsp/receiver`) ; VISA pour les instruments en USB. À étudier : réponse en fréquence
+   entre deux voies (gain, phase, marges), distorsion pondérée A ; opérations sur un signal de la session
+   (×k, +c, entre voies) dans Signaux.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.

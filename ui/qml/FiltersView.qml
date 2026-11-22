@@ -3,12 +3,15 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Qacq.App
 
-// Module "Filtres": a filter designed (IIR Butterworth, Chebyshev I or II, Bessel; FIR by the window
-// method), what it does seen along the frequencies (gain, phase, group delay), along the samples (impulse
-// and step responses) and in the z-plane (poles and zeros); then tried on the signal chosen in the list:
+// Module "Filtres": a filter designed (IIR Butterworth, Chebyshev I or II, Bessel, elliptic; FIR by the
+// window method or equiripple, Parks-McClellan; its order chosen, or the least that holds a template: Gabarit,
+// the template then drawn on the gain), what it does seen along the frequencies (gain, phase, group
+// delay), along the samples (impulse and step responses) and in the z-plane (poles and zeros), with a gain at
+// its output; a band low in the spectrum shown on logarithmic frequencies; then tried on the signal chosen:
 // one channel before and after, with their spectra, applied causal, at zero phase or aligned; and the whole
-// signal filtered into the session in one click (undoable). The recipe is remembered from one run to the
-// next; its detail and its coefficients are in the right panel (Filtre).
+// signal filtered into the session in one click (undoable); or written in C for a microcontroller (Code C).
+// The recipe is remembered from one run to the next; its detail and its coefficients are in the right panel
+// (Filtre).
 Item {
     id: root
     required property var filters
@@ -31,8 +34,59 @@ Item {
     readonly property var recipe: filters.recipe
     readonly property var design: filters.design
     readonly property bool designed: design.ok === true
-    readonly property bool iir: recipe.kind !== "fir"
-    readonly property bool band: recipe.response === "bandpass" || recipe.response === "bandstop"
+    // Designed (IIR of a family, FIR by a window or equiripple), or coefficients typed (b and a).
+    readonly property bool typed: recipe.kind === "typed"
+    readonly property bool iir: recipe.kind === "iir"
+    readonly property bool fir: recipe.kind === "fir"
+    readonly property bool band: !typed && (recipe.response === "bandpass" || recipe.response === "bandstop")
+    // A FIR: by a window (its key), or equiripple (Parks-McClellan).
+    readonly property bool equiripple: fir && recipe.firDesign === "equiripple"
+    readonly property string firDesign: equiripple ? "equiripple" : (recipe.window ?? "hamming")
+    // What the family asks for: a ripple (Chebyshev I, elliptic, equiripple), an attenuation (Chebyshev II,
+    // elliptic, equiripple), the width of the transitions (equiripple).
+    readonly property bool hasRipple: (iir && (recipe.family === "chebyshev1" || recipe.family === "elliptic")) || equiripple
+    readonly property bool hasAttenuation: (iir && (recipe.family === "chebyshev2" || recipe.family === "elliptic")) || equiripple
+    // The order (the taps) computed from a template (gabarit): the edges of its bands, Amax over the pass band,
+    // Amin over the stop band; the recipe as designed has what was computed.
+    readonly property bool fromTemplate: !typed && recipe.fromTemplate === true
+    readonly property var designedRecipe: design.recipe ?? recipe
+    // The edges of the template in their order along the frequencies, as its response has them.
+    readonly property var templateEdges: {
+        const edge = (key, label, tip) => ({ key: key, label: label, tip: tip })
+        switch (recipe.response) {
+        case "highpass":
+            return [edge("stop1", "fa", qsTr("La bande coupée va jusqu'à fa : au moins Amin d'atténuation en deçà")),
+                    edge("pass1", "fp", qsTr("La bande passante commence à fp : au plus Amax d'atténuation au-delà"))]
+        case "bandpass":
+            return [edge("stop1", "fa₁", qsTr("La bande coupée basse va jusqu'à fa₁ (au moins Amin d'atténuation)")),
+                    edge("pass1", "fp₁", qsTr("La bande passante commence à fp₁ (au plus Amax d'atténuation)")),
+                    edge("pass2", "fp₂", qsTr("La bande passante va jusqu'à fp₂")),
+                    edge("stop2", "fa₂", qsTr("La bande coupée haute commence à fa₂"))]
+        case "bandstop":
+            return [edge("pass1", "fp₁", qsTr("La bande passante basse va jusqu'à fp₁ (au plus Amax d'atténuation)")),
+                    edge("stop1", "fa₁", qsTr("La bande coupée commence à fa₁ (au moins Amin d'atténuation)")),
+                    edge("stop2", "fa₂", qsTr("La bande coupée va jusqu'à fa₂")),
+                    edge("pass2", "fp₂", qsTr("La bande passante haute commence à fp₂"))]
+        default:
+            return [edge("pass1", "fp", qsTr("La bande passante va jusqu'à fp : au plus Amax d'atténuation en deçà")),
+                    edge("stop1", "fa", qsTr("La bande coupée commence à fa : au moins Amin d'atténuation au-delà"))]
+        }
+    }
+    // Its highest edge under 3 % of fs/2 (20 Hz at 10 kHz, a band around 50 Hz): on linear frequencies all of
+    // it would be a sliver at the left. The frequencies follow the filter when it crosses that line, either way
+    // (logarithmic below, linear above); in between, the button « Log » decides. (A template: its highest edge.)
+    readonly property real topEdge: fromTemplate ? (band ? Math.max(recipe.pass2 ?? 0, recipe.stop2 ?? 0)
+                                                         : Math.max(recipe.pass1 ?? 0, recipe.stop1 ?? 0))
+                                    : band ? (recipe.frequency2 ?? 0) : (recipe.frequency1 ?? 0)
+    readonly property bool lowBand: !typed && topEdge > 0 && topEdge < 0.03 * (recipe.sampleRate ?? 0) / 2
+    onLowBandChanged: followScale()
+    function followScale() {
+        responsePlot.logFrequency = root.lowBand
+        if ((root.settings.logFrequency === true) !== root.lowBand)
+            root.analysis.setSettings({ logFrequency: root.lowBand })
+    }
+    // The gain at the output, as a factor ("×2").
+    readonly property real gainFactor: Math.pow(10, (recipe.gain ?? 0) / 20)
     readonly property var input: filters.input
     readonly property bool hasInput: (input.name ?? "").length > 0
     readonly property var inputChannels: input.channels ?? []
@@ -82,6 +136,7 @@ Item {
         const saved = appSettings.value("filters/recipe", "")
         if (saved && saved.length > 0)
             filters.restoreRecipe(saved)
+        Qt.callLater(() => { if (root.lowBand) root.followScale() })
     }
     Timer {
         id: rememberTimer
@@ -162,7 +217,7 @@ Item {
         signal chosen(string key)
         dropDown: true
         onClicked: choiceMenu.popup(choice, 0, choice.height)
-        Menu {
+        FitMenu {
             id: choiceMenu
             Instantiator {
                 model: choice.options
@@ -183,6 +238,25 @@ Item {
                 onObjectAdded: (index, object) => choiceMenu.insertItem(index, object)
                 onObjectRemoved: (index, object) => choiceMenu.removeItem(object)
             }
+        }
+    }
+    // The group "Sortie": the gain at the output (both tabs: what it does is seen on the response and on the
+    // signal filtered).
+    component OutputGroup: RibbonGroup {
+        id: output
+        property var view: null
+        title: qsTr("Sortie")
+        RibbonField {
+            anchors.verticalCenter: parent.verticalCenter
+            label: qsTr("Gain")
+            fieldWidth: 64
+            unit: "dB"
+            minimum: -120
+            maximum: 120
+            value: output.view ? (output.view.recipe.gain ?? 0) : 0
+            tip: qsTr("L'amplification du signal filtré : +6 dB le double, −6 dB la moitié (ici ×%1). Une fois, quelle que soit l'application : à phase nulle aussi, où le reste du filtre compte deux fois.")
+                 .arg(output.view ? Units.compact(output.view.gainFactor, "", 4) : "1")
+            onEdited: (v) => { if (output.view) output.view.set({ gain: v }) }
         }
     }
     // A button of the group "Afficher": one of the responses of `plot`.
@@ -231,7 +305,7 @@ Item {
                 dropDown: true
                 tip: qsTr("Des filtres tout prêts : passe-bas, coupe-bande 50 Hz, passe-haut contre la dérive, bande téléphone, RIF…")
                 onClicked: examplesMenu.popup(examplesButton, 0, examplesButton.height)
-                Menu {
+                FitMenu {
                     id: examplesMenu
                     Instantiator {
                         model: root.filters.examples
@@ -264,17 +338,31 @@ Item {
         }
         RibbonGroup {
             visible: root.ribbonTab === 0
+            title: qsTr("Microcontrôleur")
+            RibbonButton {
+                glyph: "chip"
+                text: qsTr("Code C")
+                enabled: root.designed
+                tip: root.designed ? qsTr("Le filtre en C pour microcontrôleur : flottant (float, double) ou virgule fixe (Q15, Q31), ce que l'arrondi lui fait, un autotest ; à copier ou enregistrer (.h et .c)")
+                                   : (root.design.error ?? "")
+                onClicked: codeDialog.open()
+            }
+        }
+        RibbonGroup {
+            visible: root.ribbonTab === 0
             title: qsTr("Filtre")
             ChoiceButton {
-                glyph: root.iir ? "iir" : "fir"
-                text: root.iir ? qsTr("RII") : qsTr("RIF")
+                glyph: root.typed ? "typed" : root.iir ? "iir" : "fir"
+                text: root.typed ? qsTr("b, a") : root.iir ? qsTr("RII") : qsTr("RIF")
                 options: Choices.filterKinds
                 current: root.recipe.kind ?? "iir"
-                tip: root.iir ? qsTr("Récursif (réponse impulsionnelle infinie) : peu de calcul pour des flancs raides ; sa phase n'est pas linéaire")
-                              : qsTr("Non récursif (réponse impulsionnelle finie) : phase linéaire, toujours stable ; il lui faut plus de coefficients")
+                tip: root.typed ? qsTr("Coefficients tapés : b[k] et a[k] de y[n] = Σ b[k] x[n − k] − Σ a[k] y[n − k], dans le panneau Filtre (F10)")
+                     : root.iir ? qsTr("Récursif (réponse impulsionnelle infinie) : peu de calcul pour des flancs raides ; sa phase n'est pas linéaire")
+                                : qsTr("Non récursif (réponse impulsionnelle finie) : phase linéaire, toujours stable ; il lui faut plus de coefficients")
                 onChosen: (key) => root.set({ kind: key })
             }
             ChoiceButton {
+                visible: !root.typed
                 glyph: "response"
                 text: root.nameOf(Choices.filterResponses, root.recipe.response ?? "")
                 options: Choices.filterResponses
@@ -288,23 +376,46 @@ Item {
                 text: root.nameOf(Choices.filterFamilies, root.recipe.family ?? "")
                 options: Choices.filterFamilies
                 current: root.recipe.family ?? "butterworth"
-                tip: qsTr("La forme de sa réponse : plate (Butterworth), plus raide avec une ondulation (Chebyshev), sans dépassement (Bessel)")
+                tip: qsTr("La forme de sa réponse : plate (Butterworth), plus raide avec une ondulation (Chebyshev), sans dépassement (Bessel), la plus raide avec une ondulation dans les deux bandes (elliptique)")
                 onChosen: (key) => root.set({ family: key })
             }
             ChoiceButton {
-                visible: !root.iir
+                visible: root.fir
                 glyph: "window"
-                text: root.nameOf(Choices.firWindows, root.recipe.window ?? "")
-                options: Choices.firWindows
-                current: root.recipe.window ?? "hamming"
-                tip: qsTr("La fenêtre qui tronque la réponse idéale : elle fixe le niveau des lobes hors de la bande et la largeur de la transition")
-                onChosen: (key) => root.set({ window: key })
+                text: root.equiripple ? qsTr("Équiondulation") : root.nameOf(Choices.firWindows, root.recipe.window ?? "")
+                options: Choices.firDesigns
+                current: root.firDesign
+                tip: root.equiripple ? qsTr("Parks-McClellan : les transitions données, l'erreur répartie au mieux entre les bandes ; le RIF optimal à nombre de coefficients donné")
+                                     : qsTr("La fenêtre qui tronque la réponse idéale : elle fixe le niveau des lobes hors de la bande et la largeur de la transition ; ou l'équiondulation (Parks-McClellan)")
+                onChosen: (key) => key === "equiripple" ? root.set({ firDesign: "equiripple" })
+                                                        : root.set({ firDesign: "window", window: key })
             }
         }
         RibbonGroup {
             visible: root.ribbonTab === 0
             title: qsTr("Réglage")
+            // The order chosen, or computed from a template.
+            RibbonButton {
+                visible: !root.typed
+                glyph: "template"
+                text: qsTr("Gabarit")
+                checked: root.fromTemplate
+                tip: root.fromTemplate ? qsTr("Ordre calculé : le plus petit qui tient le gabarit (jusqu'où il passe avec au plus Amax d'atténuation, d'où il coupe avec au moins Amin). Cliquer revient à l'ordre et aux fréquences choisis, en partant du filtre calculé")
+                                       : qsTr("Calculer l'ordre (un RIF : le nombre de coefficients) le plus petit qui tient un gabarit : jusqu'où il passe avec au plus Amax d'atténuation, d'où il coupe avec au moins Amin")
+                onClicked: root.set({ fromTemplate: !root.fromTemplate })
+            }
+            // Coefficients typed: in the panel, where there is room for them.
+            RibbonButton {
+                visible: root.typed
+                glyph: "typed"
+                text: qsTr("Coefficients")
+                primary: !root.designed
+                tip: root.designed ? qsTr("b[k] et a[k], des nombres ou des formules de k, et les variables : panneau Filtre (F10)")
+                                   : (root.design.error ?? "")
+                onClicked: root.designRequested()
+            }
             RibbonField {
+                visible: !root.typed && !root.fromTemplate
                 anchors.verticalCenter: parent.verticalCenter
                 label: root.band ? qsTr("f basse") : qsTr("Coupure")
                 fieldWidth: 80
@@ -318,7 +429,7 @@ Item {
                 onEdited: (v) => root.set({ frequency1: v })
             }
             RibbonField {
-                visible: root.band
+                visible: root.band && !root.fromTemplate
                 anchors.verticalCenter: parent.verticalCenter
                 label: qsTr("f haute")
                 fieldWidth: 80
@@ -330,64 +441,115 @@ Item {
                 tip: qsTr("Le haut de la bande, au-dessus de la fréquence basse")
                 onEdited: (v) => root.set({ frequency2: v })
             }
+            // The template: its edges in their order along the frequencies.
+            Repeater {
+                model: root.fromTemplate ? root.templateEdges.length : 0
+                delegate: RibbonField {
+                    required property int index
+                    readonly property var edge: root.templateEdges[index] ?? ({ key: "pass1", label: "", tip: "" })
+                    anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                    label: edge.label
+                    fieldWidth: 74
+                    unit: "Hz"
+                    minimum: 0
+                    maximum: 1e12
+                    value: root.recipe[edge.key] ?? 0
+                    invalid: !root.designed
+                    tip: edge.tip + qsTr(" (fs/2 = %1)").arg(Units.compact((root.recipe.sampleRate ?? 0) / 2, "Hz", 4))
+                    onEdited: (v) => {
+                        const change = {}
+                        change[edge.key] = v
+                        root.set(change)
+                    }
+                }
+            }
             RibbonField {
-                visible: root.iir
+                visible: root.iir && (!root.fromTemplate || root.designed)
                 anchors.verticalCenter: parent.verticalCenter
                 label: qsTr("Ordre")
                 fieldWidth: 46
                 minimum: 1
                 maximum: 32
-                value: root.recipe.order ?? 4
-                tip: root.band ? qsTr("L'ordre du prototype passe-bas (1 à 32) : la bande en a deux fois plus, chaque section du second ordre en porte deux")
-                               : qsTr("De 1 à 32 : chaque ordre de plus raidit le flanc de 6 dB par octave (Butterworth)")
+                readOnly: root.fromTemplate
+                value: root.fromTemplate ? (root.designedRecipe.order ?? 0) : (root.recipe.order ?? 4)
+                tip: root.fromTemplate ? qsTr("Calculé : le plus petit ordre qui tient le gabarit (ce qu'il faudrait avec les autres familles : panneau Filtre)")
+                     : root.band ? qsTr("L'ordre du prototype passe-bas (1 à 32) : la bande en a deux fois plus, chaque section du second ordre en porte deux")
+                                 : qsTr("De 1 à 32 : chaque ordre de plus raidit le flanc de 6 dB par octave (Butterworth)")
                 onEdited: (v) => root.set({ order: Math.round(v) })
             }
             RibbonField {
-                visible: !root.iir
+                visible: root.fir && (!root.fromTemplate || root.designed)
                 anchors.verticalCenter: parent.verticalCenter
                 label: qsTr("Coefficients")
                 fieldWidth: 66
                 minimum: 3
-                maximum: 65535
-                value: root.recipe.taps ?? 101
-                tip: qsTr("Le nombre N de coefficients (3 à 65 535) : plus il y en a, plus la transition est étroite ; le retard est de (N − 1)/2 échantillons. Un passe-haut ou un coupe-bande en veut un nombre impair.")
+                maximum: root.equiripple ? 4095 : 65535
+                readOnly: root.fromTemplate
+                value: root.fromTemplate ? (root.designedRecipe.taps ?? 0) : (root.recipe.taps ?? 101)
+                tip: root.fromTemplate ? qsTr("Calculé : le plus petit nombre de coefficients qui tient le gabarit ; le retard est de (N − 1)/2 échantillons")
+                     : root.equiripple ? qsTr("Le nombre N de coefficients (3 à 4 095) : plus il y en a, mieux le gabarit est tenu ; le retard est de (N − 1)/2 échantillons. Un passe-haut ou un coupe-bande en veut un nombre impair.")
+                                       : qsTr("Le nombre N de coefficients (3 à 65 535) : plus il y en a, plus la transition est étroite ; le retard est de (N − 1)/2 échantillons. Un passe-haut ou un coupe-bande en veut un nombre impair.")
                 onEdited: (v) => root.set({ taps: Math.round(v) })
             }
             RibbonField {
-                visible: root.iir && root.recipe.family === "chebyshev1"
+                visible: root.hasRipple || root.fromTemplate
                 anchors.verticalCenter: parent.verticalCenter
-                label: qsTr("Ondulation")
+                label: root.fromTemplate ? qsTr("Amax") : qsTr("Ondulation")
                 fieldWidth: 58
                 unit: "dB"
                 minimum: 0.001
                 maximum: 40
                 value: root.recipe.ripple ?? 1
-                tip: qsTr("L'ondulation permise dans la bande passante : plus elle est grande, plus le flanc est raide")
+                tip: root.fromTemplate ? (root.fir ? qsTr("L'ondulation permise au plus dans la bande passante, d'un extrême à l'autre")
+                                                   : qsTr("L'atténuation permise au plus dans la bande passante : le gain y reste entre 0 et −Amax dB"))
+                     : root.equiripple ? qsTr("L'écart permis dans la bande passante, d'un extrême à l'autre : avec l'atténuation, il fixe le poids de chaque bande")
+                                       : qsTr("L'ondulation permise dans la bande passante (le gain y reste entre 0 et −R dB) : plus elle est grande, plus le flanc est raide")
                 onEdited: (v) => root.set({ ripple: v })
             }
             RibbonField {
-                visible: root.iir && root.recipe.family === "chebyshev2"
+                visible: root.hasAttenuation || root.fromTemplate
                 anchors.verticalCenter: parent.verticalCenter
-                label: qsTr("Atténuation")
+                label: root.fromTemplate ? qsTr("Amin") : qsTr("Atténuation")
                 fieldWidth: 58
                 unit: "dB"
                 minimum: 1
                 maximum: 300
                 value: root.recipe.attenuation ?? 40
-                tip: qsTr("L'atténuation garantie dans la bande coupée, à partir de la fréquence donnée")
+                tip: root.fromTemplate ? qsTr("L'atténuation exigée au moins dans la bande coupée")
+                     : root.equiripple ? qsTr("Ce que la bande coupée doit atténuer au moins : ce qui est atteint est dit dans le panneau Filtre")
+                     : root.recipe.family === "elliptic" ? qsTr("L'atténuation garantie dans la bande coupée, à partir d'une fréquence d'arrêt calculée (dite dans le panneau Filtre)")
+                                                         : qsTr("L'atténuation garantie dans la bande coupée, à partir de la fréquence donnée")
                 onEdited: (v) => root.set({ attenuation: v })
             }
             RibbonField {
-                visible: !root.iir && root.recipe.window === "kaiser"
+                visible: root.equiripple && !root.fromTemplate
+                anchors.verticalCenter: parent.verticalCenter
+                label: qsTr("Transition")
+                fieldWidth: 70
+                unit: "Hz"
+                minimum: 1e-6
+                maximum: 1e12
+                value: root.recipe.transition ?? 200
+                tip: qsTr("La largeur de chaque transition, centrée sur sa fréquence : bande passante et bande coupée s'arrêtent à une demi-transition de part et d'autre")
+                onEdited: (v) => root.set({ transition: v })
+            }
+            RibbonField {
+                visible: root.fir && !root.equiripple && root.recipe.window === "kaiser" && (!root.fromTemplate || root.designed)
                 anchors.verticalCenter: parent.verticalCenter
                 label: "β"
                 fieldWidth: 46
                 minimum: 0
                 maximum: 50
-                value: root.recipe.kaiserBeta ?? 8.6
-                tip: qsTr("La forme de la fenêtre de Kaiser : 5 donne des lobes vers −54 dB, 8,6 vers −87 dB (une transition plus large)")
+                readOnly: root.fromTemplate
+                value: root.fromTemplate ? (root.designedRecipe.kaiserBeta ?? 0) : (root.recipe.kaiserBeta ?? 8.6)
+                tip: root.fromTemplate ? qsTr("Calculé d'après l'atténuation et l'ondulation demandées (formule de Kaiser)")
+                                       : qsTr("La forme de la fenêtre de Kaiser : 5 donne des lobes vers −54 dB, 8,6 vers −87 dB (une transition plus large)")
                 onEdited: (v) => root.set({ kaiserBeta: v })
             }
+        }
+        OutputGroup {
+            visible: root.ribbonTab === 0
+            view: root
         }
         RibbonGroup {
             visible: root.ribbonTab === 0
@@ -535,7 +697,7 @@ Item {
                 tip: root.hasInput ? qsTr("La voie de « %1 » montrée avant et après (« Ajouter » les filtre toutes)").arg(root.input.name)
                                    : qsTr("Choisissez un signal dans la liste de gauche")
                 onClicked: channelMenu.popup(channelButton, 0, channelButton.height)
-                Menu {
+                FitMenu {
                     id: channelMenu
                     Instantiator {
                         model: root.inputChannels
@@ -574,14 +736,31 @@ Item {
                 onClicked: root.set({ application: "zerophase" })
             }
             RibbonButton {
+                readonly property bool allowed: root.fir || (root.typed && root.design.fir === true)
                 glyph: "aligned"
                 text: qsTr("Alignée")
                 checked: root.recipe.application === "aligned"
-                enabled: !root.iir
-                tip: !root.iir ? qsTr("Le RIF une fois, son retard de (N − 1)/2 échantillons retiré : le signal filtré reste en face de l'original")
-                               : qsTr("Pour un RIF seulement (sa phase linéaire est un simple retard)")
+                enabled: allowed
+                tip: allowed ? qsTr("Le RIF une fois, son retard de (N − 1)/2 échantillons retiré : le signal filtré reste en face de l'original")
+                             : qsTr("Pour un RIF seulement (sa phase linéaire est un simple retard)")
                 onClicked: root.set({ application: "aligned" })
             }
+            ChoiceButton {
+                glyph: "edges"
+                text: qsTr("Bords")
+                options: Choices.edgeExtensions
+                current: root.recipe.edges ?? "predicted"
+                enabled: root.recipe.application === "zerophase"
+                tip: root.recipe.application === "zerophase"
+                     ? qsTr("Comment l'enregistrement est prolongé au-delà de ses bords avant l'aller-retour, pour que le filtre y démarre comme si le signal continuait : %1")
+                       .arg(root.nameOf(Choices.edgeExtensions, root.recipe.edges ?? "predicted"))
+                     : qsTr("À phase nulle seulement : comment l'enregistrement est prolongé au-delà de ses bords avant l'aller-retour")
+                onChosen: (key) => root.set({ edges: key })
+            }
+        }
+        OutputGroup {
+            visible: root.ribbonTab === 1
+            view: root
         }
         ViewGroup {
             visible: root.ribbonTab === 1
@@ -669,13 +848,17 @@ Item {
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
                 spacing: 8
+                // What the filter is: it keeps its room (most of the row); the rate, then the signal tried,
+                // give way first.
                 Label {
+                    readonly property real room: Math.max(120, root.width * (root.ribbonTab === 1 ? 0.45 : 0.7))
                     text: root.designed ? (root.design.text ?? "") : (root.design.error ?? "")
                     color: root.designed ? Theme.text : Theme.error
                     font.pixelSize: Theme.bodyText
                     font.bold: root.designed
                     elide: Text.ElideRight
-                    Layout.maximumWidth: Math.max(120, root.width * 0.5)
+                    Layout.maximumWidth: room
+                    Layout.minimumWidth: Math.min(implicitWidth, room)
                 }
                 Label {
                     visible: root.designed
@@ -685,7 +868,7 @@ Item {
                     font.pixelSize: Theme.smallText
                     elide: Text.ElideRight
                     Layout.fillWidth: true
-                    Layout.minimumWidth: 40
+                    Layout.minimumWidth: 0
                 }
                 Item {
                     visible: !root.designed
@@ -724,6 +907,7 @@ Item {
                     font.pixelSize: Theme.smallText
                     elide: Text.ElideMiddle
                     Layout.maximumWidth: Math.max(120, root.width * 0.35)
+                    Layout.minimumWidth: Math.min(implicitWidth, 100)
                 }
                 BusyIndicator {
                     visible: root.showBusy
@@ -780,6 +964,9 @@ Item {
                 SignalPlot {
                     id: timePlot
                     anchors.fill: parent
+                    // Under the note when there is one, so that it hides neither the names of the curves nor the top
+                    // of the curves.
+                    anchors.topMargin: noteBox.visible ? noteBox.height + 12 : 0
                     anchors.bottomMargin: timeBar.height
                     session: root.filters.preview
                     signalId: root.filters.previewId
@@ -821,19 +1008,24 @@ Item {
                     anchors.rightMargin: 18
                     spacing: 6
                     PlotToolbar {
+                        id: timeToolbar
                         Layout.alignment: Qt.AlignRight
                         view: timePlot
                     }
                 }
-                // What the preview says: only the start of a long signal, holes, a rate that is not the signal's.
+                // What the preview says: only the start of a long signal, holes, a rate that is not the signal's. Above
+                // the plot, beside its strip (the chips "Avant" and "Après"), on two lines at most (all of it under
+                // the pointer).
                 Rectangle {
+                    id: noteBox
                     readonly property var lines: root.filters.previewWarnings.concat(root.filters.previewNote.length > 0 ? [root.filters.previewNote] : [])
                     visible: lines.length > 0 && timePlot.hasData
                     anchors.left: parent.left
                     anchors.top: parent.top
                     anchors.leftMargin: 70
                     anchors.topMargin: 8
-                    width: Math.min(noteLabel.implicitWidth + 20, parent.width - 200)
+                    width: Math.max(120, Math.min(noteLabel.implicitWidth + 20,
+                                                  parent.width - anchors.leftMargin - (timeToolbar.visible ? timeToolbar.width + 12 : 0) - 18))
                     height: noteLabel.implicitHeight + 10
                     radius: 6
                     color: Qt.alpha(Theme.panel, 0.94)
@@ -844,6 +1036,8 @@ Item {
                         anchors.leftMargin: 10
                         anchors.rightMargin: 10
                         verticalAlignment: Text.AlignVCenter
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 2
                         elide: Text.ElideRight
                         text: (root.filters.previewWarnings.length > 0 ? "⚠ " : "") + (parent.lines[0] ?? "")
                               + (parent.lines.length > 1 ? qsTr(" (et %1 autres)").arg(parent.lines.length - 1) : "")
@@ -986,5 +1180,14 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         toolTip: qsTr("Afficher le filtre et les mesures (F10)")
         onClicked: root.unfoldRight()
+    }
+
+    // The filter in C for a microcontroller.
+    FilterCodeDialog {
+        id: codeDialog
+        filters: root.filters
+        appSettings: root.appSettings
+        onDone: (message) => root.infoMessage(message)
+        onFailed: (message) => root.errorMessage(message)
     }
 }

@@ -425,7 +425,7 @@ ApplicationWindow {
                 ToolTip.visible: hovered
                 ToolTip.delay: 400
                 ToolTip.text: qsTr("Sessions récentes")
-                Menu {
+                FitMenu {
                     id: recentMenu
                     Instantiator {
                         model: window.appSettings.recentFiles

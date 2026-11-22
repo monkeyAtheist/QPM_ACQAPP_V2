@@ -14,6 +14,7 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <QVariantList>
+#include <QUrl>
 #include <QVariantMap>
 
 #include <atomic>
@@ -24,12 +25,17 @@ namespace qacq::app
 class FilterController : public QObject
 {
     Q_OBJECT
-    // The recipe: {kind ("iir", "fir"), family, response, order, taps, window, kaiserBeta, sampleRate,
-    // rateOfSignal, frequency1, frequency2, ripple, attenuation, application} (analysis::toJson).
+    // The recipe: {kind ("iir", "fir", "typed"), family, response, order, taps, window, kaiserBeta, sampleRate,
+    // rateOfSignal, frequency1, frequency2, ripple, attenuation, application, …; fromTemplate and the edges of the
+    // template pass1, pass2, stop1, stop2} (analysis::toJson).
     Q_PROPERTY(QVariantMap recipe READ recipe NOTIFY recipeChanged)
     // The design: {ok, error, warnings, text, summary (lines), sections [{b0, b1, b2, a1, a2}] or tapCount,
     // coefficients (to read: « b0 = … » a line, the first ones of a long FIR), poleCount, zeroCount,
-    // rootsKnown, sampleRate}.
+    // rootsKnown, sampleRate, fir (taps rather than sections), applicationError (designed but not applied),
+    // recipe (as designed: from a template, the order, taps, frequencies and β computed); from a template:
+    // templateHeld, templateLoss and templateAttenuation (dB, what it holds), exactOrder, templateText;
+    // coefficients typed: typedB, typedA (as evaluated, a few hundred at most), typedBCount, typedACount,
+    // numeratorOfK, denominatorOfK (one formula of k: how many is asked)}.
     Q_PROPERTY(QVariantMap design READ designInfo NOTIFY designChanged)
     // The signal of the session tried (0: none), and its channel shown before and after.
     Q_PROPERTY(qint64 inputId READ inputId WRITE setInputId NOTIFY inputChanged)
@@ -55,6 +61,8 @@ class FilterController : public QObject
 public:
     // At most this many samples in the preview (the first ones).
     static constexpr std::size_t kPreviewFrames = 4194304;
+    // At most this many values of each list typed in `design.typedB` and `design.typedA`.
+    static constexpr std::size_t kShownTypedValues = 256;
     // At most this many lines of coefficients in `design.coefficients`.
     static constexpr qsizetype kShownCoefficientLines = 600;
 
@@ -99,6 +107,13 @@ public:
     // The whole signal tried, every channel filtered, as a new signal of the session (on a thread): added()
     // with its id, or lastError.
     Q_INVOKABLE void addToSession();
+    // The C for a microcontroller (analysis::embedFilter, generateCode). options: {format: "float", "double",
+    // "q15", "q31"; scaling: "sum", "peak"; name}. Gives {ok, error, header, source, headerName, sourceName,
+    // notes, warnings, format, scaling, name, fixed}; computed once per design and options.
+    Q_INVOKABLE QVariantMap code(const QVariantMap &options) const;
+    // Both files written into the folder (name.h and name.c, replaced if there): the path of the .c, or empty
+    // and lastError.
+    Q_INVOKABLE QString saveCode(const QUrl &folder, const QVariantMap &options);
 
     // For the plots: the design shown, and its impulse and step responses (computed once per design).
     std::shared_ptr<const analysis::FilterDesign> currentDesign() const { return m_design; }
@@ -149,6 +164,10 @@ private:
     analysis::FilterRecipe m_recipe;
     std::shared_ptr<const analysis::FilterDesign> m_design;
     QVariantMap m_designInfo;
+    // The last code asked for: of this design, with these options.
+    mutable std::shared_ptr<const analysis::FilterDesign> m_codeDesign;
+    mutable QVariantMap m_codeOptions;
+    mutable QVariantMap m_code;
     mutable std::shared_ptr<const analysis::ImpulseResponse> m_impulse;
     qint64 m_inputId = 0;
     int m_channel = 0;

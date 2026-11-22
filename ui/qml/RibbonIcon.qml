@@ -462,6 +462,28 @@ Canvas {
             c.font = "bold 9px sans-serif"
             c.fillText(icon.name === "iir" ? "RII" : "RIF", 2, 15)
             break
+        case "template":
+            // A low-pass template: the pass band between two bounds, the stop band under one, a gain going
+            // through between them.
+            c.lineWidth = 1.2
+            line([3, 5, 11, 5], false)
+            line([3, 9, 11, 9, 11, 21], false)
+            line([14, 3, 14, 15, 21, 15], false)
+            c.lineWidth = 1.7
+            c.beginPath()
+            c.moveTo(3, 7)
+            c.lineTo(9, 7)
+            c.quadraticCurveTo(12.5, 7.5, 14, 18)
+            c.lineTo(21, 19.5)
+            c.stroke()
+            break
+        case "typed":
+            // b over a.
+            c.font = "bold 9px sans-serif"
+            c.fillText("b", 9, 10)
+            line([5, 12, 19, 12], false)
+            c.fillText("a", 9, 21)
+            break
         case "response":
             // A band-pass: low, up, flat, down.
             line([3, 19, 8, 19, 10, 7, 15, 7, 17, 19, 21, 19], false)
@@ -487,6 +509,18 @@ Canvas {
             line([16, 5, 19, 8, 16, 11], false)
             line([20, 16, 5, 16], false)
             line([8, 13, 5, 16, 8, 19], false)
+            break
+        case "edges":
+            // A record (a wave between two bars), dotted on beyond its ends as it went.
+            line([7, 5, 7, 19], false)
+            line([17, 5, 17, 19], false)
+            wave(7, 17, 12, 5, 2)
+            // The wave is 12 − 5 sin(2π (x − 7)/10): 2 units further out, 0.4π further on.
+            for (let k = 1; k <= 3; ++k) {
+                const s = 5 * Math.sin(0.4 * Math.PI * k)
+                circle(7 - 2 * k, 12 + s, 0.8, true)
+                circle(17 + 2 * k, 12 - s, 0.8, true)
+            }
             break
         case "aligned":
             // Symmetric about its middle.

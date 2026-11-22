@@ -202,7 +202,7 @@ ScrollView {
             text: qsTr("Ajouter une forme d'onde ▾")
             enabled: root.waves.length < 32
             onClicked: addMenu.popup(addButton, 0, addButton.height)
-            Menu {
+            FitMenu {
                 id: addMenu
                 Instantiator {
                     model: Choices.generatorWaveforms

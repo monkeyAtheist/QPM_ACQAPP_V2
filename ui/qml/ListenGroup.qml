@@ -84,7 +84,7 @@ RibbonGroup {
             root.player.refreshDevices()
             soundMenu.popup(soundButton, 0, soundButton.height)
         }
-        Menu {
+        FitMenu {
             id: soundMenu
             Instantiator {
                 model: root.channels
@@ -171,7 +171,7 @@ RibbonGroup {
                 }
             }
             MenuSeparator {}
-            Menu {
+            FitMenu {
                 id: outputMenu
                 title: qsTr("Sortie audio")
                 MenuItem {
