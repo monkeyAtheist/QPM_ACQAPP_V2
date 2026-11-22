@@ -4,6 +4,7 @@
 #include "qacq/app/app_settings.h"
 #include "qacq/app/audio_player.h"
 #include "qacq/app/curves_controller.h"
+#include "qacq/app/filter_controller.h"
 #include "qacq/app/generator_controller.h"
 #include "qacq/app/serial_port_list.h"
 #include "qacq/app/session.h"
@@ -41,6 +42,7 @@ int main(int argc, char *argv[])
     qmlRegisterUncreatableType<qacq::app::AnalysisController>("Qacq.App", 1, 0, "AnalysisController", made);
     qmlRegisterUncreatableType<qacq::app::CurvesController>("Qacq.App", 1, 0, "CurvesController", made);
     qmlRegisterUncreatableType<qacq::app::GeneratorController>("Qacq.App", 1, 0, "GeneratorController", made);
+    qmlRegisterUncreatableType<qacq::app::FilterController>("Qacq.App", 1, 0, "FilterController", made);
     qmlRegisterUncreatableType<qacq::app::AudioPlayer>("Qacq.App", 1, 0, "AudioPlayer", made);
     qmlRegisterUncreatableType<qacq::app::SerialPortList>("Qacq.App", 1, 0, "SerialPortList", made);
     qmlRegisterUncreatableType<qacq::app::AppSettings>("Qacq.App", 1, 0, "AppSettings", made);
@@ -55,6 +57,7 @@ int main(int argc, char *argv[])
     qacq::app::AnalysisController analysis(&session);
     qacq::app::CurvesController curves(&session, &analysis);
     qacq::app::GeneratorController generator(&session);
+    qacq::app::FilterController filters(&session);
     qacq::app::AudioPlayer player(&settings);
     qacq::app::SerialPortList serialPorts;
 
@@ -64,6 +67,7 @@ int main(int argc, char *argv[])
                                  {QStringLiteral("analysis"), QVariant::fromValue(&analysis)},
                                  {QStringLiteral("curves"), QVariant::fromValue(&curves)},
                                  {QStringLiteral("generator"), QVariant::fromValue(&generator)},
+                                 {QStringLiteral("filters"), QVariant::fromValue(&filters)},
                                  {QStringLiteral("player"), QVariant::fromValue(&player)},
                                  {QStringLiteral("serialPorts"), QVariant::fromValue(&serialPorts)},
                                  {QStringLiteral("appSettings"), QVariant::fromValue(&settings)}});

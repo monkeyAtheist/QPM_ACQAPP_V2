@@ -15,25 +15,41 @@ SamplePipe::SamplePipe(std::size_t channels, std::size_t capacityFrames)
 
 std::size_t SamplePipe::push(const io::SampleBlock &block)
 {
-    if (block.channelCount != m_channels || block.values.empty()) return 0;
+    if (block.channelCount != m_channels) return 0;
     const std::size_t frames = block.frameCount();
+    // No frame, but a record begun (a header read, its samples still on the way): the next frame pushed,
+    // whenever it comes, starts after a break.
+    if (frames == 0)
+    {
+        if (!block.discontinuities.empty()) m_breakPending = true;
+        return 0;
+    }
     // Free room seen from the producer: never more than the truth (the consumer may have read since).
     const std::size_t room = (m_values.capacity() - m_values.size()) / m_channels;
     const std::size_t pushed = std::min(frames, room);
     if (pushed > 0)
         m_values.pushAll(std::span<const double>(block.values.data(), pushed * m_channels));
-    // Discontinuities after the values, numbered among the frames that went through.
+    // Discontinuities after the values, numbered among the frames that went through, each place once; one
+    // at the very end of the block (a record begun, none of its frames yet) is kept for the next frame.
+    std::uint64_t last = std::numeric_limits<std::uint64_t>::max();
+    const auto mark = [this, &last](std::uint64_t at) {
+        if (at == last) return;
+        m_breaks.push(std::span<const std::uint64_t>(&at, 1));
+        last = at;
+    };
     if (m_breakPending && pushed > 0)
     {
-        const std::uint64_t at = m_produced;
-        m_breaks.push(std::span<const std::uint64_t>(&at, 1));
+        mark(m_produced);
         m_breakPending = false;
     }
     for (std::size_t index : block.discontinuities)
     {
-        if (index >= pushed) break;
-        const std::uint64_t at = m_produced + index;
-        m_breaks.push(std::span<const std::uint64_t>(&at, 1));
+        if (index >= pushed)
+        {
+            if (index >= frames) m_breakPending = true;
+            break;
+        }
+        mark(m_produced + index);
     }
     if (pushed < frames)
     {

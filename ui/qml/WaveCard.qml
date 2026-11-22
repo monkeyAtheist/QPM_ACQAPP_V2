@@ -10,7 +10,10 @@ import Qacq.App
 // formulas, models of coefficients, and the table of its first coefficients. A drawn motif has its editor
 // (MotifEditor: points placed, moved, removed, strokes drawn), how its points are joined, whether it repeats,
 // ready-made motifs, and its points as text. A recurrence has its input, its variables, the formula of y[n],
-// its initial values, ready-made recurrences and its first values.
+// its initial values, ready-made recurrences and its first values. An operation between channels has its
+// variables, its formula y of v1, v2…, t and x, ready-made operations, and the channels it reads by name. A
+// modulated carrier has its amplitude, frequency and phase, AM, FM or PM and its index or excursion, its
+// variables, its message, ready-made messages.
 Rectangle {
     id: root
     required property var generator
@@ -38,6 +41,17 @@ Rectangle {
     readonly property string motifText: drawn ? (generator.recipe, generator.motifText(channel, index)) : ""
     property string motifError: ""
     onMotifTextChanged: motifError = ""
+    readonly property bool operation: waveform === "formula"
+    readonly property bool modulated: waveform === "modulation"
+    readonly property string modulationKind: wave.modulation ?? "am"
+    // What is wrong in an operation or a message (at once), what it reads (again at each change of the recipe).
+    readonly property var operationState: operation || modulated ? (generator.recipe, generator.operationInfo(channel, index)) : ({})
+    readonly property string operationError: operationState.error ?? ""
+    readonly property string operationCaution: operationState.caution ?? ""
+    readonly property string operationNote: operationState.note ?? ""
+    readonly property var operationChoices: operation || modulated
+                                            ? (generator.recipe, operation ? generator.operationModels(channel) : generator.messageModels(channel))
+                                            : []
     readonly property bool recurrent: waveform === "recurrence"
     // What is wrong in it (at once), and its first values as the preview made them.
     readonly property var trace: recurrent ? (generator.recipe, generator.ready, generator.recurrenceInfo(channel, index)) : ({})
@@ -126,8 +140,9 @@ Rectangle {
         }
 
         GridLayout {
-            // (A recurrence has none of these fields: an empty layout would keep the room of the ones before.)
-            visible: !root.recurrent
+            // (A recurrence or an operation has none of these fields: an empty layout would keep the room of the
+            // ones before.)
+            visible: !root.recurrent && !root.operation
             Layout.fillWidth: true
             opacity: root.counted ? 1 : 0.55
             columns: 2
@@ -137,24 +152,28 @@ Rectangle {
                 visible: !root.fourierSeries && !root.recurrent
                 label: root.waveform === "dc" || root.waveform === "impulse" ? qsTr("Valeur")
                        : root.waveform === "step" ? qsTr("Hauteur")
+                       : root.modulated ? qsTr("Amplitude de la porteuse")
                        : root.noise ? (root.wave.noise === "uniform" ? qsTr("Crête (±)") : qsTr("Écart type"))
                        : qsTr("Amplitude crête")
                 unit: root.unit
                 value: root.wave.amplitude ?? 1
                 tip: root.noise ? qsTr("Gaussien : l'écart type, la valeur efficace du bruit ; uniforme : entre −A et +A")
+                     : root.modulated ? qsTr("La porteuse A·cos(2π fc t + φ), avant sa modulation")
                      : root.drawn ? qsTr("Le motif va de −A (en bas du dessin) à +A (en haut)")
                      : root.periodic || root.sweep ? qsTr("Valeur crête : 1 V crête, c'est 0,707 V efficaces pour un sinus") : ""
                 onEdited: (v) => root.set({ amplitude: v })
             }
             QuantityField {
-                visible: root.periodic || root.sweep || root.fourierSeries || root.drawnRepeated
-                label: root.sweep ? qsTr("De") : root.fourierSeries ? qsTr("Fondamentale f₀") : qsTr("Fréquence")
+                visible: root.periodic || root.sweep || root.fourierSeries || root.drawnRepeated || root.modulated
+                label: root.sweep ? qsTr("De") : root.fourierSeries ? qsTr("Fondamentale f₀")
+                       : root.modulated ? qsTr("Porteuse fc") : qsTr("Fréquence")
                 unit: "Hz"
                 minimum: 0
                 value: root.wave.frequency ?? 1000
                 tip: root.sweep ? qsTr("Fréquence au début du balayage")
                      : root.fourierSeries ? qsTr("Fréquence de l'harmonique 1 : l'harmonique n est à n f₀")
                      : root.drawn ? qsTr("Le motif se répète à cette fréquence : la largeur du dessin est une période")
+                     : root.modulated ? qsTr("Fréquence de la porteuse : au-delà de fs/2, elle se replie")
                      : qsTr("Au-delà de fs/2, la fréquence se replie")
                 onEdited: (v) => root.set({ frequency: v })
             }
@@ -201,7 +220,7 @@ Rectangle {
                 onEdited: (i) => root.set({ law: i === 1 ? "log" : "linear" })
             }
             QuantityField {
-                visible: root.periodic || root.sweep || root.drawnRepeated
+                visible: root.periodic || root.sweep || root.drawnRepeated || root.modulated
                 label: qsTr("Phase")
                 unit: "°"
                 value: root.wave.phase ?? 0
@@ -247,6 +266,135 @@ Rectangle {
                 choices: [qsTr("À chaque période"), qsTr("Sur toute la durée")]
                 value: root.wave.once === true ? 1 : 0
                 onEdited: (i) => root.set({ once: i === 1 })
+            }
+            ChoiceField {
+                visible: root.modulated
+                label: qsTr("Modulation")
+                choices: Choices.names(Choices.carrierModulations)
+                value: Choices.indexOf(Choices.carrierModulations, root.modulationKind)
+                onEdited: (i) => root.set({ modulation: Choices.carrierModulations[i].key })
+            }
+            QuantityField {
+                visible: root.modulated && root.modulationKind === "am"
+                label: qsTr("Indice m")
+                unit: ""
+                minimum: 0
+                value: root.wave.index ?? 0.5
+                tip: qsTr("A·(1 + m·message) : avec un message de crête 1 et m = 0,5, l'enveloppe va de A/2 à 1,5 A ; au-delà de 1, surmodulation")
+                onEdited: (v) => root.set({ index: v })
+            }
+            QuantityField {
+                visible: root.modulated && root.modulationKind === "fm"
+                label: qsTr("Excursion Δf")
+                unit: "Hz"
+                value: root.wave.deviation ?? 1000
+                tip: qsTr("Fréquence instantanée fc + Δf·message : avec un message de crête 1, de fc − Δf à fc + Δf (indice β = Δf/fm)")
+                onEdited: (v) => root.set({ deviation: v })
+            }
+            QuantityField {
+                visible: root.modulated && root.modulationKind === "pm"
+                label: qsTr("Excursion Δφ")
+                unit: "°"
+                value: root.wave.phaseDeviation ?? 90
+                tip: qsTr("Phase φ + Δφ·message : avec un message de crête 1, de φ − Δφ à φ + Δφ")
+                onEdited: (v) => root.set({ phaseDeviation: v })
+            }
+        }
+        // ---- An operation between channels, or the message of a modulated carrier ----
+        ColumnLayout {
+            visible: root.operation || root.modulated
+            Layout.fillWidth: true
+            opacity: root.counted ? 1 : 0.55
+            spacing: 6
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: root.operation ? qsTr("y, une formule des voies v1, v2…, du temps t et des formes d'onde au-dessus (x).")
+                                         : Choices.carrierModulations[Choices.indexOf(Choices.carrierModulations, root.modulationKind)].tip
+                    color: Theme.textMuted
+                    font.pixelSize: Theme.smallText
+                }
+                Button {
+                    id: operationModelButton
+                    Layout.alignment: Qt.AlignBottom
+                    text: root.operation ? qsTr("Modèles ▾") : qsTr("Message ▾")
+                    flat: true
+                    onClicked: operationModelMenu.popup(operationModelButton, 0, operationModelButton.height)
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: root.operation ? qsTr("Une opération toute prête des deux premières autres voies : somme, différence, produit, quotient, moyenne, module…")
+                                                 : qsTr("Un message tout prêt : un sinus ou un carré de fréquence fm, les formes d'onde au-dessus, une autre voie")
+                    Menu {
+                        id: operationModelMenu
+                        Instantiator {
+                            model: root.operationChoices
+                            delegate: MenuItem {
+                                required property var modelData
+                                text: modelData.name + " : " + modelData.formula
+                                onTriggered: root.operation ? root.generator.applyOperationModel(root.channel, root.index, modelData.key)
+                                                            : root.generator.applyMessageModel(root.channel, root.index, modelData.key)
+                            }
+                            onObjectAdded: (index, object) => operationModelMenu.insertItem(index, object)
+                            onObjectRemoved: (index, object) => operationModelMenu.removeItem(object)
+                        }
+                    }
+                }
+            }
+            FormulaField {
+                label: qsTr("Variables")
+                value: root.wave.variables ?? ""
+                placeholder: root.operation ? "k = 2" : "fm = 1000"
+                lineSeparator: " ; "
+                tip: qsTr("Des constantes pour la formule, séparées par « ; » ; elles peuvent utiliser fs, Te et N : fm = fs/48")
+                onEdited: (text) => root.set({ variables: text })
+            }
+            FormulaField {
+                visible: root.operation
+                label: "y ="
+                value: root.wave.expression ?? "x"
+                tip: qsTr("Une formule des voies : v1 + v2, v1*v2, (1 + 0,5*v2)*v1, abs(v1), sqrt(v1^2 + v2^2), sin(2*pi*50*t)^3…")
+                onEdited: (text) => root.set({ expression: text })
+            }
+            FormulaField {
+                visible: root.modulated
+                label: qsTr("Message m(t) =")
+                value: root.wave.message ?? ""
+                tip: qsTr("Ce qui module la porteuse : sin(2*pi*fm*t), v1 (une autre voie), x (les formes d'onde au-dessus de celle-ci)…")
+                onEdited: (text) => root.set({ message: text })
+            }
+            Label {
+                visible: root.operationError.length > 0
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: root.operationError
+                color: Theme.error
+                font.pixelSize: Theme.smallText
+            }
+            Label {
+                visible: root.operationCaution.length > 0
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: root.operationCaution
+                color: Theme.warning
+                font.pixelSize: Theme.smallText
+            }
+            Label {
+                visible: root.operationNote.length > 0
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: root.operationNote
+                color: Theme.text
+                font.pixelSize: Theme.smallText
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("Dans la formule : v1… v16 (les voies, décalage compris), x (les formes d'onde au-dessus de celle-ci, qu'elle remplace alors), t, n, fs, Te (1/fs), N (nombre d'échantillons) et les variables ; les fonctions des séries de Fourier (sin, abs, sqrt, if…). Une voie ne peut pas se lire elle-même ; une valeur qui n'est pas un nombre (division par zéro) vaut 0.")
+                color: Theme.textMuted
+                font.pixelSize: Theme.smallText
             }
         }
         // ---- A recurrence: y[n] from the values before it ----

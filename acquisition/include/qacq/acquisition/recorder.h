@@ -34,7 +34,8 @@ public:
     std::size_t channelCount() const noexcept { return m_channels; }
 
     // Producer. Pushes the whole frames of the block (its channel count must match); returns the frames
-    // pushed (the others are dropped and counted).
+    // pushed (the others are dropped and counted). A discontinuity at the end of the block, or in a block
+    // without frames (a record begun, its samples not yet decoded), marks the next frame pushed.
     std::size_t push(const io::SampleBlock &block);
     std::uint64_t droppedFrames() const noexcept { return m_dropped.load(std::memory_order_relaxed); }
 
@@ -48,7 +49,7 @@ private:
     io::SpscRing<std::uint64_t> m_breaks;
     // Producer side.
     std::uint64_t m_produced = 0;     // frames pushed (dropped ones are not numbered)
-    bool m_breakPending = false;      // a drop happened: mark the next frame pushed
+    bool m_breakPending = false;      // a drop, or a record begun: mark the next frame pushed
     std::atomic<std::uint64_t> m_dropped{0};
     // Consumer side.
     std::uint64_t m_consumed = 0;

@@ -136,7 +136,12 @@ int GeneratorController::addChannel()
 void GeneratorController::removeChannel(int channel)
 {
     if (!validChannel(channel) || m_recipe.channels.size() <= 1) return;
-    m_recipe.channels.erase(m_recipe.channels.begin() + channel);
+    std::string why;
+    if (!analysis::removeGeneratorChannel(m_recipe, static_cast<std::size_t>(channel), &why))
+    {
+        setLastError(toQString(why));
+        return;
+    }
     changed();
 }
 
@@ -163,6 +168,8 @@ int GeneratorController::addComponent(int channel, const QString &waveform)
         return -1;
     }
     list.push_back(analysis::defaultGeneratorComponent(w, m_recipe.sampleRateHz, m_recipe.durationSeconds));
+    if (w == analysis::WaveKind::Formula)
+        list.back().expression = analysis::defaultOperation(static_cast<std::size_t>(channel), m_recipe.channels.size());
     changed();
     return static_cast<int>(list.size()) - 1;
 }
@@ -195,8 +202,12 @@ void GeneratorController::setComponent(int channel, int component, const QVarian
     if (changes.contains("waveform"))
     {
         analysis::WaveKind w;
-        if (analysis::waveformFromKey(changes["waveform"].toString(), w))
+        if (analysis::waveformFromKey(changes["waveform"].toString(), w) && w != c.waveform)
+        {
             c = analysis::withWaveform(c, w, r.sampleRateHz, r.durationSeconds);
+            if (w == analysis::WaveKind::Formula)
+                c.expression = analysis::defaultOperation(static_cast<std::size_t>(channel), r.channels.size());
+        }
         changes.erase("waveform");
     }
     if (changes.contains("form") && c.waveform == analysis::WaveKind::FourierSeries)
@@ -367,6 +378,91 @@ void GeneratorController::applyRecurrenceModel(int channel, int component, const
     // An oscillator (or a resonator) of a frequency the rate can carry.
     const double f = std::min(c.frequencyHz > 0.0 ? c.frequencyHz : 1000.0, r.sampleRateHz / 20.0);
     if (!analysis::applyRecurrenceModel(c, toUtf8(model), 1.0, f)) return;
+    replace(std::move(r));
+}
+
+QVariantMap GeneratorController::operationInfo(int channel, int component) const
+{
+    QVariantMap info;
+    if (!validComponent(channel, component)) return info;
+    const auto ch = static_cast<std::size_t>(channel);
+    const auto index = static_cast<std::size_t>(component);
+    const analysis::GeneratorComponent &c = m_recipe.channels[ch].components[index];
+    if (c.waveform != analysis::WaveKind::Formula && c.waveform != analysis::WaveKind::Modulation) return info;
+    const analysis::OperationCheck check = analysis::checkOperation(m_recipe, ch, index);
+    info.insert(QStringLiteral("error"), toQString(check.error));
+    QString caution;
+    QStringList notes;
+    if (check.error.empty())
+    {
+        // The channels read by their names: v1 « Tension », v2 « Courant ».
+        QStringList names;
+        for (std::size_t k : check.channels)
+        {
+            if (k >= m_recipe.channels.size()) continue;
+            names << QStringLiteral("v%1 : « %2 »").arg(static_cast<int>(k) + 1).arg(toQString(m_recipe.channels[k].name));
+        }
+        if (!names.isEmpty()) notes << names.join(QStringLiteral(", ")) + QStringLiteral(".");
+        if (check.readsAbove)
+        {
+            const auto &list = m_recipe.channels[ch].components;
+            const bool any = std::any_of(list.begin(), list.begin() + component,
+                                         [](const analysis::GeneratorComponent &k) { return k.enabled; });
+            if (!any)
+                caution = QStringLiteral("Aucune forme d'onde comptée au-dessus de celle-ci : x vaut 0.");
+            else
+                notes << (c.waveform == analysis::WaveKind::Modulation
+                              ? QStringLiteral("x : les formes d'onde au-dessus, que la porteuse modulée remplace.")
+                              : QStringLiteral("x : les formes d'onde au-dessus, que le résultat remplace."));
+        }
+    }
+    info.insert(QStringLiteral("caution"), caution);
+    info.insert(QStringLiteral("note"), notes.join(QStringLiteral(" ")));
+    return info;
+}
+
+namespace
+{
+QVariantList modelList(const std::vector<analysis::OperationModel> &models)
+{
+    QVariantList list;
+    for (const analysis::OperationModel &m : models)
+        list.append(QVariantMap{{QStringLiteral("key"), toQString(m.key)},
+                                {QStringLiteral("name"), toQString(m.name)},
+                                {QStringLiteral("formula"), toQString(m.formula)}});
+    return list;
+}
+} // namespace
+
+QVariantList GeneratorController::operationModels(int channel) const
+{
+    if (!validChannel(channel)) return {};
+    return modelList(analysis::operationModels(static_cast<std::size_t>(channel), m_recipe.channels.size()));
+}
+
+void GeneratorController::applyOperationModel(int channel, int component, const QString &model)
+{
+    if (!validComponent(channel, component)) return;
+    analysis::GeneratorRecipe r = m_recipe;
+    analysis::GeneratorComponent &c =
+        r.channels[static_cast<std::size_t>(channel)].components[static_cast<std::size_t>(component)];
+    if (!analysis::applyOperationModel(c, toUtf8(model), static_cast<std::size_t>(channel), r.channels.size())) return;
+    replace(std::move(r));
+}
+
+QVariantList GeneratorController::messageModels(int channel) const
+{
+    if (!validChannel(channel)) return {};
+    return modelList(analysis::messageModels(static_cast<std::size_t>(channel), m_recipe.channels.size()));
+}
+
+void GeneratorController::applyMessageModel(int channel, int component, const QString &model)
+{
+    if (!validComponent(channel, component)) return;
+    analysis::GeneratorRecipe r = m_recipe;
+    analysis::GeneratorComponent &c =
+        r.channels[static_cast<std::size_t>(channel)].components[static_cast<std::size_t>(component)];
+    if (!analysis::applyMessageModel(c, toUtf8(model), static_cast<std::size_t>(channel), r.channels.size())) return;
     replace(std::move(r));
 }
 

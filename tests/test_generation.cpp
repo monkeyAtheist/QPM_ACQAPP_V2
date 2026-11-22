@@ -1,7 +1,9 @@
 #include "qacq_test.h"
 
 #include "qacq/analysis/generation.h"
+#include "qacq/dsp/modulation.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <numbers>
@@ -320,7 +322,8 @@ TEST_CASE("generator: usual values of a new component, texts, ready-made example
     Waveform w;
     for (Waveform each : {Waveform::Sine, Waveform::Square, Waveform::Triangle, Waveform::Sawtooth, Waveform::Pulse,
                           Waveform::Dc, Waveform::Step, Waveform::Impulse, Waveform::Noise, Waveform::Sweep,
-                          Waveform::FourierSeries, Waveform::Drawn})
+                          Waveform::FourierSeries, Waveform::Drawn, Waveform::Recurrence, Waveform::Formula,
+                          Waveform::Modulation})
     {
         CHECK(waveformFromKey(waveformKey(each), w) && w == each);
         CHECK(generatorWaveformName(each) != "?");
@@ -1020,4 +1023,290 @@ TEST_CASE("generator: a recurrence says what is wrong, and where it diverges", "
     CHECK(back.recurrenceInput == RecurrenceInput::Above);
     CHECK(toJson(driven)["input"].toString() == "above");
     CHECK(!toJson(make(Waveform::Sine, 1.0)).contains("recurrence"));
+}
+
+TEST_CASE("generator: an operation between channels, made after the channels it reads", "[analysis]")
+{
+    GeneratorRecipe r;
+    r.sampleRateHz = 10000.0;
+    r.durationSeconds = 0.1;
+    GeneratorComponent op = defaultGeneratorComponent(Waveform::Formula);
+    op.expression = "y = v2*v3";
+    GeneratorChannel product, a, b;
+    product.name = "Produit";
+    product.components = {op};
+    a.name = "A";
+    a.offset = 0.5;
+    a.components = {make(Waveform::Sine, 2.0, 50.0)};
+    b.name = "B";
+    b.components = {make(Waveform::Square, 1.0, 20.0)};
+    r.channels = {product, a, b}; // the first one reads those after it
+    GeneratorResult g = generateSignal(r);
+    REQUIRE(g.ok());
+    std::vector<std::vector<double>> ch = g.signal.data->channels;
+    REQUIRE(ch.size() == 3);
+    double gap = 0.0;
+    for (std::size_t i = 0; i < ch[0].size(); ++i) gap = std::max(gap, std::abs(ch[0][i] - ch[1][i] * ch[2][i]));
+    CHECK(gap < 1e-12); // the channel A with its offset
+    CHECK(g.signal.channels[0].name == "Produit");
+    CHECK(contains(g.signal.notes, "Produit : Opération entre voies : v2*v3."));
+
+    // x: the components above, replaced; otherwise added. Uppercase names, variables, t.
+    GeneratorComponent square = defaultGeneratorComponent(Waveform::Formula);
+    square.expression = "k*x^2";
+    square.variables = "k = 3";
+    r.channels[0].components = {make(Waveform::Sine, 1.0, 100.0), square};
+    g = generateSignal(r);
+    REQUIRE(g.ok());
+    ch = g.signal.data->channels;
+    for (std::size_t i = 0; i < ch[0].size(); i += 7)
+        CHECK_NEAR(ch[0][i], 3.0 * std::pow(std::sin(2.0 * std::numbers::pi * 100.0 * static_cast<double>(i) / 10000.0), 2), 0.0, 1e-9);
+    GeneratorComponent added = defaultGeneratorComponent(Waveform::Formula);
+    added.expression = "V2 + sin(2*pi*50*t)";
+    r.channels[0].components = {make(Waveform::Dc, 1.0), added};
+    g = generateSignal(r);
+    REQUIRE(g.ok());
+    ch = g.signal.data->channels;
+    for (std::size_t i = 0; i < ch[0].size(); i += 13)
+        CHECK_NEAR(ch[0][i], 1.0 + ch[1][i] + std::sin(2.0 * std::numbers::pi * 50.0 * static_cast<double>(i) / 10000.0), 0.0, 1e-9);
+
+    // What it reads; what is wrong, at once and when generating.
+    OperationCheck check = checkOperation(r, 0, 1);
+    CHECK(check.error.empty());
+    CHECK((check.channels == std::vector<std::size_t>{1}));
+    CHECK(!check.readsAbove);
+    CHECK(checkOperation(r, 1, 0).channels.empty()); // not an operation
+    r.channels[0].components[1].expression = "v1 + w";
+    CHECK(contains(checkOperation(r, 0, 1).error, "y : Nom inconnu"));
+    r.channels[0].components[1].expression = "v5";
+    CHECK(checkOperation(r, 0, 1).error == "y : la voie 5 n'existe pas (le signal a 3 voies).");
+    r.channels[0].components[1].expression = "v1/2";
+    CHECK(contains(checkOperation(r, 0, 1).error, "est la voie elle-même"));
+    g = generateSignal(r);
+    CHECK(!g.ok());
+    CHECK(contains(g.error, "Produit, composante 2 (Opération entre voies) — y : « v1 » est la voie elle-même"));
+    r.channels[0].components[1].expression = "v2";
+    GeneratorComponent back = defaultGeneratorComponent(Waveform::Formula);
+    back.expression = "-v1";
+    r.channels[1].components.push_back(back);
+    CHECK(contains(checkOperation(r, 0, 1).error, "Voies 1 → 2 → 1 : une voie ne peut pas dépendre d'elle-même"));
+    g = generateSignal(r);
+    CHECK(contains(g.error, "Voies 1 → 2 → 1"));
+    r.channels[1].components.back().enabled = false; // a component left out does not read
+    CHECK(checkOperation(r, 0, 1).error.empty());
+    CHECK(generateSignal(r).ok());
+
+    // A division by zero: 0 there, and said.
+    r.channels[0].components = {defaultGeneratorComponent(Waveform::Formula)};
+    r.channels[0].components[0].expression = "1/v2";
+    r.channels[1].offset = 0.0;
+    g = generateSignal(r);
+    REQUIRE(g.ok());
+    REQUIRE(g.warnings.size() == 1);
+    // (The sine is exactly 0 at each whole period: 0, 20, 40, 60 and 80 ms.)
+    CHECK(contains(g.warnings[0], "y n'est pas un nombre fini en 5 échantillons (le premier à t = 0 s"));
+    CHECK(contains(g.warnings[0], "ils valent 0."));
+    CHECK(g.signal.data->channels[0][0] == 0.0);
+    CHECK(g.signal.data->channels[0][200] == 0.0);
+
+    // New operations, ready-made ones.
+    CHECK(defaultOperation(0, 1) == "x");
+    CHECK(defaultOperation(1, 2) == "v1 + x");
+    CHECK(defaultOperation(2, 3) == "v1 + v2");
+    CHECK(defaultOperation(0, 3) == "v2 + v3");
+    const std::vector<OperationModel> models = operationModels(2, 3);
+    REQUIRE(models.size() == 9);
+    CHECK((models[0].key == "sum" && models[0].formula == "v1 + v2"));
+    CHECK(models[2].formula == "v1*v2");
+    CHECK(models[5].formula == "sqrt(v1^2 + v2^2)");
+    const std::vector<OperationModel> single = operationModels(0, 1);
+    REQUIRE(single.size() == 3);
+    CHECK(single[0].formula == "abs(x)");
+    CHECK(operationModels(1, 2)[0].formula == "v1 + x");
+    GeneratorComponent model = defaultGeneratorComponent(Waveform::Formula);
+    CHECK(applyOperationModel(model, "ratio", 0, 3));
+    CHECK(model.expression == "v2/v3");
+    CHECK(!applyOperationModel(model, "log", 0, 3));
+
+    // Text and JSON.
+    model.variables = "k = 2";
+    CHECK(componentText(model, "V") == "Opération entre voies : v2/v3 (k = 2)");
+    const GeneratorComponent read = generatorComponentFromJson(toJson(model));
+    CHECK(read.waveform == Waveform::Formula);
+    CHECK(read.expression == "v2/v3");
+    CHECK(read.variables == "k = 2");
+    CHECK(!toJson(make(Waveform::Sine, 1.0)).contains("expression"));
+}
+
+TEST_CASE("generator: a channel read by another is not removed; the others are renumbered", "[analysis]")
+{
+    GeneratorRecipe r;
+    r.channels = {defaultGeneratorChannel(0), defaultGeneratorChannel(1), defaultGeneratorChannel(2), defaultGeneratorChannel(3)};
+    GeneratorComponent op = defaultGeneratorComponent(Waveform::Formula);
+    op.expression = "v1*v3 + V3 - fv3 + v3x";
+    r.channels[3].components = {op};
+    GeneratorComponent carrier = defaultGeneratorComponent(Waveform::Modulation);
+    carrier.message = "v4";
+    r.channels[1].components.push_back(carrier);
+    CHECK((channelReaders(r, 0) == std::vector<std::size_t>{3}));
+    CHECK((channelReaders(r, 2) == std::vector<std::size_t>{3}));
+    CHECK((channelReaders(r, 3) == std::vector<std::size_t>{1}));
+    CHECK(channelReaders(r, 1).empty());
+
+    std::string why;
+    GeneratorRecipe kept = r;
+    CHECK(!removeGeneratorChannel(kept, 0, &why));
+    CHECK(why == "La voie 1 est lue par la voie 4 (v1 dans son opération ou son message) : changez d'abord sa formule.");
+    CHECK(kept.channels.size() == 4);
+    CHECK(removeGeneratorChannel(kept, 1, &why)); // nobody reads the channel 2
+    REQUIRE(kept.channels.size() == 3);
+    CHECK(kept.channels[2].components[0].expression == "v1*v2 + V2 - fv3 + v3x");
+    GeneratorRecipe one;
+    one.channels = {defaultGeneratorChannel(0)};
+    CHECK(!removeGeneratorChannel(one, 0, &why));
+    CHECK(why == "Le signal garde au moins une voie.");
+    GeneratorRecipe two = r;
+    two.channels[1].components.pop_back();
+    two.channels[0].components = {op};
+    two.channels[0].components[0].expression = "v4";
+    CHECK(!removeGeneratorChannel(two, 3, &why));
+    CHECK(why == "La voie 4 est lue par la voie 1 (v4 dans son opération ou son message) : changez d'abord sa formule.");
+    two.channels[1].components = {op};
+    two.channels[1].components[0].expression = "2*v3";
+    CHECK(!removeGeneratorChannel(two, 2, &why));
+    CHECK(why == "La voie 3 est lue par les voies 2 et 4 (v3 dans leurs opérations ou messages) : changez d'abord leurs formules.");
+}
+
+TEST_CASE("generator: a modulated carrier, as the module Modulations makes it", "[analysis]")
+{
+    // The same samples as qacq::dsp::modulate, in AM, FM and PM.
+    for (CarrierModulation kind : {CarrierModulation::Am, CarrierModulation::Fm, CarrierModulation::Pm})
+    {
+        GeneratorComponent carrier = defaultGeneratorComponent(Waveform::Modulation);
+        carrier.modulation = kind;
+        carrier.amplitude = 2.0;
+        carrier.frequencyHz = 6000.0;
+        carrier.phaseDegrees = 30.0;
+        carrier.amIndex = 0.7;
+        carrier.deviationHz = 1500.0;
+        carrier.phaseDeviationDegrees = 60.0;
+        carrier.message = "m = sin(2*pi*fm*t)";
+        carrier.variables = "fm = 500";
+        std::vector<std::string> warnings;
+        const std::vector<double> y = alone(carrier, 48000.0, 0.02, &warnings);
+        CHECK(warnings.empty());
+        qacq::dsp::ModulationSpec spec;
+        spec.type = kind == CarrierModulation::Am   ? qacq::dsp::Modulation::Am
+                    : kind == CarrierModulation::Fm ? qacq::dsp::Modulation::Fm
+                                                    : qacq::dsp::Modulation::Pm;
+        spec.sampleRateHz = 48000.0;
+        spec.sampleCount = 960;
+        spec.carrierFrequencyHz = 6000.0;
+        spec.carrierAmplitude = 2.0;
+        spec.carrierPhaseDegrees = 30.0;
+        spec.messageFrequencyHz = 500.0;
+        spec.amIndex = 0.7;
+        spec.frequencyDeviationHz = 1500.0;
+        spec.phaseDeviationRad = 60.0 * std::numbers::pi / 180.0;
+        const qacq::dsp::ModulatedSignal m = qacq::dsp::modulate(spec);
+        REQUIRE(m.ok());
+        CHECK(largestGap(y, m.passband) < 1e-9);
+    }
+
+    // The message from the components above (replaced), or from another channel.
+    GeneratorComponent carrier = defaultGeneratorComponent(Waveform::Modulation, 48000.0, 0.02);
+    CHECK(carrier.frequencyHz == 10000.0);
+    CHECK(carrier.variables == "fm = 1000");
+    CHECK(carrier.deviationHz == 2000.0);
+    carrier.message = "sin(2*pi*500*t)";
+    const std::vector<double> reference = alone(carrier);
+    GeneratorComponent above = carrier;
+    above.message = "x";
+    GeneratorRecipe r;
+    r.sampleRateHz = 48000.0;
+    r.durationSeconds = 0.02;
+    GeneratorChannel message, modulated;
+    message.components = {make(Waveform::Sine, 1.0, 500.0)};
+    modulated.components = {make(Waveform::Sine, 1.0, 500.0), above};
+    r.channels = {modulated};
+    GeneratorResult g = generateSignal(r);
+    REQUIRE(g.ok());
+    CHECK(largestGap(g.signal.data->channels[0], reference) < 1e-9);
+    GeneratorComponent other = carrier;
+    other.message = "v1";
+    modulated.components = {other};
+    r.channels = {message, modulated};
+    g = generateSignal(r);
+    REQUIRE(g.ok());
+    CHECK(largestGap(g.signal.data->channels[1], reference) < 1e-9);
+    CHECK((checkOperation(r, 1, 0).channels == std::vector<std::size_t>{0}));
+    r.channels[1].components[0].message = "v2";
+    CHECK(contains(checkOperation(r, 1, 0).error, "Message : « v2 » est la voie elle-même"));
+
+    // What is said: overmodulation, an instantaneous frequency beyond fs/2, a carrier beyond fs/2, a message
+    // that is not a number.
+    std::vector<std::string> warnings;
+    GeneratorComponent deep = carrier;
+    deep.amIndex = 1.5;
+    alone(deep, 48000.0, 0.02, &warnings);
+    REQUIRE(warnings.size() == 1);
+    CHECK(contains(warnings[0], "surmodulation : m × crête du message = 1,5 > 1"));
+    GeneratorComponent wide = carrier;
+    wide.modulation = CarrierModulation::Fm;
+    wide.deviationHz = 20000.0;
+    alone(wide, 48000.0, 0.02, &warnings);
+    REQUIRE(warnings.size() == 1);
+    CHECK(contains(warnings[0], "la fréquence instantanée va de"));
+    GeneratorComponent high = carrier;
+    high.frequencyHz = 30000.0;
+    alone(high, 48000.0, 0.02, &warnings);
+    REQUIRE(warnings.size() == 1);
+    CHECK(contains(warnings[0], "dépasse fs/2"));
+    GeneratorComponent undefined = carrier;
+    undefined.message = "1/t";
+    alone(undefined, 48000.0, 0.02, &warnings);
+    REQUIRE(!warnings.empty());
+    CHECK(contains(warnings[0], "Le message n'est pas un nombre fini en 1 échantillon"));
+    std::string error;
+    GeneratorComponent wrong = carrier;
+    wrong.message = "sin(2*pi*f*t)";
+    CHECK(alone(wrong, 48000.0, 0.02, nullptr, &error).empty());
+    CHECK(contains(error, "Porteuse modulée) — Message : Nom inconnu « f »"));
+
+    // Ready-made messages; text, JSON, another waveform.
+    const std::vector<OperationModel> messages = messageModels(1, 3);
+    REQUIRE(messages.size() == 5);
+    CHECK((messages[3].key == "v1" && messages[3].formula == "v1" && messages[4].key == "v3"));
+    GeneratorComponent m = defaultGeneratorComponent(Waveform::Modulation);
+    m.variables.clear();
+    CHECK(applyMessageModel(m, "above", 1, 3));
+    CHECK(m.message == "x");
+    CHECK(applyMessageModel(m, "square", 1, 3));
+    CHECK(m.message == "sign(sin(2*pi*fm*t))");
+    CHECK(m.variables == "fm = 1000");
+    m.variables = "a = 2";
+    CHECK(applyMessageModel(m, "sine", 1, 3));
+    CHECK(m.variables == "a = 2 ; fm = 1000");
+    m.variables = "fm = 300";
+    CHECK(applyMessageModel(m, "sine", 1, 3));
+    CHECK(m.variables == "fm = 300");
+    CHECK(applyMessageModel(m, "v3", 1, 3));
+    CHECK(m.message == "v3");
+    CHECK(!applyMessageModel(m, "v2", 1, 3));
+    CHECK(componentText(carrier, "V") == "Porteuse 10 kHz, 1 V crête, modulée en amplitude (m = 0,5) par sin(2*pi*500*t) (fm = 1000)");
+    GeneratorComponent fm = carrier;
+    fm.modulation = CarrierModulation::Fm;
+    fm.phaseDegrees = 90.0;
+    CHECK(componentText(fm, "V") == "Porteuse 10 kHz, 1 V crête, phase 90°, modulée en fréquence (Δf = 2 kHz) par sin(2*pi*500*t) (fm = 1000)");
+    const GeneratorComponent read = generatorComponentFromJson(toJson(fm));
+    CHECK(read.modulation == CarrierModulation::Fm);
+    CHECK(read.message == fm.message);
+    CHECK(read.deviationHz == 2000.0);
+    CHECK(toJson(fm)["modulation"].toString() == "fm");
+    const GeneratorComponent fromSine = withWaveform(make(Waveform::Sine, 3.0, 2000.0), Waveform::Modulation);
+    CHECK(fromSine.amplitude == 3.0);
+    CHECK(fromSine.frequencyHz == 2000.0);
+    CHECK(fromSine.variables == "fm = 200");
+    CHECK(fromSine.deviationHz == 400.0);
+    CHECK(withWaveform(fm, Waveform::Sine).frequencyHz == 10000.0);
 }

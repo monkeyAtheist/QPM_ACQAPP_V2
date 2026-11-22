@@ -5,6 +5,7 @@ add_executable(qacq_tests
     test_spectrum.cpp
     test_tone.cpp
     test_filters.cpp
+    test_filter_module.cpp
     test_generator.cpp
     test_modulation.cpp
     test_io.cpp
@@ -55,7 +56,7 @@ qacq_add_test_group(audit      "[audit]"      slow)
 # Application layer (needs Qt): signal list model, session files, remembered settings.
 if(TARGET qacq_app)
     add_executable(qacq_app_tests app_main.cpp test_app.cpp test_acquisition_app.cpp test_analysis_app.cpp
-                               test_generator_app.cpp)
+                               test_generator_app.cpp test_filter_app.cpp)
     target_link_libraries(qacq_app_tests PRIVATE qacq_app)
     target_include_directories(qacq_app_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     qacq_set_warnings(qacq_app_tests)

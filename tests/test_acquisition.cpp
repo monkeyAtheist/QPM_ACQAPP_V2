@@ -452,6 +452,57 @@ TEST_CASE("Sample pipe: drops when the consumer is late, marked and counted", "[
     CHECK(breaks.back() == 1024); // after the drop
 }
 
+TEST_CASE("Sample pipe: a record begun at the end of a block, or in a block without frames", "[acquisition]")
+{
+    // Waveform answers of an instrument, cut as a network may cut them: the header of an answer at the end
+    // of a read, or alone in its read. Each record but the first starts after a break.
+    DecoderSettings out;
+    out.kind = DecoderKind::Scpi;
+    out.scpi.channels = 1;
+    out.scpi.block = {io::SampleType::Int16, io::ByteOrder::LittleEndian, 0.001, 0.0};
+    SimulatedSettings sim;
+    sim.channels = {{dsp::Waveform::Sine, 1.0, 50.0, 0.0, 0.0, 0.5, 0.0}};
+    SimulatedDevice device(sim, out, 10000.0);
+    device.waveformPoints = 250;
+    std::string stream;
+    for (int k = 0; k < 4; ++k) stream += device.answer(":WAV:DATA?");
+    const std::size_t answer = stream.size() / 4;
+    REQUIRE(answer * 4 == stream.size());
+    const std::size_t header = 5; // "#3500"
+    // Reads: answer 1 with the header of answer 2; the rest of answer 2; the header of answer 3 alone;
+    // answer 3's samples with all of answer 4.
+    const std::vector<std::pair<std::size_t, std::size_t>> reads = {
+        {0, answer + header}, {answer + header, answer - header}, {2 * answer, header}, {2 * answer + header, 2 * answer - header}};
+    io::ScpiDecoder decoder(out.scpi);
+    SamplePipe pipe(1, 1 << 14);
+    io::SampleBlock block;
+    for (const auto &[from, length] : reads)
+    {
+        block.clear();
+        decoder.decode({reinterpret_cast<const std::uint8_t *>(stream.data()) + from, length}, block);
+        if (block.frameCount() > 0 || !block.discontinuities.empty()) pipe.push(block);
+    }
+    std::vector<double> values;
+    std::vector<std::uint64_t> breaks;
+    CHECK(pipe.pull(values, breaks) == 1000);
+    CHECK(breaks == (std::vector<std::uint64_t>{250, 500, 750}));
+    CHECK(pipe.droppedFrames() == 0);
+
+    // A break at the end of a block and another at the start of the next one: the same place, once.
+    SamplePipe twice(1, 64);
+    io::SampleBlock a;
+    a.channelCount = 1;
+    a.values = {1, 2, 3};
+    a.discontinuities = {3};
+    CHECK(twice.push(a) == 3);
+    a.discontinuities = {0, 2};
+    CHECK(twice.push(a) == 3);
+    std::vector<double> got;
+    std::vector<std::uint64_t> at;
+    CHECK(twice.pull(got, at) == 6);
+    CHECK(at == (std::vector<std::uint64_t>{3, 5}));
+}
+
 TEST_CASE("Sample pipe between two threads, into the recorder", "[acquisition][pipe]")
 {
     const std::size_t channels = 3;

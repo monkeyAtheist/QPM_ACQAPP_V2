@@ -95,15 +95,15 @@ void SourceWorker::consume(const char *data, qsizetype size)
 {
     if (size <= 0 || !m_decoder) return;
     m_decoder->decode(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t *>(data), static_cast<std::size_t>(size)), m_block);
-    if (m_block.frameCount() > 0)
+    if (m_block.frameCount() > 0 && !m_pipe)
     {
-        if (!m_pipe)
-        {
-            m_pipe = std::make_shared<acquisition::SamplePipe>(m_block.channelCount, pipeCapacityFrames(m_block.channelCount));
-            m_shared->setPipe(m_pipe);
-        }
-        if (m_block.channelCount == m_pipe->channelCount()) m_pipe->push(m_block);
+        m_pipe = std::make_shared<acquisition::SamplePipe>(m_block.channelCount, pipeCapacityFrames(m_block.channelCount));
+        m_shared->setPipe(m_pipe);
     }
+    // A block without frames still goes when it begins a record (a header read, its samples to come): the
+    // pipe marks the break before them.
+    if (m_pipe && m_block.channelCount == m_pipe->channelCount() && (m_block.frameCount() > 0 || !m_block.discontinuities.empty()))
+        m_pipe->push(m_block);
     if (!m_block.channelNames.empty() && m_block.channelNames != m_names)
     {
         m_names = m_block.channelNames;

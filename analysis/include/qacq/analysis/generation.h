@@ -21,6 +21,15 @@
 // Recurrence: y[n] typed as a formula of the values before it (y[n−1]…, x[n], x[n−1]…), of n, t, fs, Te, N
 // and variables, from initial values y[−1]…, driven by an input x[n] (none, Dirac, step, white noise, or the
 // components above it in the channel, which y[n] then replaces: it filters them).
+//
+// Operation between channels: y typed as a formula of the other channels v1…v16 (each as made, offset
+// included), of x (the components above it in its channel, which y then replaces), of n, t, fs, Te, N and of
+// variables: "v1*v2", "(v1 + v2)/2", "sin(2*pi*50*t)^3". A channel is made after those it reads; a channel
+// cannot read itself, even through others.
+//
+// Modulated carrier: A cos(2π fc t + φ) modulated in amplitude, frequency or phase by a message typed as an
+// operation ("sin(2*pi*fm*t)", "v1", "x"), through qacq::dsp::AnalogModulator (the module Modulations uses
+// the same).
 
 #include "qacq/dsp/generator.h"
 #include "qacq/model/json.h"
@@ -51,7 +60,17 @@ enum class WaveKind
     Sweep,
     FourierSeries,
     Drawn,
-    Recurrence
+    Recurrence,
+    Formula,   // operation between channels
+    Modulation // modulated carrier
+};
+
+// How a carrier is modulated by its message m: amplitude A (1 + index m), frequency fc + Δf m, phase φ + Δφ m.
+enum class CarrierModulation
+{
+    Am,
+    Fm,
+    Pm
 };
 
 enum class SeriesForm
@@ -131,6 +150,17 @@ struct GeneratorComponent
     std::string recurrence = "0";
     std::string initialValues;
     RecurrenceInput recurrenceInput = RecurrenceInput::None;
+    // An operation between channels: y (also typed "y = …"), a formula of v1…v16 (also V1…), x, n, t, fs, Te,
+    // N and its `variables`.
+    std::string expression = "x";
+    // A modulated carrier: amplitude, frequencyHz and phaseDegrees are those of the carrier; its message m (a
+    // formula as an operation, also typed "m = …") modulates it in amplitude (amIndex), frequency (deviationHz
+    // per unit of m) or phase (phaseDeviationDegrees per unit of m).
+    CarrierModulation modulation = CarrierModulation::Am;
+    std::string message = "sin(2*pi*fm*t)";
+    double amIndex = 0.5;
+    double deviationHz = 1000.0;
+    double phaseDeviationDegrees = 90.0;
 };
 
 struct GeneratorChannel
@@ -251,6 +281,43 @@ bool recurrenceUsesInput(const GeneratorComponent &component, double sampleRateH
 bool applyRecurrenceModel(GeneratorComponent &component, std::string_view key, double amplitude = 1.0,
                           double frequencyHz = 1000.0, double phaseDegrees = 0.0);
 
+// What an operation between channels (or the message of a modulated carrier) reads, and what is wrong in it,
+// in French: its formula ("y : Nom inconnu « w » (caractère 3)", "Message : …"), its variables, a channel
+// that does not exist, its own channel, a loop through other channels ("Voies 2 → 3 → 2 : …").
+struct OperationCheck
+{
+    std::string error;
+    std::vector<std::size_t> channels; // read, from 0
+    bool readsAbove = false;           // x: the components above it, which it then replaces
+};
+OperationCheck checkOperation(const GeneratorRecipe &recipe, std::size_t channel, std::size_t component);
+// The formula of a new operation in that channel: the sum of the first two other channels ("v1 + v2"), the
+// other one and the components above ("v1 + x"), or with one channel only the components above ("x").
+std::string defaultOperation(std::size_t channel, std::size_t channelCount);
+// Ready-made operations of a and b, the first two channels other than this one (with one other channel, b is
+// x; with none, a is x and only the operations of one value are given): "sum", "difference", "product",
+// "ratio", "mean", "magnitude" (√(a² + b²)), "abs", "square", "halfwave" (max(a; 0)). Ready-made messages
+// of a modulated carrier: "sine" (sin(2*pi*fm*t)), "square" (sign(sin(2*pi*fm*t))), "above" (x), "v1"…
+// (another channel).
+struct OperationModel
+{
+    std::string key;     // "product"
+    std::string name;    // "Produit"
+    std::string formula; // "v1*v2"
+};
+std::vector<OperationModel> operationModels(std::size_t channel, std::size_t channelCount);
+bool applyOperationModel(GeneratorComponent &component, std::string_view key, std::size_t channel, std::size_t channelCount);
+std::vector<OperationModel> messageModels(std::size_t channel, std::size_t channelCount);
+// The message of that model; "sine" and "square" give the variables fm (a tenth of the carrier) if they have
+// no fm.
+bool applyMessageModel(GeneratorComponent &component, std::string_view key, std::size_t channel, std::size_t channelCount);
+// The channels whose operations or modulated carriers name that one (v2…), counted or not, from 0.
+std::vector<std::size_t> channelReaders(const GeneratorRecipe &recipe, std::size_t channel);
+// The recipe without that channel; the formulas that name channels after it name them by their new number
+// (v3 becomes v2). False, the recipe unchanged, with why (in French): it is the last one, or others read it.
+bool removeGeneratorChannel(GeneratorRecipe &recipe, std::size_t channel, std::string *error = nullptr);
+std::string_view carrierModulationKey(CarrierModulation modulation) noexcept; // "am", "fm", "pm"
+
 // The coefficients of a Fourier series, in the form aₙ / bₙ whatever the form typed, for n = 1..count.
 struct SeriesCoefficients
 {
@@ -271,7 +338,7 @@ std::size_t generatorSampleCount(const GeneratorRecipe &recipe) noexcept;
 std::string checkGeneratorRecipe(const GeneratorRecipe &recipe);
 
 std::string_view waveformKey(WaveKind waveform) noexcept; // "sine", "square"... as the simulator; "fourier", "drawn",
-                                                         // "recurrence"
+                                                         // "recurrence", "formula", "modulation"
 bool waveformFromKey(std::string_view key, WaveKind &waveform) noexcept;
 std::string_view generatorWaveformName(WaveKind waveform) noexcept; // "Sinus"... "Dirac", "Balayage"
 // The waveform of qacq::dsp::generate behind a kind (false for a Fourier series).
@@ -289,7 +356,8 @@ GeneratorRecipe generatorRecipeFromJson(const model::Json &json);
 
 // "Sinus 1 kHz, 1 V crête", "Bruit gaussien, écart type 100 mV", "Balayage 20 Hz → 20 kHz (log.), 1 V crête",
 // "Série de Fourier 1 kHz, 15 harmoniques : bₙ = 4*E/(pi*n)*odd(n) (E = 1)", "Motif dessiné 1 kHz, 4 points
-// (segments), 1 V crête".
+// (segments), 1 V crête", "Opération entre voies : v1*v2", "Porteuse 10 kHz, 1 V crête, modulée en amplitude
+// (m = 0,5) par sin(2*pi*fm*t) (fm = 1000)".
 std::string componentText(const GeneratorComponent &component, const std::string &unit);
 
 // The first values of a recurrence as generated (12 at most), to show them.
@@ -310,8 +378,8 @@ struct GeneratorResult
     bool ok() const noexcept { return error.empty(); }
 };
 
-// The signal of the recipe: every channel the offset plus its enabled components. The progress goes by
-// components (one component is not stopped half way).
+// The signal of the recipe: every channel the offset plus its enabled components, made after the channels
+// its operations read. The progress goes by components.
 GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progress &progress = {});
 
 // Ready-made recipes for the menu "Exemples".

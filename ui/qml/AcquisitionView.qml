@@ -16,6 +16,8 @@ Item {
     required property var serialPorts
     property var signalId: 0
     property Item ribbonHost: null
+    // The height its header needs (one row of groups, or more in a narrow window): the host takes it.
+    readonly property real ribbonHeight: moduleHeader.implicitHeight
     property bool leftFolded: false
     property bool rightFolded: false
     signal unfoldLeft()
@@ -42,6 +44,7 @@ Item {
     }
 
     Ribbon {
+        id: moduleHeader
         parent: root.ribbonHost ? root.ribbonHost : root
         visible: root.visible
         tabs: [qsTr("Acquisition")]

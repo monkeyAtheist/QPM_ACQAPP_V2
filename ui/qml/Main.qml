@@ -8,8 +8,8 @@ import Qacq.App
 
 // The window: the shell of QTsignalApp V2 (module bar, tool header across the window, side panels that
 // fold away) around the modules. One session: its signals are listed on the left in every module; on the
-// right, the measurements (Signaux), the settings of the source (Acquisition) or the composition of the
-// signal (Générateur), and the signal chosen.
+// right, the measurements (Signaux), the settings of the source (Acquisition), the composition of the
+// signal (Générateur) or the filter in detail (Filtres), and the signal chosen.
 ApplicationWindow {
     id: window
     required property var session
@@ -17,6 +17,7 @@ ApplicationWindow {
     required property var analysis
     required property var curves
     required property var generator
+    required property var filters
     required property var player
     required property var serialPorts
     required property var appSettings
@@ -36,12 +37,12 @@ ApplicationWindow {
     Material.background: Theme.window
     color: Theme.window
 
-    // 0 Signaux (with the curves and the spectra), 1 Acquisition, 2 Générateur (filters and modulations
+    // 0 Signaux (with the curves and the spectra), 1 Acquisition, 2 Générateur, 3 Filtres (modulations
     // come next).
     property int module: 1
     property var selectedId: 0
-    // 0 measurements or settings of the module, then the selected signal (1; 2 in the generator, whose
-    // measurements of the preview are tab 1).
+    // 0 measurements or settings of the module, then the selected signal (1; 2 in the generator and the
+    // filters, whose measurements of the preview are tab 1).
     property int inspectorTab: 0
     property int generatorChannel: 0 // the channel of the recipe edited
     property bool signalsPanelOpen: true
@@ -171,7 +172,7 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
-        if (module < 0 || module > 2)
+        if (module < 0 || module > 3)
             module = 0
         if (windowSettings.splitState)
             split.restoreState(windowSettings.splitState)
@@ -249,6 +250,10 @@ ApplicationWindow {
     Connections {
         target: window.generator
         function onLastErrorChanged() { window.showError(window.generator.lastError) }
+    }
+    Connections {
+        target: window.filters
+        function onLastErrorChanged() { window.showError(window.filters.lastError) }
     }
     Connections {
         target: window.acquisition
@@ -517,7 +522,12 @@ ApplicationWindow {
             Item {
                 id: moduleRibbon
                 Layout.fillWidth: true
-                Layout.preferredHeight: 110
+                // As tall as the header shown: its groups on one row, or on two when the window is narrow.
+                // (No loop over the children: qmlcachegen would turn its index into C++ conversions.)
+                Layout.preferredHeight: Math.max(110, window.module === 0 ? signalsView.ribbonHeight
+                                                      : window.module === 1 ? acquisitionView.ribbonHeight
+                                                      : window.module === 2 ? generatorView.ribbonHeight
+                                                      : filtersView.ribbonHeight)
             }
 
             SplitView {
@@ -614,6 +624,27 @@ ApplicationWindow {
                         onInfoMessage: (text) => window.showInfo(text)
                         onErrorMessage: (text) => window.showError(text)
                     }
+                    FiltersView {
+                        id: filtersView
+                        anchors.fill: parent
+                        visible: window.module === 3
+                        ribbonHost: moduleRibbon
+                        filters: window.filters
+                        player: window.player
+                        session: window.session
+                        appSettings: window.appSettings
+                        signalId: window.selectedId
+                        leftFolded: !window.signalsPanelOpen
+                        rightFolded: !window.inspectorOpen
+                        onUnfoldLeft: window.signalsPanelOpen = true
+                        onUnfoldRight: window.inspectorOpen = true
+                        onDesignRequested: {
+                            window.inspectorOpen = true
+                            window.inspectorTab = 0
+                        }
+                        onInfoMessage: (text) => window.showInfo(text)
+                        onErrorMessage: (text) => window.showError(text)
+                    }
                 }
 
                 Inspector {
@@ -627,6 +658,7 @@ ApplicationWindow {
                     analysis: window.analysis
                     curves: window.curves
                     generator: window.generator
+                    filters: window.filters
                     module: window.module
                     signalId: window.selectedId
                     tab: window.inspectorTab

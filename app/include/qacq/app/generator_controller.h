@@ -37,7 +37,8 @@ class GeneratorController : public QObject
     // law ("linear", "log"), noise ("gaussian", "uniform"), bandLimit ("sampled", "fourier"), harmonics; a
     // Fourier series: form, variables, a0, an, bn; a drawn motif: motif [[x, y]...], interpolation ("steps",
     // "linear", "smooth"), once; a recurrence: recurrence, initial, input ("none", "impulse", "step", "noise",
-    // "above"), variables}]}].
+    // "above"), variables; an operation between channels: expression, variables; a modulated carrier:
+    // modulation ("am", "fm", "pm"), message, variables, index, deviation, phaseDeviation}]}].
     Q_PROPERTY(QVariantMap recipe READ recipe NOTIFY recipeChanged)
     Q_PROPERTY(qint64 sampleCount READ sampleCount NOTIFY recipeChanged) // per channel
     Q_PROPERTY(QString sizeText READ sizeText NOTIFY recipeChanged)      // "48 000 échantillons · 375,0 Kio"
@@ -84,10 +85,11 @@ public:
     Q_INVOKABLE void setRecipe(const QVariantMap &recipe);
     Q_INVOKABLE void setSignalSettings(const QVariantMap &values); // name, sampleRate, duration, seed
     Q_INVOKABLE int addChannel();                                  // its index, -1 when there are 16
-    Q_INVOKABLE void removeChannel(int channel);                   // the last one stays
+    // The last one stays, so does one that another reads (lastError says which); formulas renumbered.
+    Q_INVOKABLE void removeChannel(int channel);
     Q_INVOKABLE void setChannel(int channel, const QVariantMap &values); // name, unit, offset
-    // A component of that waveform ("sine", "square"... "noise", "sweep"), with usual values; its index,
-    // -1 when there are 32.
+    // A component of that waveform ("sine", "square"... "noise", "sweep"), with usual values (an operation
+    // between channels: the sum of two others, analysis::defaultOperation); its index, -1 when there are 32.
     Q_INVOKABLE int addComponent(int channel, const QString &waveform);
     Q_INVOKABLE void removeComponent(int channel, int component);
     Q_INVOKABLE void moveComponent(int channel, int from, int to);
@@ -114,6 +116,14 @@ public:
     // it is)}; a ready-made recurrence ("oscillator", "lowpass", "resonator", "average", "walk", "logistic").
     Q_INVOKABLE QVariantMap recurrenceInfo(int channel, int component) const;
     Q_INVOKABLE void applyRecurrenceModel(int channel, int component, const QString &model);
+    // An operation between channels or a modulated carrier: {error (what is wrong, at once), caution (x reads
+    // nothing), note (the channels read by name, what x replaces)}; ready-made operations and messages
+    // [{key, name, formula}] for that channel, and applying one.
+    Q_INVOKABLE QVariantMap operationInfo(int channel, int component) const;
+    Q_INVOKABLE QVariantList operationModels(int channel) const;
+    Q_INVOKABLE void applyOperationModel(int channel, int component, const QString &model);
+    Q_INVOKABLE QVariantList messageModels(int channel) const;
+    Q_INVOKABLE void applyMessageModel(int channel, int component, const QString &model);
     Q_INVOKABLE QString recipeText() const; // JSON on one line
     Q_INVOKABLE void restoreRecipe(const QString &text);
     // The recipe of a signal of the session made here; false (lastError) if it has none.

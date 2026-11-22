@@ -403,6 +403,124 @@ Canvas {
             line([6, 16.5, 3, 19, 6, 21.5], false)
             line([18, 16.5, 21, 19, 18, 21.5], false)
             break
+        // ---- Filters ----
+        case "gain":
+            // |H|: flat, then falling past the cut.
+            line([3, 21, 21, 21], false)
+            line([3, 21, 3, 3], false)
+            line([4, 7, 11, 7], false)
+            c.beginPath()
+            c.moveTo(11, 7)
+            c.quadraticCurveTo(15, 7.5, 20, 19)
+            c.stroke()
+            break
+        case "phase":
+            // Falling, with a jump of π.
+            line([3, 21, 21, 21], false)
+            line([3, 21, 3, 3], false)
+            line([5, 5, 12, 13], false)
+            line([12, 6, 20, 15], false)
+            break
+        case "delay":
+            line([3, 21, 21, 21], false)
+            line([3, 21, 3, 3], false)
+            line([4, 15, 8, 15], false)
+            c.beginPath()
+            c.moveTo(8, 15)
+            c.quadraticCurveTo(12, 2, 16, 15)
+            c.stroke()
+            line([16, 15, 20, 15], false)
+            break
+        case "impulse":
+            line([3, 20, 21, 20], false)
+            line([5, 20, 5, 5], false)
+            line([9, 20, 9, 11], false)
+            line([13, 20, 13, 16], false)
+            line([17, 20, 17, 18], false)
+            circle(5, 5, 1.4, true)
+            circle(9, 11, 1.4, true)
+            circle(13, 16, 1.4, true)
+            circle(17, 18, 1.4, true)
+            break
+        case "stepresp":
+            line([3, 19, 7, 19, 7, 9], false)
+            c.beginPath()
+            c.moveTo(7, 9)
+            c.bezierCurveTo(9, 3, 11, 13, 14, 8)
+            c.quadraticCurveTo(16, 6, 21, 8)
+            c.stroke()
+            break
+        case "polezero":
+            circle(12, 12, 8, false)
+            line([2, 12, 22, 12], false)
+            line([15, 6, 19, 10], false)
+            line([15, 10, 19, 6], false)
+            circle(8, 16, 2, false)
+            break
+        case "iir":
+        case "fir":
+            c.font = "bold 9px sans-serif"
+            c.fillText(icon.name === "iir" ? "RII" : "RIF", 2, 15)
+            break
+        case "response":
+            // A band-pass: low, up, flat, down.
+            line([3, 19, 8, 19, 10, 7, 15, 7, 17, 19, 21, 19], false)
+            break
+        case "family":
+            // The ripple of a Chebyshev in the band, then the fall.
+            line([3, 21, 21, 21], false)
+            wave(3, 12, 8, 1.5, 4)
+            c.beginPath()
+            c.moveTo(12, 8)
+            c.quadraticCurveTo(15, 9, 19, 19)
+            c.stroke()
+            break
+        case "causal":
+            // The response after the impulse only.
+            line([3, 20, 21, 20], false)
+            line([7, 20, 7, 4], false)
+            line([7, 8, 10, 6, 13, 14, 16, 11, 20, 12], false)
+            break
+        case "zerophase":
+            // Forward, then backward.
+            line([4, 8, 19, 8], false)
+            line([16, 5, 19, 8, 16, 11], false)
+            line([20, 16, 5, 16], false)
+            line([8, 13, 5, 16, 8, 19], false)
+            break
+        case "aligned":
+            // Symmetric about its middle.
+            line([3, 20, 21, 20], false)
+            line([12, 20, 12, 4], false)
+            line([9, 20, 9, 12], false)
+            line([15, 20, 15, 12], false)
+            line([6, 20, 6, 17], false)
+            line([18, 20, 18, 17], false)
+            break
+        case "wrap":
+            line([3, 16, 9, 6, 9, 16, 15, 6, 15, 16, 21, 6], false)
+            break
+        case "applied":
+            // The same response, dashed.
+            line([4, 7, 11, 7], false)
+            c.setLineDash([2.5, 2])
+            c.beginPath()
+            c.moveTo(4, 12)
+            c.lineTo(11, 12)
+            c.quadraticCurveTo(15, 12.5, 20, 21)
+            c.stroke()
+            c.setLineDash([])
+            c.beginPath()
+            c.moveTo(11, 7)
+            c.quadraticCurveTo(15, 7.5, 20, 17)
+            c.stroke()
+            break
+        case "rate":
+            // fs: a sampled wave.
+            wave(3, 21, 11, 6, 2)
+            for (let k = 0; k < 5; ++k)
+                circle(4.5 + k * 3.75, 11 - 6 * Math.sin(Math.PI * 2 * (1.5 + k * 3.75) / 18), 1.2, true)
+            break
         case "caret":
             c.beginPath()
             c.moveTo(4, 8)

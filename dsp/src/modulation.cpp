@@ -128,6 +128,33 @@ double fraction(double x) noexcept
 }
 } // namespace
 
+AnalogModulator::AnalogModulator(Modulation type, double sampleRateHz, double amplitude, double amIndex,
+                                 double frequencyDeviationHz, double phaseDeviationRad) noexcept
+    : m_type(type), m_sampleRate(sampleRateHz), m_amplitude(amplitude), m_amIndex(amIndex),
+      m_deviation(frequencyDeviationHz), m_phaseDeviation(phaseDeviationRad)
+{
+}
+
+std::complex<double> AnalogModulator::next(double m) noexcept
+{
+    // (a cos, a sin rather than std::polar: the same numbers, and defined for a negative amplitude.)
+    switch (m_type)
+    {
+        case Modulation::Am: return {m_amplitude * (1.0 + m_amIndex * m), 0.0};
+        case Modulation::Fm:
+        {
+            const std::complex<double> b(m_amplitude * std::cos(m_theta), m_amplitude * std::sin(m_theta));
+            m_theta = std::remainder(m_theta + kTwoPi * m_deviation * m / m_sampleRate, kTwoPi);
+            return b;
+        }
+        default:
+        {
+            const double phase = m_phaseDeviation * m;
+            return {m_amplitude * std::cos(phase), m_amplitude * std::sin(phase)};
+        }
+    }
+}
+
 ModulatedSignal modulate(const ModulationSpec &spec)
 {
     ModulatedSignal out;
@@ -165,20 +192,8 @@ ModulatedSignal modulate(const ModulationSpec &spec)
         {
             for (std::size_t i = 0; i < n; ++i) out.message[i] = spec.message[i % spec.message.size()];
         }
-        double theta = 0.0;
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            const double m = out.message[i];
-            switch (spec.type)
-            {
-                case Modulation::Am: b[i] = {a * (1.0 + spec.amIndex * m), 0.0}; break;
-                case Modulation::Fm:
-                    b[i] = std::polar(a, theta);
-                    theta = std::remainder(theta + kTwoPi * spec.frequencyDeviationHz * m / fs, kTwoPi);
-                    break;
-                default: b[i] = std::polar(a, spec.phaseDeviationRad * m); break;
-            }
-        }
+        AnalogModulator modulator(spec.type, fs, a, spec.amIndex, spec.frequencyDeviationHz, spec.phaseDeviationRad);
+        for (std::size_t i = 0; i < n; ++i) b[i] = modulator.next(out.message[i]);
         const double fm = spec.messageFrequencyHz;
         out.occupiedBandwidthHz = spec.type == Modulation::Am   ? 2.0 * fm
                                   : spec.type == Modulation::Fm ? 2.0 * (spec.frequencyDeviationHz + fm)

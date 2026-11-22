@@ -3,8 +3,10 @@ import QtQuick.Controls
 
 // Tool header (the "ruban") of a module, across the window part the shell gives (as in QTsignalApp V2):
 // the views of the module as tabs, quick tools at the right of the tabs, and under them the tools in
-// named groups (RibbonGroup). In a window narrower than the groups, they scroll sideways (wheel, drag,
-// or the bar under them). A module view places it with `parent: ribbonHost` and shows it with itself.
+// named groups (RibbonGroup). In a window narrower than the groups, they go on to a second row (and more):
+// no tool is out of sight. Its implicitHeight follows: the host gives it that height (Main.qml). Only a
+// group wider than the whole window would scroll sideways. A module view places it with
+// `parent: ribbonHost` and shows it with itself.
 // The tabs are pills that stand out (the current one filled), each with its icon and its tip: with
 // several tabs, the tools of the others are easy to miss otherwise.
 Rectangle {
@@ -21,6 +23,10 @@ Rectangle {
     anchors.fill: parent
     z: 10
     color: Theme.panel
+    // The tabs, the groups on as many rows as they need, the line under them.
+    implicitHeight: 31 + toolsRow.height + 1
+    readonly property int rowHeight: 76
+    readonly property int rows: Math.max(1, Math.round((toolsRow.height - toolsRow.topPadding) / rowHeight))
 
     Row {
         x: 8
@@ -95,7 +101,7 @@ Rectangle {
     Item {
         y: 31
         width: parent.width
-        height: 78
+        height: toolsRow.height
         WheelHandler {
             enabled: toolsFlick.contentWidth > toolsFlick.width
             onWheel: (event) => {
@@ -103,10 +109,25 @@ Rectangle {
                 toolsFlick.contentX = Math.max(0, Math.min(span, toolsFlick.contentX - event.angleDelta.y - event.angleDelta.x))
             }
         }
+        // A hairline between two rows of groups.
+        Repeater {
+            model: ribbon.rows - 1
+            delegate: Rectangle {
+                required property int index
+                y: toolsRow.topPadding + (index + 1) * ribbon.rowHeight
+                width: parent.width
+                height: 1
+                color: Theme.border
+            }
+        }
         Flickable {
             id: toolsFlick
             anchors.fill: parent
-            contentWidth: toolsRow.width
+            // Wider than the window only for a group wider than it (it then scrolls sideways). The implicit
+            // width of the Flow is the right end of the groups it shows (not childrenRect: the groups of the
+            // other tabs keep their old place; no loop over the children: qmlcachegen would turn its index
+            // into C++ conversions).
+            contentWidth: Math.max(width, toolsRow.implicitWidth)
             contentHeight: height
             clip: true
             boundsBehavior: Flickable.StopAtBounds
@@ -116,9 +137,12 @@ Rectangle {
                 height: 6
                 policy: toolsFlick.contentWidth > toolsFlick.width ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
             }
-            Row {
+            Flow {
                 id: toolsRow
+                width: toolsFlick.width
                 leftPadding: 4
+                rightPadding: 4
+                topPadding: 1
             }
         }
     }

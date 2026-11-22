@@ -38,6 +38,7 @@
 #include "qacq/analysis/analysis.h"
 #include "qacq/analysis/calculus.h"
 #include "qacq/analysis/curves.h"
+#include "qacq/analysis/filters.h"
 #include "qacq/analysis/expression.h"
 #include "qacq/analysis/generation.h"
 #include "qacq/analysis/playback.h"

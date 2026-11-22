@@ -232,6 +232,71 @@ TEST_CASE("Generator: too large a recipe is refused before computing; the newest
     CHECK(generator.previewSignal()->frameCount() == 960);
 }
 
+TEST_CASE("Generator: an operation between channels, a modulated carrier, a channel that is read", "[app]")
+{
+    Session session;
+    GeneratorController generator(&session);
+    generator.reset();
+    generator.setSignalSettings({{QStringLiteral("duration"), 0.01}});
+    REQUIRE(generator.addChannel() == 1);
+    generator.setChannel(0, {{QStringLiteral("name"), QStringLiteral("Tension")}});
+    generator.setChannel(1, {{QStringLiteral("name"), QStringLiteral("Courant")}});
+    REQUIRE(generator.addChannel() == 2);
+
+    // A new operation in the third channel: the sum of the other two, its models.
+    const int sum = generator.addComponent(2, QStringLiteral("formula"));
+    REQUIRE(sum == 1);
+    CHECK(generator.currentRecipe().channels[2].components[1].expression == "v1 + v2");
+    QVariantMap info = generator.operationInfo(2, sum);
+    CHECK(info.value(QStringLiteral("error")).toString().isEmpty());
+    CHECK(info.value(QStringLiteral("note")).toString() == QStringLiteral("v1 : « Tension », v2 : « Courant »."));
+    const QVariantList models = generator.operationModels(2);
+    REQUIRE(models.size() == 9);
+    CHECK(models[2].toMap().value(QStringLiteral("formula")).toString() == QStringLiteral("v1*v2"));
+    generator.applyOperationModel(2, sum, QStringLiteral("product"));
+    CHECK(generator.currentRecipe().channels[2].components[1].expression == "v1*v2");
+    generator.removeComponent(2, 0); // the sine before it
+    generator.waitForIdle();
+    REQUIRE(generator.ready());
+    const auto &data = generator.previewSignal()->data->channels;
+    REQUIRE(data.size() == 3);
+    CHECK(std::abs(data[2][37] - data[0][37] * data[1][37]) < 1e-12);
+
+    // Wrong at once; what x reads.
+    generator.setComponent(2, 0, {{QStringLiteral("expression"), QStringLiteral("v3*2")}});
+    CHECK(generator.operationInfo(2, 0).value(QStringLiteral("error")).toString().contains(QStringLiteral("la voie elle-même")));
+    generator.setComponent(2, 0, {{QStringLiteral("expression"), QStringLiteral("x^2")}});
+    CHECK(generator.operationInfo(2, 0).value(QStringLiteral("caution")).toString().contains(QStringLiteral("x vaut 0")));
+    CHECK(generator.operationInfo(0, 0).isEmpty()); // a sine
+
+    // A sine made an operation: the sum of the other two.
+    generator.setComponent(1, 0, {{QStringLiteral("waveform"), QStringLiteral("formula")}});
+    CHECK(generator.currentRecipe().channels[1].components[0].expression == "v1 + v3");
+    generator.setComponent(1, 0, {{QStringLiteral("waveform"), QStringLiteral("sine")}});
+
+    // A modulated carrier of the channel 1, from its messages.
+    const int carrier = generator.addComponent(1, QStringLiteral("modulation"));
+    REQUIRE(carrier == 1);
+    const QVariantList messages = generator.messageModels(1);
+    REQUIRE(messages.size() == 5);
+    CHECK(messages[3].toMap().value(QStringLiteral("key")).toString() == QStringLiteral("v1"));
+    generator.applyMessageModel(1, carrier, QStringLiteral("v1"));
+    CHECK(generator.currentRecipe().channels[1].components[1].message == "v1");
+    generator.setComponent(1, carrier, {{QStringLiteral("modulation"), QStringLiteral("fm")}, {QStringLiteral("deviation"), 500.0}});
+    CHECK(generator.currentRecipe().channels[1].components[1].modulation == analysis::CarrierModulation::Fm);
+    CHECK(generator.componentText(1, carrier).startsWith(QStringLiteral("Porteuse 10 kHz, 1 V crête, modulée en fréquence (Δf = 500 Hz) par v1")));
+    generator.waitForIdle();
+    CHECK(generator.ready());
+
+    // The channel 1 is read: it stays, and says why.
+    generator.removeChannel(0);
+    CHECK(generator.currentRecipe().channels.size() == 3);
+    CHECK(generator.lastError().startsWith(QStringLiteral("La voie 1 est lue par la voie 2")));
+    // The third goes: nothing reads it.
+    generator.removeChannel(2);
+    CHECK(generator.currentRecipe().channels.size() == 2);
+}
+
 TEST_CASE("Audio player: nothing to play is said, its settings stay within bounds", "[app]")
 {
     // (Nothing is played here: a test does not make the PC sound.)

@@ -106,4 +106,22 @@ struct ModulatedSignal
 };
 
 ModulatedSignal modulate(const ModulationSpec &spec);
+
+// The complex envelope b of an analog modulation (AM, FM, PM), sample after sample, of a message m (|m| <= 1
+// is the usual scale): AM amplitude (1 + amIndex m); FM amplitude exp(j theta), theta advanced by
+// 2 pi deltaF m / fs after each sample (from 0); PM amplitude exp(j phaseDeviation m). The passband is
+// Re{b exp(j (2 pi fc t + phi))}. modulate() goes through it, so does the generator of the application (a
+// modulated carrier): one place for these formulas.
+class AnalogModulator
+{
+public:
+    AnalogModulator(Modulation type, double sampleRateHz, double amplitude, double amIndex, double frequencyDeviationHz,
+                    double phaseDeviationRad) noexcept;
+    std::complex<double> next(double message) noexcept;
+
+private:
+    Modulation m_type;
+    double m_sampleRate, m_amplitude, m_amIndex, m_deviation, m_phaseDeviation;
+    double m_theta = 0.0;
+};
 } // namespace qacq::dsp

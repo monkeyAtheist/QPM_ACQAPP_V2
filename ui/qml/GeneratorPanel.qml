@@ -176,7 +176,7 @@ ScrollView {
                 onClicked: root.generator.removeChannel(root.current)
                 ToolTip.visible: hovered
                 ToolTip.delay: 500
-                ToolTip.text: qsTr("Retirer « %1 » et ses formes d'onde (il reste toujours une voie)").arg(root.currentChannel.name ?? "")
+                ToolTip.text: qsTr("Retirer « %1 » et ses formes d'onde (il reste toujours une voie ; une voie lue par l'opération d'une autre reste)").arg(root.currentChannel.name ?? "")
             }
         }
 

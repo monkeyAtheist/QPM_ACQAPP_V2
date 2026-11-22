@@ -16,6 +16,8 @@ Item {
     required property var appSettings
     property int channel: 0 // the channel edited in the panel Composition
     property Item ribbonHost: null
+    // The height its header needs (one row of groups, or more in a narrow window): the host takes it.
+    readonly property real ribbonHeight: moduleHeader.implicitHeight
     property bool leftFolded: false
     property bool rightFolded: false
     signal unfoldLeft()
@@ -138,6 +140,7 @@ Item {
     }
 
     Ribbon {
+        id: moduleHeader
         parent: root.ribbonHost ? root.ribbonHost : root
         visible: root.visible
         tabs: [qsTr("Composer"), qsTr("Visualiser")]

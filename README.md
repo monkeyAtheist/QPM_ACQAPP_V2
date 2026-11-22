@@ -7,7 +7,7 @@ Ce dépôt est la réécriture de QtAcquisitionApp (« Architecture milestone 57
 **Statut : phase 4 (les modules) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle de
 session, l'acquisition sur ses threads et leurs tests sont en place. La fenêtre Qt Quick existe, sur la coquille
 de QTsignalApp V2 : modules Signaux (visualiser, mesurer, ajouter des courbes et des spectres),
-Acquisition et Générateur ; Filtres et Modulations arrivent ensuite. L'ancienne application reste utilisable
+Acquisition, Générateur et Filtres ; Modulations arrive ensuite. L'ancienne application reste utilisable
 d'ici là.
 
 ## Décisions (20/11/2026)
@@ -32,7 +32,8 @@ dsp/                         qacq_dsp : cœur de traitement du signal C++20, san
   include/qacq/dsp/filtering.h     filtrage en sections, aller-retour sans déphasage, FIR par FFT
   include/qacq/dsp/random.h        aléatoire reproductible (xoshiro256**, même suite sur tout compilateur)
   include/qacq/dsp/generator.h     générateur : formes échantillonnées ou limitées en bande (série de Fourier)
-  include/qacq/dsp/modulation.h    AM, FM, PM, ASK, FSK, BPSK, QPSK ; porteuse réelle ou bande de base I/Q
+  include/qacq/dsp/modulation.h    AM, FM, PM, ASK, FSK, BPSK, QPSK ; porteuse réelle ou bande de base I/Q ;
+                                    AnalogModulator, partagé avec la porteuse modulée du générateur
   include/qacq/dsp/channel.h       bruit blanc gaussien réglé en SNR ou en Eb/N0
   include/qacq/dsp/receiver.h      récepteurs (corrélation, filtre adapté RRC, FSK non cohérente), TEB
 io/                          qacq_io : décodage des données acquises, sans aucune dépendance Qt
@@ -68,6 +69,7 @@ app/                         qacq_app : couche applicative sur QtCore (sans fen�
   include/qacq/app/analysis_controller.h  analyse (module Signaux) : calcul sur son thread, mesures mises en forme, export
   include/qacq/app/curves_controller.h    courbes ajoutées : liste (session), courbes du temps sur un thread
   include/qacq/app/generator_controller.h module Générateur : recette, aperçu sur son thread (session à part), ajout
+  include/qacq/app/filter_controller.h    module Filtres : recette, conception, aperçu avant/après sur son thread, ajout
   include/qacq/app/audio_player.h  écoute d'un signal sur la carte son (Qt Multimedia, préparée sur un thread)
 plot/                        qacq_plot : le moteur de tracé de toutes les vues, sans aucune dépendance Qt
   include/qacq/plot/axis.h          graduations 1-2-5 et log, un préfixe par axe, quantités affichées et saisies
@@ -78,13 +80,18 @@ analysis/                    qacq_analysis : l'analyse sans Qt (spectre d'une zo
   include/qacq/analysis/calculus.h  intégrale, dérivée, valeurs par période, courbe calculée (nouveau signal)
   include/qacq/analysis/curves.h    courbes ajoutées : sortes, noms, unités, liste en JSON, calcul, « Garder »
   include/qacq/analysis/generation.h  recettes du générateur : voies, formes d'onde additionnées, séries de Fourier,
-                                    motifs dessinés (points, tracés, série exacte), récurrences, JSON, exemples
+                                    motifs dessinés (points, tracés, série exacte), récurrences, opérations entre
+                                    voies, porteuses modulées, ordre des voies, JSON, exemples
   include/qacq/analysis/expression.h  formules tapées (coefficients de Fourier…) : opérateurs, fonctions, variables
   include/qacq/analysis/playback.h    un signal prêt pour la carte son : voies, rééchantillonnage, niveau, format
+  include/qacq/analysis/filters.h     module Filtres : recette (RII, RIF fenêtré), conception, réponses (gain, phase
+                                    dépliée, retard, impulsion, indice), pôles et zéros, application à un signal
+                                    (causale, à phase nulle, alignée), JSON, exemples
 ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille de QTsignalApp V2)
   signal_plot.h                    le tracé (QQuickPaintedItem) : signal de la session, défilement, captures
   spectrum_plot.h                  le spectre : fréquences linéaires ou log, niveaux en dB ou linéaires, harmoniques
   motif_editor.h                   l'éditeur d'un motif dessiné du générateur : points, tracés à main levée, grille
+  response_plot.h                  les réponses d'un filtre : gain, phase, retard, impulsion, indice, plan z
   qml/Main.qml                     fenêtre, barre des modules, ruban, liste des signaux, propriétés
   qml/AcquisitionView.qml          module Acquisition : tracé en direct, ruban, état et chiffres de la liaison
   qml/AcquisitionSettings.qml      réglages de la source, du format, de la cadence, des voies ; préréglages
@@ -92,6 +99,8 @@ ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille d
   qml/AnalysisPanel.qml            onglet Mesures : mesures de la zone, pics des spectres, réglages des calculs
   qml/GeneratorView.qml            module Générateur : aperçu du signal et de son spectre, ruban, ajout à la session
   qml/GeneratorPanel.qml           onglet Composition : signal, voies, formes d'onde (WaveCard.qml), préréglages
+  qml/FiltersView.qml              module Filtres : réponses du filtre (Concevoir), avant et après (Appliquer)
+  qml/FilterPanel.qml              onglet Filtre : la recette en détail, ce qu'il fait, ses coefficients
   qml/ViewGroup.qml                groupe « Vue » du ruban, le même dans chaque module
 tests/                       qacq_tests (cœurs) et qacq_app_tests (couche Qt) : un groupe CTest par étiquette
   fixtures/scipy_reference.inc     résultats SciPy (générés, ne pas éditer)
@@ -279,7 +288,9 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
 21/11/2026, selon l'audit). En haut le signal choisi ; dessous, **seulement les courbes qu'on ajoute**
 (onglet Courbes ▸ Ajouter…, ou clic droit sur le tracé). Sans courbe, le signal prend toute la hauteur.
 - **Ruban** : deux onglets bien visibles (pastilles avec icône, l'onglet ouvert en couleur), et dans les
-  deux le groupe Fichier (Importer) et le groupe Écouter (le signal sur la carte son : voir le Générateur). **Onglet Visualiser** : Vue (Tout voir, Zoom ±, Précédente, sur le
+  deux le groupe Fichier (Importer) et le groupe Écouter (le signal sur la carte son : voir le Générateur).
+  Dans une fenêtre trop étroite, les groupes de tous les rubans passent à la ligne (deux étages, ou plus) au
+  lieu de défiler : aucun bouton n'est caché. **Onglet Visualiser** : Vue (Tout voir, Zoom ±, Précédente, sur le
   dernier tracé survolé ; le même groupe que dans Acquisition), Voies (Superposées), Mesurer (Curseurs ; Pic
   et Suivant avec un spectre), Image. **Onglet Courbes** : Courbes (Ajouter…, Superposées, Garder, Tout
   retirer, Exporter ▾ : les courbes du temps ou les spectres en CSV), Zone analysée, Spectres (amplitude ou
@@ -409,6 +420,22 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
   valeurs (n, x[n], y[n]) suivent chaque calcul. **Modèles** : oscillateur (2 cos(w) y[n-1] − y[n-2] : un
   sinus exact ; un sinus changé en récurrence devient le sien, phase comprise), passe-bas du premier ordre,
   résonateur, moyenne glissante, marche aléatoire, suite logistique (chaos).
+- **Opération entre voies** : y tapé comme une formule des voies v1 à v16 (telles qu'elles sont faites,
+  décalage compris ; aussi V1…), de x (les formes d'onde au-dessus dans sa voie, qu'elle remplace alors), de
+  t, n, fs, Te, N et de variables : « v1 + v2 », « v1*v2 », « v1/v2 », « sqrt(v1^2 + v2^2) »,
+  « (1 + 0,5*v2)*v1 », ou toute fonction du temps (« sin(2*pi*50*t)^3 »). Chaque voie est faite après celles
+  qu'elle lit, quel que soit leur ordre ; une voie ne peut pas se lire elle-même, même par d'autres
+  (« Voies 1 → 2 → 1 »). Une valeur qui n'est pas un nombre (division par zéro) vaut 0, et c'est dit. Une
+  nouvelle opération fait la somme des deux premières autres voies ; **Modèles ▾** : somme, différence,
+  produit, quotient, moyenne, module, valeur absolue, carré, redressement. Les voies lues sont nommées sous la
+  formule (« v1 : « Tension » »). Une voie lue par une autre ne peut pas être retirée (le message dit
+  laquelle) ; retirer une autre voie renumérote les formules (v3 devient v2).
+- **Porteuse modulée** : A cos(2π fc t + φ) modulée en **amplitude** A(1 + m·message), en **fréquence**
+  fc + Δf·message ou en **phase** φ + Δφ·message, par un message tapé comme une opération : un sinus
+  (« sin(2*pi*fm*t) », fm en variable), une autre voie (« v1 »), les formes d'onde au-dessus (« x »,
+  remplacées), ou toute formule (**Message ▾**). Les formules de modulation sont celles du module Modulations
+  (`dsp::AnalogModulator`) : les mêmes échantillons. Une surmodulation (m × crête du message > 1), une
+  fréquence instantanée hors de 0…fs/2 ou une porteuse au-delà de fs/2 sont dites.
 - **Repliement ou pas** : un carré, un triangle, une dent de scie ou des impulsions sont échantillonnés tels
   quels (leurs harmoniques au-delà de fs/2 se replient, comme sur un CAN sans filtre), ou « sans repliement »
   par leur série de Fourier jusqu'à fs/2, éventuellement limitée à quelques harmoniques (Gibbs bien visible).
@@ -437,10 +464,53 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
 - **Exemples** (ruban) : sinus 1 kHz, sinus et bruit, multiton, carré avec et sans repliement, balayage
   20 Hz → 20 kHz, échelon et bruit, Dirac, réseau 50 Hz (tension et courant déphasé avec un harmonique 3),
   série de Fourier d'un carré (15 harmoniques, Gibbs), redressement double alternance, cardiogramme dessiné
-  avec le 50 Hz du secteur, carré filtré par une récurrence (passe-bas RC), bruit blanc. La recette en cours est retenue d'une fois sur l'autre ; les
-  préréglages en gardent d'autres.
+  avec le 50 Hz du secteur, carré filtré par une récurrence (passe-bas RC), puissance instantanée v1 × v2
+  (P = U·I·cos φ en moyenne), modulations d'amplitude et de fréquence d'un message de 500 Hz (voie 1) sur une
+  porteuse de 10 kHz, bruit blanc. La recette en cours est retenue d'une fois sur l'autre ; les préréglages en
+  gardent d'autres.
 - **Bruit reproductible** : une graine pour tout le signal ; chaque bruit en tire une suite à lui (graine +
   1000 × voie + forme d'onde), la même sur tout compilateur.
+
+## Le module Filtres
+
+Un filtre conçu, regardé, puis essayé sur un signal de la session. Deux onglets au ruban :
+
+- **Concevoir** : le type (**RII**, récursif : Butterworth, Chebyshev I, Chebyshev II, Bessel ; **RIF**, non
+  récursif, par la méthode de la fenêtre : rectangulaire, Hann, Hamming, Blackman, Blackman-Harris, Kaiser
+  de β réglable), la réponse (passe-bas, passe-haut, passe-bande, coupe-bande), la coupure ou les deux bords de
+  la bande, l'ordre (1 à 32 ; une bande en a deux fois plus) ou le nombre de coefficients (3 à 65 535),
+  l'ondulation (Chebyshev I) ou l'atténuation (Chebyshev II). Il est conçu pour la fréquence d'échantillonnage
+  du signal choisi dans la liste (**fs du signal**), ou pour celle qu'on tape. Le RII est réalisé en sections
+  du second ordre (la forme qui reste stable en pratique) ; un pôle à moins de 1e-5 du cercle unité est
+  signalé. **Afficher** : le gain (dB ou linéaire), la phase (dépliée à partir des racines de chaque section,
+  la même à tout zoom ; un saut de 180° là où un zéro est sur le cercle ; repliée sur demande), le temps de
+  propagation de groupe (en échantillons), les réponses impulsionnelle et indicielle, les pôles (×) et les
+  zéros (○) dans le plan z avec le cercle unité (ceux d'un RIF de plus de 512 coefficients ne sont pas
+  calculés). Le filtre tel qu'il sera appliqué s'y ajoute en pointillé quand il diffère (à phase nulle : le
+  gain au carré, ni phase ni retard ; RIF aligné : sans son retard). Sur le tracé, la molette zoome, un
+  glissement déplace, un glissement du bouton droit zoome sur ce qu'il couvre ; les valeurs sous le pointeur
+  s'affichent en haut à droite (dans le plan z : le pôle ou le zéro le plus proche, son module, sa
+  fréquence). **Exemples** : passe-bas Butterworth 1 kHz, coupe-bande 50 Hz du secteur et passe-haut 0,5 Hz
+  contre la dérive (tous deux à phase nulle), bande téléphone 300 Hz à 3,4 kHz (Chebyshev I), Bessel 1 kHz,
+  RIF passe-bas de Hamming, RIF passe-bande de Kaiser.
+- **Appliquer** : le signal choisi dans la liste, une de ses voies, **avant et après** (superposés, ou une
+  bande chacun) et leurs spectres ; l'aperçu porte sur les 4 194 304 premiers échantillons et se calcule sur
+  son propre thread, le plus récent l'emportant. **Application** : **causale** (échantillon après échantillon,
+  ce que ferait un microcontrôleur : avec le retard et la phase du filtre), **à phase nulle** (aller puis
+  retour sur l'enregistrement prolongé par symétrie impaire à ses deux bouts, comme `filtfilt` de SciPy : ni
+  retard ni déphasage, l'atténuation doublée) ou **alignée** (un RIF une fois, son retard de (N − 1)/2
+  retiré). **Écouter** l'aperçu, avant ou après. Un signal échantillonné autrement que le filtre est refusé
+  (le filtre ne ferait pas ce que montrent ses réponses) ; un signal à trous est filtré d'un seul tenant, et
+  c'est dit.
+- **Ajouter** (dans les deux onglets) : le signal choisi, toutes ses voies filtrées, devient un signal de la
+  session (« Signal · passe-bas 1 kHz »), en une étape d'annulation ; ses notes disent le filtre et ce qu'il
+  fait, sa provenance garde la recette.
+
+Le panneau de droite (**Filtre**) reprend la recette champ par champ, dit ce que fait le filtre (sections,
+stabilité, retards à quelques fréquences) et montre ses coefficients, un par ligne (« b0 = … » à « a2 = … »
+pour chaque section d'un RII, a0 = 1 ; « h[k] = … » pour un RIF, les 600 premiers) ; **Copier les
+coefficients** les copie tous, en pleine précision, avec ce qu'est le filtre en tête. **Mesures** donne celles
+de l'aperçu, avant et après. La recette est retenue d'une fois sur l'autre.
 
 ## Outils des tracés
 
@@ -523,8 +593,11 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
 4. **Modules** (en cours) : analyse (spectre, densité, mesures, courbes ajoutées), fusion de Signaux et
    Analyse en un module (audit du 21/11), export des courbes, garde-fou de la fréquence d'échantillonnage,
    spectrogramme en courbe ajoutée, générateur (voies, formes d'onde additionnées, aperçu, séries de Fourier
-   par leurs coefficients, motif dessiné, récurrence, écoute sur la carte son) : faits ;
-   puis filtres, modulations ; VISA
-   pour les instruments en USB. À étudier : réponse en fréquence entre deux voies (gain, phase, marges),
+   par leurs coefficients, motif dessiné, récurrence, écoute sur la carte son, opérations entre voies,
+   porteuses AM, FM, PM), filtres (RII Butterworth, Chebyshev I et II, Bessel ; RIF fenêtré ; réponses, plan z,
+   application causale, à phase nulle ou alignée) : faits ; puis, pour les filtres, elliptique et Parks-McClellan,
+   coefficients tapés, code C pour microcontrôleur et conception par gabarit ; modulations numériques,
+   démodulation et taux d'erreur (module Modulations, sur `dsp/modulation` et `dsp/receiver`) ; VISA pour les
+   instruments en USB. À étudier : réponse en fréquence entre deux voies (gain, phase, marges),
    distorsion pondérée A.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.

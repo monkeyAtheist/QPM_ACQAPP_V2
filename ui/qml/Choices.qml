@@ -81,7 +81,15 @@ QtObject {
         { key: "sweep", name: qsTr("Balayage"), tip: qsTr("Un sinus dont la fréquence va d'une valeur à une autre sur toute la durée (vobulation, chirp)") },
         { key: "fourier", name: qsTr("Série de Fourier"), tip: qsTr("Une somme d'harmoniques de f₀ dont les coefficients aₙ, bₙ (ou Cₙ) sont des formules de n") },
         { key: "drawn", name: qsTr("Motif dessiné"), tip: qsTr("Une forme dessinée à la souris (ou tapée point par point), répétée à sa fréquence ou étalée sur toute la durée") },
-        { key: "recurrence", name: qsTr("Récurrence"), tip: qsTr("y[n] calculé à partir des valeurs d'avant et d'une entrée x[n] : oscillateurs, filtres, suites") }
+        { key: "recurrence", name: qsTr("Récurrence"), tip: qsTr("y[n] calculé à partir des valeurs d'avant et d'une entrée x[n] : oscillateurs, filtres, suites") },
+        { key: "formula", name: qsTr("Opération entre voies"), tip: qsTr("y, une formule des autres voies (v1 + v2, v1*v2, v1/v2…), du temps t ou des formes d'onde au-dessus (x)") },
+        { key: "modulation", name: qsTr("Porteuse modulée"), tip: qsTr("Une porteuse modulée en amplitude (AM), en fréquence (FM) ou en phase (PM) par un message : un sinus, une autre voie, les formes d'onde au-dessus") }
+    ]
+    // How a carrier is modulated (keys of the recipe).
+    readonly property var carrierModulations: [
+        { key: "am", name: qsTr("AM (amplitude)"), tip: qsTr("A·(1 + m·message)·cos(2π fc t + φ) : l'enveloppe suit le message ; avec un sinus de fréquence fm, deux raies latérales à fc ± fm.") },
+        { key: "fm", name: qsTr("FM (fréquence)"), tip: qsTr("La fréquence instantanée vaut fc + Δf·message : avec un sinus de fréquence fm, des raies tous les fm autour de fc (fonctions de Bessel de β = Δf/fm), sur la bande de Carson 2(Δf + fm).") },
+        { key: "pm", name: qsTr("PM (phase)"), tip: qsTr("La phase vaut φ + Δφ·message : c'est une FM du message dérivé.") }
     ]
     // The input x[n] of a recurrence (keys of the recipe).
     readonly property var recurrenceInputs: [
@@ -168,4 +176,40 @@ QtObject {
     function nameOf(list, key) {
         return list[indexOf(list, key)].name
     }
+
+    // ---- Filters ----
+    readonly property var filterKinds: [
+        { key: "iir", name: qsTr("RII : récursif (Butterworth, Chebyshev, Bessel)"),
+          tip: qsTr("Réponse impulsionnelle infinie : des flancs raides pour peu de calcul ; phase non linéaire") },
+        { key: "fir", name: qsTr("RIF : non récursif (méthode de la fenêtre)"),
+          tip: qsTr("Réponse impulsionnelle finie : phase linéaire et toujours stable ; plus de coefficients") }
+    ]
+    readonly property var filterResponses: [
+        { key: "lowpass", name: qsTr("Passe-bas"), tip: qsTr("Garde ce qui est en dessous de la coupure") },
+        { key: "highpass", name: qsTr("Passe-haut"), tip: qsTr("Garde ce qui est au-dessus de la coupure") },
+        { key: "bandpass", name: qsTr("Passe-bande"), tip: qsTr("Garde la bande entre la fréquence basse et la fréquence haute") },
+        { key: "bandstop", name: qsTr("Coupe-bande"), tip: qsTr("Retire la bande entre la fréquence basse et la fréquence haute (un secteur à 50 Hz…)") }
+    ]
+    readonly property var filterFamilies: [
+        { key: "butterworth", name: "Butterworth", tip: qsTr("Le plus plat possible dans la bande passante, sans ondulation ; −3 dB à la coupure") },
+        { key: "chebyshev1", name: "Chebyshev I", tip: qsTr("Une ondulation dans la bande passante pour un flanc plus raide ; à la coupure, −ondulation") },
+        { key: "chebyshev2", name: "Chebyshev II", tip: qsTr("Plat dans la bande passante, ondulation dans la bande coupée (des zéros) ; à la fréquence donnée, l'atténuation") },
+        { key: "bessel", name: "Bessel", tip: qsTr("Un retard presque constant dans la bande : les formes passent sans dépassement ; flanc plus doux") }
+    ]
+    readonly property var firWindows: [
+        { key: "rectangular", name: qsTr("Rectangulaire"), tip: qsTr("La transition la plus étroite, mais des lobes à −21 dB seulement") },
+        { key: "hann", name: qsTr("Hann"), tip: qsTr("Lobes vers −44 dB") },
+        { key: "hamming", name: qsTr("Hamming"), tip: qsTr("Lobes vers −53 dB : le choix habituel") },
+        { key: "blackman", name: qsTr("Blackman"), tip: qsTr("Lobes vers −74 dB, transition plus large") },
+        { key: "blackmanHarris", name: qsTr("Blackman-Harris"), tip: qsTr("Lobes au-delà de −90 dB, la transition la plus large") },
+        { key: "kaiser", name: qsTr("Kaiser (β)"), tip: qsTr("Le compromis réglé par β : 5 vers −54 dB, 8,6 vers −87 dB") }
+    ]
+    readonly property var filterApplications: [
+        { key: "causal", name: qsTr("Causale (comme en temps réel)"), short: qsTr("en causal"),
+          tip: qsTr("Échantillon après échantillon : le retard et la phase du filtre, ce que ferait un microcontrôleur") },
+        { key: "zerophase", name: qsTr("À phase nulle (aller-retour)"), short: qsTr("à phase nulle"),
+          tip: qsTr("Une fois dans chaque sens : ni retard ni déphasage, gain au carré ; sur un enregistrement seulement") },
+        { key: "aligned", name: qsTr("Alignée (RIF sans son retard)"), short: qsTr("aligné, sans retard"),
+          tip: qsTr("Un RIF une fois, son retard de (N − 1)/2 échantillons retiré : le résultat reste en face de l'original") }
+    ]
 }

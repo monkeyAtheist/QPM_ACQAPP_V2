@@ -4,9 +4,9 @@ import QtQuick.Layouts
 
 // Right panel: the pages of the module on screen (for "Signaux", the measurements of the zone and the
 // settings of the computations; for "Acquisition", the source and the format; for "Générateur", the
-// composition of the signal and the measurements of its preview), then the properties of the selected
-// signal (always the last tab: signalTab). The session itself is in the top bar (its name, "Ouvrir ▾" for
-// the recent ones).
+// composition of the signal and the measurements of its preview; for "Filtres", the filter in detail and
+// the measurements of its preview, before and after), then the properties of the selected signal (always
+// the last tab: signalTab). The session itself is in the top bar (its name, "Ouvrir ▾" for the recent ones).
 Rectangle {
     id: root
     required property var session
@@ -16,11 +16,14 @@ Rectangle {
     required property var analysis
     property var curves: null // the curves added in "Signaux" (their spectrograms have settings here)
     property var generator: null
-    property int module: 0 // 0 Signaux, 1 Acquisition, 2 Générateur
+    property var filters: null
+    property int module: 0 // 0 Signaux, 1 Acquisition, 2 Générateur, 3 Filtres
     property var signalId: 0
     property int tab: 0
     property int generatorChannel: 0 // the channel edited in the composition
-    readonly property int signalTab: module === 2 ? 2 : 1
+    // The generator and the filters have three tabs: their page, the measurements of their preview, the signal.
+    readonly property bool threeTabs: module === 2 || module === 3
+    readonly property int signalTab: threeTabs ? 2 : 1
     signal tabSelected(int index)
     signal collapseRequested()
     signal firmwareRequested()
@@ -62,19 +65,19 @@ Rectangle {
             spacing: 4
             TabBar {
                 id: tabs
-                visible: root.module !== 2
+                visible: !root.threeTabs
                 Layout.fillWidth: true
                 onCurrentIndexChanged: if (visible && currentIndex !== root.tab) root.tabSelected(currentIndex)
                 TabButton { text: root.module === 1 ? qsTr("Acquisition") : qsTr("Mesures") }
                 TabButton { text: qsTr("Signal") }
             }
-            // The generator has three: its composition, the measurements of its preview, the signal.
+            // The generator and the filters have three: their page, the measurements of their preview, the signal.
             TabBar {
                 id: generatorTabs
-                visible: root.module === 2
+                visible: root.threeTabs
                 Layout.fillWidth: true
                 onCurrentIndexChanged: if (visible && currentIndex !== root.tab) root.tabSelected(currentIndex)
-                TabButton { text: qsTr("Composition") }
+                TabButton { text: root.module === 3 ? qsTr("Filtre") : qsTr("Composition") }
                 TabButton { text: qsTr("Mesures") }
                 TabButton { text: qsTr("Signal") }
             }
@@ -137,6 +140,23 @@ Rectangle {
                 appSettings: root.appSettings
                 sampleRate: root.generator ? (root.generator.recipe.sampleRate ?? 0) : 0
                 settingsKey: "generator/analysis"
+                zoneHint: qsTr("Sur tout l'aperçu, %1")
+            }
+
+            FilterPanel {
+                anchors.fill: parent
+                visible: root.tab === 0 && root.module === 3 && root.filters !== null
+                filters: root.filters
+            }
+
+            // The measurements of the preview of the filters (before and after), and the settings of their spectra.
+            AnalysisPanel {
+                anchors.fill: parent
+                visible: root.tab === 1 && root.module === 3 && root.filters !== null
+                analysis: root.filters ? root.filters.previewAnalysis : root.analysis
+                appSettings: root.appSettings
+                sampleRate: root.filters ? ((root.filters.input.sampleRate ?? 0) > 0 ? root.filters.input.sampleRate : 0) : 0
+                settingsKey: "filters/analysis"
                 zoneHint: qsTr("Sur tout l'aperçu, %1")
             }
 

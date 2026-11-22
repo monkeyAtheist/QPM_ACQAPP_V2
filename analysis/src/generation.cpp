@@ -2,12 +2,14 @@
 
 #include "qacq/analysis/expression.h"
 #include "qacq/dsp/constants.h"
+#include "qacq/dsp/modulation.h"
 #include "qacq/plot/axis.h"
 
 #include <algorithm>
 #include <charconv>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -23,7 +25,7 @@ constexpr std::pair<Kind, std::string_view> kKeys[] = {
     {Kind::Sawtooth, "sawtooth"}, {Kind::Pulse, "pulse"},   {Kind::Dc, "dc"},
     {Kind::Step, "step"},         {Kind::Impulse, "impulse"}, {Kind::Noise, "noise"},
     {Kind::Sweep, "sweep"},       {Kind::FourierSeries, "fourier"}, {Kind::Drawn, "drawn"},
-    {Kind::Recurrence, "recurrence"}};
+    {Kind::Recurrence, "recurrence"}, {Kind::Formula, "formula"}, {Kind::Modulation, "modulation"}};
 
 constexpr double kLargest = 1e15;              // amplitudes and offsets
 constexpr double kHighestFrequency = 1e12;     // Hz
@@ -150,7 +152,8 @@ struct ComponentSamples
     std::vector<double> samples;
     std::vector<std::string> warnings;
     std::string error;
-    bool cancelled = false; // stopped half way (a long recurrence)
+    bool cancelled = false;  // stopped half way (a long recurrence)
+    bool readsAbove = false; // an operation or a modulated carrier of x: it replaces the components above
 };
 
 // A waveform of qacq::dsp::generate; for its Fourier series, the budget of computation.
@@ -357,6 +360,14 @@ GeneratorComponent defaultGeneratorComponent(Kind waveform, double sampleRateHz,
     }
     if (waveform == Kind::Drawn) applyMotifModel(c, "trapezoid");
     if (waveform == Kind::Recurrence) applyRecurrenceModel(c, "oscillator", 1.0, c.frequencyHz);
+    if (waveform == Kind::Modulation)
+    {
+        // A carrier of 10 kHz (at most fs/4), a message of a tenth of it, 50 % of AM, Δf of a fifth of it.
+        c.frequencyHz = std::min(10000.0, niceFloor(fs / 4.0));
+        c.variables = "fm = " + plot::formatCompact(c.frequencyHz / 10.0, "", 6);
+        c.message = "sin(2*pi*fm*t)";
+        c.deviationHz = c.frequencyHz / 5.0;
+    }
     return c;
 }
 
@@ -2007,6 +2018,536 @@ bool applyRecurrenceModel(GeneratorComponent &c, std::string_view key, double am
     return true;
 }
 
+// ---- Operations between channels, modulated carriers ----
+
+namespace
+{
+constexpr std::size_t kChannelNames = kMaximumGeneratorChannels; // v1…v16
+
+bool operationKind(Kind w) noexcept
+{
+    return w == Kind::Formula || w == Kind::Modulation;
+}
+
+// The formula of an operation as typed, without "y =" (or "y(t) =", "=") before it; a message without "m ="
+// ("m(t) =", "message ="). Empty: 0.
+std::string operationBody(std::string_view text, bool message)
+{
+    std::string_view t = trim(text);
+    for (std::size_t i = 0; i < t.size(); ++i)
+    {
+        if (t[i] != '=') continue;
+        const char before = i > 0 ? t[i - 1] : ' ';
+        const char after = i + 1 < t.size() ? t[i + 1] : ' ';
+        if (before == '<' || before == '>' || before == '!' || before == '=' || after == '=') continue;
+        std::string left;
+        for (char c : t.substr(0, i))
+            if (c != ' ') left += c;
+        const bool named = message ? left.empty() || left == "m" || left == "m(t)" || left == "message" || left == "Message"
+                                   : left.empty() || left == "y" || left == "y(t)" || left == "y[n]";
+        if (named) t = trim(t.substr(i + 1));
+        break;
+    }
+    return t.empty() ? std::string("0") : std::string(t);
+}
+
+// An operation ready to run: its names (n, t, fs, Te, N, its variables, then x, v1…v16, V1…V16), their
+// values, what it reads; or what is wrong ("y : …", "Message : …", "Variables : …").
+struct OperationProgram
+{
+    std::vector<std::string> names;
+    std::vector<double> values;
+    Expression formula;
+    std::size_t above = 0;          // index of x
+    std::size_t channels = 0;       // index of v1 (V1 at channels + kChannelNames)
+    std::vector<std::size_t> reads; // channels read, from 0
+    bool readsAbove = false;
+    std::string error;
+};
+
+OperationProgram compileOperation(std::string_view text, std::string_view variablesText, bool message, double fs,
+                                  std::size_t total)
+{
+    OperationProgram p;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    p.names = {"n", "t", "fs", "Te", "N"};
+    p.values = {nan, nan, fs, 1.0 / fs, static_cast<double>(total)};
+    std::vector<std::string> reserved = {"x"};
+    for (std::size_t k = 1; k <= kChannelNames; ++k) reserved.push_back("v" + std::to_string(k));
+    for (std::size_t k = 1; k <= kChannelNames; ++k) reserved.push_back("V" + std::to_string(k));
+
+    // Variables: constants (of fs, Te, N and those before them); n, t, x and the channels are taken.
+    std::vector<std::string> names = p.names;
+    names.insert(names.end(), reserved.begin(), reserved.end());
+    std::vector<double> values = p.values;
+    values.resize(names.size(), nan);
+    const Variables variables = parseVariables(variablesText, names, values);
+    if (!variables.error.empty())
+    {
+        p.error = "Variables : " + variables.error;
+        return p;
+    }
+    for (std::size_t i = 0; i < variables.names.size(); ++i)
+    {
+        if (std::isfinite(variables.values[i])) continue;
+        p.error = "Variables : « " + variables.names[i] +
+                  " » n'est pas un nombre fini (une variable est une constante, sans n, t, x ni voie).";
+        return p;
+    }
+    p.names.insert(p.names.end(), variables.names.begin(), variables.names.end());
+    p.values.insert(p.values.end(), variables.values.begin(), variables.values.end());
+
+    p.above = p.names.size();
+    p.channels = p.above + 1;
+    p.names.insert(p.names.end(), reserved.begin(), reserved.end());
+    p.values.resize(p.names.size(), 0.0);
+    std::string why;
+    p.formula = Expression::parse(operationBody(text, message), p.names, &why);
+    if (!p.formula.valid())
+    {
+        p.error = std::string(message ? "Message" : "y") + " : " + why;
+        return p;
+    }
+    p.readsAbove = p.formula.uses(p.above);
+    for (std::size_t k = 0; k < kChannelNames; ++k)
+        if (p.formula.uses(p.channels + k) || p.formula.uses(p.channels + kChannelNames + k)) p.reads.push_back(k);
+    return p;
+}
+
+OperationProgram compileOperation(const GeneratorComponent &c, double fs, std::size_t total)
+{
+    const bool message = c.waveform == Kind::Modulation;
+    return compileOperation(message ? c.message : c.expression, c.variables, message, fs, total);
+}
+
+// The channels each channel reads through its counted operations and modulated carriers (whose formula is
+// right, and only the channels that exist).
+std::vector<std::vector<std::size_t>> channelGraph(const GeneratorRecipe &recipe)
+{
+    std::vector<std::vector<std::size_t>> reads(recipe.channels.size());
+    for (std::size_t c = 0; c < recipe.channels.size(); ++c)
+    {
+        for (const GeneratorComponent &k : recipe.channels[c].components)
+        {
+            if (!k.enabled || !operationKind(k.waveform)) continue;
+            for (std::size_t j : compileOperation(k, recipe.sampleRateHz, 0).reads)
+                if (j < recipe.channels.size() && std::find(reads[c].begin(), reads[c].end(), j) == reads[c].end())
+                    reads[c].push_back(j);
+        }
+    }
+    return reads;
+}
+
+// A path of reads from `from` back to it ("Voies 2 → 3 → 2"), or empty: the shortest one.
+std::string loopThrough(const std::vector<std::vector<std::size_t>> &reads, std::size_t from)
+{
+    std::vector<std::size_t> parent(reads.size(), reads.size());
+    std::vector<std::size_t> queue;
+    const auto reach = [&](std::size_t j, std::size_t by) {
+        if (parent[j] != reads.size()) return;
+        parent[j] = by;
+        queue.push_back(j);
+    };
+    for (std::size_t j : reads[from]) reach(j, from);
+    for (std::size_t q = 0; q < queue.size(); ++q)
+    {
+        const std::size_t c = queue[q];
+        if (c == from)
+        {
+            std::vector<std::size_t> path = {from};
+            for (std::size_t node = parent[from]; node != from; node = parent[node]) path.push_back(node);
+            path.push_back(from);
+            std::string text = "Voies ";
+            for (std::size_t i = path.size(); i-- > 0;)
+                text += std::to_string(path[i] + 1) + (i > 0 ? " → " : "");
+            return text + " : une voie ne peut pas dépendre d'elle-même (une opération y lit une voie qui la lit).";
+        }
+        for (std::size_t j : reads[c]) reach(j, c);
+    }
+    return {};
+}
+
+// The order to make the channels in: each after those it reads (the order of the recipe otherwise); false
+// with why on a loop.
+bool channelOrder(const GeneratorRecipe &recipe, std::vector<std::size_t> &order, std::string &error)
+{
+    const std::vector<std::vector<std::size_t>> reads = channelGraph(recipe);
+    const std::size_t count = recipe.channels.size();
+    std::vector<bool> made(count, false);
+    order.clear();
+    while (order.size() < count)
+    {
+        bool picked = false;
+        for (std::size_t c = 0; c < count && !picked; ++c)
+        {
+            if (made[c]) continue;
+            if (!std::all_of(reads[c].begin(), reads[c].end(), [&](std::size_t j) { return j != c && made[j]; })) continue;
+            made[c] = true;
+            order.push_back(c);
+            picked = true;
+        }
+        if (picked) continue;
+        for (std::size_t c = 0; c < count; ++c)
+        {
+            if (made[c]) continue;
+            error = loopThrough(reads, c);
+            if (!error.empty()) return false;
+        }
+        error = "Les voies se lisent l'une l'autre : une voie ne peut pas dépendre d'elle-même.";
+        return false;
+    }
+    return true;
+}
+
+// The channels a formula names (v2, V3…), from 0, as written: wherever it is right or not.
+std::vector<std::size_t> namedChannels(std::string_view text)
+{
+    std::vector<std::size_t> named;
+    for (std::size_t i = 0; i < text.size(); ++i)
+    {
+        const char c = text[i];
+        if ((c != 'v' && c != 'V') || (i > 0 && identifierChar(text[i - 1]))) continue;
+        std::size_t j = i + 1;
+        while (j < text.size() && text[j] >= '0' && text[j] <= '9') ++j;
+        if (j == i + 1 || j - i - 1 > 3 || (j < text.size() && identifierChar(text[j]))) continue;
+        const std::size_t k = static_cast<std::size_t>(std::stoul(std::string(text.substr(i + 1, j - i - 1))));
+        if (k >= 1 && std::find(named.begin(), named.end(), k - 1) == named.end()) named.push_back(k - 1);
+    }
+    return named;
+}
+
+// The formula with the channels after `removed` named one number lower (v3 → v2 when the channel 2 goes).
+std::string renumbered(std::string_view text, std::size_t removed)
+{
+    std::string out;
+    for (std::size_t i = 0; i < text.size();)
+    {
+        const char c = text[i];
+        if ((c == 'v' || c == 'V') && (i == 0 || !identifierChar(text[i - 1])))
+        {
+            std::size_t j = i + 1;
+            while (j < text.size() && text[j] >= '0' && text[j] <= '9') ++j;
+            if (j > i + 1 && j - i - 1 <= 3 && (j == text.size() || !identifierChar(text[j])))
+            {
+                const auto k = static_cast<std::size_t>(std::stoul(std::string(text.substr(i + 1, j - i - 1))));
+                if (k > removed + 1)
+                {
+                    out += c;
+                    out += std::to_string(k - 1);
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        out += c;
+        ++i;
+    }
+    return out;
+}
+
+// The values of an operation for every sample: from the channels already made and the components above it
+// (`above`, empty if none). A value that is not a finite number becomes 0, and a warning says so.
+std::vector<double> operationValues(OperationProgram &p, double fs, std::size_t n, std::span<const double> above,
+                                    std::span<const std::vector<double>> channels, const model::Progress &progress,
+                                    std::string_view what, ComponentSamples &out)
+{
+    std::vector<double> result(n);
+    std::vector<double> &values = p.values;
+    std::vector<std::span<const double>> read;
+    for (std::size_t k : p.reads)
+        read.push_back(k < channels.size() && channels[k].size() == n ? std::span<const double>(channels[k])
+                                                                       : std::span<const double>());
+    std::size_t undefined = 0, first = 0;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if ((i & 0xFFFF) == 0xFFFF && progress.stopped())
+        {
+            out.cancelled = true;
+            return {};
+        }
+        values[0] = static_cast<double>(i);
+        values[1] = static_cast<double>(i) / fs;
+        values[p.above] = above.size() == n ? above[i] : 0.0;
+        for (std::size_t r = 0; r < p.reads.size(); ++r)
+        {
+            const double v = read[r].empty() ? 0.0 : read[r][i];
+            values[p.channels + p.reads[r]] = v;
+            values[p.channels + kChannelNames + p.reads[r]] = v;
+        }
+        const double v = p.formula.evaluate(values);
+        if (std::isfinite(v))
+        {
+            result[i] = v;
+            continue;
+        }
+        if (undefined++ == 0) first = i;
+        result[i] = 0.0;
+    }
+    if (undefined > 0)
+        out.warnings.push_back(std::string(what) + " n'est pas un nombre fini en " + grouped(undefined) +
+                               (undefined > 1 ? " échantillons" : " échantillon") + " (le premier à t = " +
+                               quantity(static_cast<double>(first) / fs, "s") +
+                               " : une division par zéro, la racine d'un nombre négatif ?) : " +
+                               (undefined > 1 ? "ils valent 0." : "il vaut 0."));
+    return result;
+}
+
+ComponentSamples operationSamples(const GeneratorComponent &c, double fs, std::size_t n, std::span<const double> above,
+                                  std::span<const std::vector<double>> channels, const model::Progress &progress)
+{
+    ComponentSamples out;
+    OperationProgram p = compileOperation(c, fs, n);
+    if (!p.error.empty())
+    {
+        out.error = p.error;
+        return out;
+    }
+    out.readsAbove = p.readsAbove;
+    out.samples = operationValues(p, fs, n, above, channels, progress, "y", out);
+    return out;
+}
+
+ComponentSamples modulationSamples(const GeneratorComponent &c, double fs, std::size_t n, std::span<const double> above,
+                                   std::span<const std::vector<double>> channels, const model::Progress &progress)
+{
+    ComponentSamples out;
+    OperationProgram p = compileOperation(c, fs, n);
+    if (!p.error.empty())
+    {
+        out.error = p.error;
+        return out;
+    }
+    out.readsAbove = p.readsAbove;
+    const std::vector<double> message = operationValues(p, fs, n, above, channels, progress, "Le message", out);
+    if (out.cancelled) return out;
+
+    const dsp::Modulation type = c.modulation == CarrierModulation::Fm   ? dsp::Modulation::Fm
+                                 : c.modulation == CarrierModulation::Pm ? dsp::Modulation::Pm
+                                                                         : dsp::Modulation::Am;
+    dsp::AnalogModulator modulator(type, fs, c.amplitude, c.amIndex, c.deviationHz, c.phaseDeviationDegrees * dsp::kPi / 180.0);
+    // As qacq::dsp::modulate: Re{b exp(jφ) exp(j 2π fc t)}.
+    const std::complex<double> rotation(std::cos(c.phaseDegrees * dsp::kPi / 180.0), std::sin(c.phaseDegrees * dsp::kPi / 180.0));
+    const double ratio = c.frequencyHz / fs;
+    out.samples.resize(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const std::complex<double> b = modulator.next(message[i]) * rotation;
+        const double turn = ratio * static_cast<double>(i);
+        const double angle = dsp::kTwoPi * (turn - std::floor(turn));
+        out.samples[i] = (b * std::complex<double>(std::cos(angle), std::sin(angle))).real();
+    }
+
+    if (c.frequencyHz >= 0.5 * fs)
+        out.warnings.push_back("la porteuse (" + quantity(c.frequencyHz, "Hz") + ") dépasse fs/2 (" + quantity(0.5 * fs, "Hz") +
+                               ") : elle se replie.");
+    double low = 0.0, high = 0.0;
+    if (!message.empty())
+    {
+        const auto [lowest, highest] = std::minmax_element(message.begin(), message.end());
+        low = *lowest;
+        high = *highest;
+    }
+    if (c.modulation == CarrierModulation::Am)
+    {
+        const double depth = std::abs(c.amIndex) * std::max(std::abs(low), std::abs(high));
+        if (depth > 1.0 + 1e-12)
+            out.warnings.push_back("surmodulation : m × crête du message = " + quantity(depth, "") +
+                                   " > 1 ; l'enveloppe ne suit plus le message (une détection d'enveloppe le déforme).");
+    }
+    else if (c.modulation == CarrierModulation::Fm)
+    {
+        const double a = c.frequencyHz + c.deviationHz * low, b = c.frequencyHz + c.deviationHz * high;
+        const double fmin = std::min(a, b), fmax = std::max(a, b);
+        if (fmin < 0.0 || fmax > 0.5 * fs)
+            out.warnings.push_back("la fréquence instantanée va de " + quantity(fmin, "Hz") + " à " + quantity(fmax, "Hz") +
+                                   " : hors de 0…fs/2 (" + quantity(0.5 * fs, "Hz") + "), le spectre se replie.");
+    }
+    return out;
+}
+
+std::string countText(std::size_t channels)
+{
+    return channels == 1 ? std::string("une voie") : std::to_string(channels) + " voies";
+}
+
+// "la voie 3", "les voies 3 et 4", "les voies 2, 3 et 5" (numbers from 1).
+std::string channelList(const std::vector<std::size_t> &channels)
+{
+    if (channels.size() == 1) return "la voie " + std::to_string(channels[0] + 1);
+    std::string text = "les voies ";
+    for (std::size_t i = 0; i < channels.size(); ++i)
+        text += (i == 0 ? "" : i + 1 == channels.size() ? " et " : ", ") + std::to_string(channels[i] + 1);
+    return text;
+}
+} // namespace
+
+OperationCheck checkOperation(const GeneratorRecipe &recipe, std::size_t channel, std::size_t component)
+{
+    OperationCheck out;
+    if (channel >= recipe.channels.size() || component >= recipe.channels[channel].components.size()) return out;
+    const GeneratorComponent &c = recipe.channels[channel].components[component];
+    if (!operationKind(c.waveform)) return out;
+    const OperationProgram p = compileOperation(c, recipe.sampleRateHz, generatorSampleCount(recipe));
+    out.channels = p.reads;
+    out.readsAbove = p.readsAbove;
+    if (!p.error.empty())
+    {
+        out.error = p.error;
+        return out;
+    }
+    const std::string what = c.waveform == Kind::Modulation ? "Message" : "y";
+    for (std::size_t k : p.reads)
+    {
+        if (k == channel)
+        {
+            out.error = what + " : « v" + std::to_string(k + 1) + " » est la voie elle-même ; x donne les formes d'onde au-dessus de celle-ci.";
+            return out;
+        }
+        if (k >= recipe.channels.size())
+        {
+            out.error = what + " : la voie " + std::to_string(k + 1) + " n'existe pas (le signal a " + countText(recipe.channels.size()) + ").";
+            return out;
+        }
+    }
+    // Through other channels back to this one.
+    if (!p.reads.empty()) out.error = loopThrough(channelGraph(recipe), channel);
+    return out;
+}
+
+std::string defaultOperation(std::size_t channel, std::size_t channelCount)
+{
+    std::vector<std::size_t> others;
+    for (std::size_t k = 0; k < channelCount && others.size() < 2; ++k)
+        if (k != channel) others.push_back(k);
+    if (others.empty()) return "x";
+    if (others.size() == 1) return "v" + std::to_string(others[0] + 1) + " + x";
+    return "v" + std::to_string(others[0] + 1) + " + v" + std::to_string(others[1] + 1);
+}
+
+std::vector<OperationModel> operationModels(std::size_t channel, std::size_t channelCount)
+{
+    std::vector<std::string> others;
+    for (std::size_t k = 0; k < channelCount && others.size() < 2 && k < kChannelNames; ++k)
+        if (k != channel) others.push_back("v" + std::to_string(k + 1));
+    const std::string a = others.empty() ? std::string("x") : others[0];
+    std::vector<OperationModel> list;
+    if (!others.empty())
+    {
+        const std::string b = others.size() > 1 ? others[1] : std::string("x");
+        list.push_back({"sum", "Somme", a + " + " + b});
+        list.push_back({"difference", "Différence", a + " - " + b});
+        list.push_back({"product", "Produit", a + "*" + b});
+        list.push_back({"ratio", "Quotient", a + "/" + b});
+        list.push_back({"mean", "Moyenne", "(" + a + " + " + b + ")/2"});
+        list.push_back({"magnitude", "Module", "sqrt(" + a + "^2 + " + b + "^2)"});
+    }
+    list.push_back({"abs", "Valeur absolue", "abs(" + a + ")"});
+    list.push_back({"square", "Carré", a + "^2"});
+    list.push_back({"halfwave", "Redressement simple alternance", "max(" + a + "; 0)"});
+    return list;
+}
+
+bool applyOperationModel(GeneratorComponent &component, std::string_view key, std::size_t channel, std::size_t channelCount)
+{
+    for (const OperationModel &m : operationModels(channel, channelCount))
+    {
+        if (m.key != key) continue;
+        component.expression = m.formula;
+        return true;
+    }
+    return false;
+}
+
+std::vector<OperationModel> messageModels(std::size_t channel, std::size_t channelCount)
+{
+    std::vector<OperationModel> list = {{"sine", "Un sinus de fréquence fm", "sin(2*pi*fm*t)"},
+                                        {"square", "Un carré de fréquence fm", "sign(sin(2*pi*fm*t))"},
+                                        {"above", "Les formes d'onde au-dessus", "x"}};
+    for (std::size_t k = 0; k < channelCount && k < kChannelNames; ++k)
+        if (k != channel) list.push_back({"v" + std::to_string(k + 1), "La voie " + std::to_string(k + 1), "v" + std::to_string(k + 1)});
+    return list;
+}
+
+bool applyMessageModel(GeneratorComponent &component, std::string_view key, std::size_t channel, std::size_t channelCount)
+{
+    for (const OperationModel &m : messageModels(channel, channelCount))
+    {
+        if (m.key != key) continue;
+        component.message = m.formula;
+        if (key == "sine" || key == "square")
+        {
+            // fm: a tenth of the carrier, unless the variables have one.
+            const Variables v = parseVariables(component.variables, {}, {});
+            if (std::find(v.names.begin(), v.names.end(), "fm") == v.names.end())
+            {
+                const std::string fm = "fm = " + plot::formatCompact(component.frequencyHz / 10.0, "", 6);
+                const std::string_view before = trim(component.variables);
+                component.variables = before.empty() ? fm : std::string(before) + " ; " + fm;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+std::vector<std::size_t> channelReaders(const GeneratorRecipe &recipe, std::size_t channel)
+{
+    std::vector<std::size_t> readers;
+    for (std::size_t c = 0; c < recipe.channels.size(); ++c)
+    {
+        if (c == channel) continue;
+        for (const GeneratorComponent &k : recipe.channels[c].components)
+        {
+            if (!operationKind(k.waveform)) continue;
+            const std::vector<std::size_t> named = namedChannels(k.waveform == Kind::Modulation ? k.message : k.expression);
+            if (std::find(named.begin(), named.end(), channel) == named.end()) continue;
+            readers.push_back(c);
+            break;
+        }
+    }
+    return readers;
+}
+
+bool removeGeneratorChannel(GeneratorRecipe &recipe, std::size_t channel, std::string *error)
+{
+    const auto fail = [&](std::string why) {
+        if (error) *error = std::move(why);
+        return false;
+    };
+    if (channel >= recipe.channels.size()) return fail("Cette voie n'existe pas.");
+    if (recipe.channels.size() <= 1) return fail("Le signal garde au moins une voie.");
+    const std::vector<std::size_t> readers = channelReaders(recipe, channel);
+    if (!readers.empty())
+    {
+        const bool one = readers.size() == 1;
+        return fail("La voie " + std::to_string(channel + 1) + " est lue par " + channelList(readers) + " (v" +
+                    std::to_string(channel + 1) + (one ? " dans son opération ou son message" : " dans leurs opérations ou messages") +
+                    ") : changez d'abord " + (one ? "sa formule." : "leurs formules."));
+    }
+    recipe.channels.erase(recipe.channels.begin() + static_cast<std::ptrdiff_t>(channel));
+    for (GeneratorChannel &c : recipe.channels)
+    {
+        for (GeneratorComponent &k : c.components)
+        {
+            if (!operationKind(k.waveform)) continue;
+            k.expression = renumbered(k.expression, channel);
+            k.message = renumbered(k.message, channel);
+        }
+    }
+    return true;
+}
+
+std::string_view carrierModulationKey(CarrierModulation modulation) noexcept
+{
+    switch (modulation)
+    {
+        case CarrierModulation::Am: return "am";
+        case CarrierModulation::Fm: return "fm";
+        case CarrierModulation::Pm: return "pm";
+    }
+    return "am";
+}
+
 bool dspWaveform(WaveKind waveform, dsp::Waveform &out) noexcept
 {
     switch (waveform)
@@ -2023,7 +2564,9 @@ bool dspWaveform(WaveKind waveform, dsp::Waveform &out) noexcept
         case Kind::Sweep: out = dsp::Waveform::Chirp; return true;
         case Kind::FourierSeries:
         case Kind::Drawn:
-        case Kind::Recurrence: return false;
+        case Kind::Recurrence:
+        case Kind::Formula:
+        case Kind::Modulation: return false;
     }
     return false;
 }
@@ -2037,10 +2580,18 @@ GeneratorComponent withWaveform(const GeneratorComponent &component, Kind wavefo
     c.amplitude = component.amplitude;
     // A drawn motif drawn once over the signal has no frequency nor phase to give.
     const bool repeated = component.waveform != Kind::Drawn || !component.motifOnce;
-    const auto tonal = [](Kind w) { return periodic(w) || w == Kind::FourierSeries || w == Kind::Drawn; };
+    const auto tonal = [](Kind w) {
+        return periodic(w) || w == Kind::FourierSeries || w == Kind::Drawn || w == Kind::Modulation;
+    };
     if (tonal(component.waveform) && tonal(waveform) && repeated) c.frequencyHz = component.frequencyHz;
-    const auto phased = [](Kind w) { return periodic(w) || w == Kind::Drawn; };
+    const auto phased = [](Kind w) { return periodic(w) || w == Kind::Drawn || w == Kind::Modulation; };
     if (phased(component.waveform) && phased(waveform) && repeated) c.phaseDegrees = component.phaseDegrees;
+    // A carrier of the frequency kept: its message of a tenth of it, its excursion of a fifth.
+    if (waveform == Kind::Modulation && component.waveform != Kind::Modulation)
+    {
+        c.variables = "fm = " + plot::formatCompact(c.frequencyHz / 10.0, "", 6);
+        c.deviationHz = c.frequencyHz / 5.0;
+    }
     const auto duty = [](Kind w) { return w == Kind::Square || w == Kind::Pulse; };
     if (duty(component.waveform) && duty(waveform)) c.dutyCycle = component.dutyCycle;
     const auto limited = [](Kind w) { return hasSeries(w) || w == Kind::Drawn; };
@@ -2144,6 +2695,8 @@ std::string_view generatorWaveformName(Kind waveform) noexcept
         case Kind::FourierSeries: return "Série de Fourier";
         case Kind::Drawn: return "Motif dessiné";
         case Kind::Recurrence: return "Récurrence";
+        case Kind::Formula: return "Opération entre voies";
+        case Kind::Modulation: return "Porteuse modulée";
     }
     return "?";
 }
@@ -2193,6 +2746,20 @@ model::Json toJson(const GeneratorComponent &c)
         j["initial"] = c.initialValues;
         j["input"] = inputKey(c.recurrenceInput);
         j["variables"] = c.variables;
+    }
+    if (c.waveform == Kind::Formula)
+    {
+        j["expression"] = c.expression;
+        j["variables"] = c.variables;
+    }
+    if (c.waveform == Kind::Modulation)
+    {
+        j["modulation"] = carrierModulationKey(c.modulation);
+        j["message"] = c.message;
+        j["variables"] = c.variables;
+        j["index"] = c.amIndex;
+        j["deviation"] = c.deviationHz;
+        j["phaseDeviation"] = c.phaseDeviationDegrees;
     }
     return j;
 }
@@ -2276,6 +2843,21 @@ GeneratorComponent generatorComponentFromJson(const model::Json &j)
         c.initialValues = j["initial"].toString();
         c.recurrenceInput = inputFromKey(j["input"].toString());
         c.variables = j["variables"].toString();
+    }
+    if (c.waveform == Kind::Formula)
+    {
+        c.expression = j["expression"].toString("x");
+        c.variables = j["variables"].toString();
+    }
+    if (c.waveform == Kind::Modulation)
+    {
+        const std::string modulation = j["modulation"].toString();
+        c.modulation = modulation == "fm" ? CarrierModulation::Fm : modulation == "pm" ? CarrierModulation::Pm : CarrierModulation::Am;
+        c.message = j["message"].toString("sin(2*pi*fm*t)");
+        c.variables = j["variables"].toString();
+        c.amIndex = number(j, "index", c.amIndex, -1e6, 1e6);
+        c.deviationHz = number(j, "deviation", c.deviationHz, -kHighestFrequency, kHighestFrequency);
+        c.phaseDeviationDegrees = number(j, "phaseDeviation", c.phaseDeviationDegrees, -1e9, 1e9);
     }
     return c;
 }
@@ -2362,6 +2944,25 @@ std::string componentText(const GeneratorComponent &c, const std::string &unit)
             if (!variables.empty()) text += " (" + std::string(variables) + ")";
             break;
         }
+        case Kind::Formula:
+        {
+            text = "Opération entre voies : " + operationBody(c.expression, false);
+            const std::string_view variables = trim(c.variables);
+            if (!variables.empty()) text += " (" + std::string(variables) + ")";
+            break;
+        }
+        case Kind::Modulation:
+        {
+            text = "Porteuse " + frequency + ", " + amplitude + " crête";
+            if (c.phaseDegrees != 0.0) text += ", phase " + quantity(c.phaseDegrees, "") + "°";
+            text += c.modulation == CarrierModulation::Fm   ? ", modulée en fréquence (Δf = " + quantity(c.deviationHz, "Hz") + ")"
+                    : c.modulation == CarrierModulation::Pm ? ", modulée en phase (Δφ = " + quantity(c.phaseDeviationDegrees, "") + "°)"
+                                                            : ", modulée en amplitude (m = " + quantity(c.amIndex, "") + ")";
+            text += " par " + operationBody(c.message, true);
+            const std::string_view variables = trim(c.variables);
+            if (!variables.empty()) text += " (" + std::string(variables) + ")";
+            break;
+        }
         case Kind::Recurrence:
         {
             text = "Récurrence y[n] = " + recurrenceBody(c.recurrence);
@@ -2412,10 +3013,29 @@ GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progr
         out.cancelled = true;
         out.error = "Génération annulée.";
     };
+    const auto labelOf = [&recipe](std::size_t c, std::size_t k) {
+        return channelName(recipe.channels[c], c) + ", composante " + std::to_string(k + 1) + " (" +
+               std::string(generatorWaveformName(recipe.channels[c].components[k].waveform)) + ")";
+    };
 
-    auto data = std::make_shared<model::SampleData>();
-    data->channels.reserve(recipe.channels.size());
+    // Operations and modulated carriers: what they read exists and is not their channel; each channel is
+    // made after those it reads.
     for (std::size_t c = 0; c < recipe.channels.size(); ++c)
+    {
+        for (std::size_t k = 0; k < recipe.channels[c].components.size(); ++k)
+        {
+            if (!recipe.channels[c].components[k].enabled) continue;
+            const OperationCheck check = checkOperation(recipe, c, k);
+            if (check.error.empty()) continue;
+            out.error = labelOf(c, k) + " — " + check.error;
+            return out;
+        }
+    }
+    std::vector<std::size_t> order;
+    if (!channelOrder(recipe, order, out.error)) return out;
+
+    std::vector<std::vector<double>> made(recipe.channels.size());
+    for (const std::size_t c : order)
     {
         const GeneratorChannel &channel = recipe.channels[c];
         std::vector<double> x;
@@ -2429,14 +3049,17 @@ GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progr
                 stop();
                 return out;
             }
-            const std::string label = channelName(channel, c) + ", composante " + std::to_string(k + 1) + " (" +
-                                      std::string(generatorWaveformName(component.waveform)) + ")";
+            const std::string label = labelOf(c, k);
             const std::uint64_t seed = recipe.seed + 1000 * c + k;
+            const std::span<const double> above = empty ? std::span<const double>() : std::span<const double>(x);
             RecurrenceTrace trace;
             ComponentSamples g;
             if (component.waveform == Kind::Recurrence)
-                g = recurrenceSamples(component, fs, n, empty ? std::span<const double>() : std::span<const double>(x), seed,
-                                      progress, &trace);
+                g = recurrenceSamples(component, fs, n, above, seed, progress, &trace);
+            else if (component.waveform == Kind::Formula)
+                g = operationSamples(component, fs, n, above, made, progress);
+            else if (component.waveform == Kind::Modulation)
+                g = modulationSamples(component, fs, n, above, made, progress);
             else if (component.waveform == Kind::FourierSeries)
                 g = seriesSamples(component, fs, n);
             else if (component.waveform == Kind::Drawn)
@@ -2460,8 +3083,10 @@ GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progr
                 trace.component = k;
                 out.traces.push_back(std::move(trace));
             }
-            // A recurrence driven by the components above replaces them (it filters them).
-            const bool replaces = component.waveform == Kind::Recurrence && component.recurrenceInput == RecurrenceInput::Above;
+            // A recurrence driven by the components above replaces them (it filters them); so does an operation
+            // or a modulated carrier that reads them (x).
+            const bool replaces =
+                (component.waveform == Kind::Recurrence && component.recurrenceInput == RecurrenceInput::Above) || g.readsAbove;
             if (empty || replaces)
             {
                 x = std::move(g.samples);
@@ -2482,8 +3107,10 @@ GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progr
         {
             for (double &v : x) v += channel.offset;
         }
-        data->channels.push_back(std::move(x));
+        made[c] = std::move(x);
     }
+    auto data = std::make_shared<model::SampleData>();
+    data->channels = std::move(made);
     if (progress.stopped())
     {
         stop();
@@ -2598,6 +3225,40 @@ const std::vector<GeneratorExample> &generatorExamples()
                         "(τ = 0,5 ms) : chaque front devient la charge ou la décharge d'un condensateur.",
                         recipeOf("Carré filtré (RC)", 48000.0, 0.02,
                                  {channelOf("Voie 1", "V", {component(Kind::Square, 1.0, 200.0), filtered})})});
+
+        // Operations between channels, modulated carriers.
+        GeneratorComponent lagging = component(Kind::Sine, 14.142, 50.0);
+        lagging.phaseDegrees = -30.0;
+        GeneratorComponent power = defaultGeneratorComponent(Kind::Formula);
+        power.expression = "v1*v2";
+        list.push_back({"Puissance instantanée : v1 × v2",
+                        "La tension (230 V efficaces) fois le courant (10 A efficaces, en retard de 30°) : une puissance qui "
+                        "oscille à 100 Hz autour de sa moyenne, P = U·I·cos φ ≈ 1 992 W (Mesures ▸ Moyenne de la voie 3).",
+                        recipeOf("Puissance instantanée", 10000.0, 0.1,
+                                 {channelOf("Tension", "V", {component(Kind::Sine, 325.27, 50.0)}),
+                                  channelOf("Courant", "A", {lagging}), channelOf("Puissance", "W", {power})})});
+
+        GeneratorComponent am = defaultGeneratorComponent(Kind::Modulation, 48000.0, 0.02);
+        am.frequencyHz = 10000.0;
+        am.amIndex = 0.5;
+        am.message = "v1";
+        am.variables.clear();
+        list.push_back({"Modulation d'amplitude (AM)",
+                        "Un message de 500 Hz (voie 1) module en amplitude une porteuse de 10 kHz (m = 0,5) : l'enveloppe "
+                        "suit le message, le spectre montre la porteuse et deux raies latérales à ±500 Hz, 12 dB plus bas.",
+                        recipeOf("Modulation d'amplitude", 48000.0, 0.02,
+                                 {channelOf("Message", "V", {component(Kind::Sine, 1.0, 500.0)}),
+                                  channelOf("AM", "V", {am})})});
+
+        GeneratorComponent fm = am;
+        fm.modulation = CarrierModulation::Fm;
+        fm.deviationHz = 2000.0;
+        list.push_back({"Modulation de fréquence (FM)",
+                        "Le même message module en fréquence la porteuse de 10 kHz (Δf = 2 kHz, indice β = 4) : des raies "
+                        "tous les 500 Hz dont les niveaux suivent les fonctions de Bessel, sur la bande de Carson 2(Δf + fm) = 5 kHz.",
+                        recipeOf("Modulation de fréquence", 48000.0, 0.1,
+                                 {channelOf("Message", "V", {component(Kind::Sine, 1.0, 500.0)}),
+                                  channelOf("FM", "V", {fm})})});
 
         GeneratorComponent white = defaultGeneratorComponent(Kind::Noise);
         white.amplitude = 1.0;

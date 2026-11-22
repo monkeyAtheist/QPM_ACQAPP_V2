@@ -43,10 +43,13 @@ Complex product(const std::vector<Complex> &values, Complex shift, double sign) 
     return result;
 }
 
-// ------------------------------------------------------------------ polynomial roots (Bessel only)
+} // namespace
+
+// ------------------------------------------------------------------ polynomial roots
 // Aberth-Ehrlich iteration on a real polynomial given in ascending powers; returns the roots.
-std::vector<Complex> polynomialRoots(const std::vector<double> &ascending)
+std::vector<Complex> polynomialRoots(std::span<const double> ascending)
 {
+    if (ascending.size() < 2) return {};
     const std::size_t degree = ascending.size() - 1;
     std::vector<Complex> c(ascending.begin(), ascending.end());
     const Complex leading = c.back();
@@ -91,6 +94,9 @@ std::vector<Complex> polynomialRoots(const std::vector<double> &ascending)
     }
     return roots;
 }
+
+namespace
+{
 
 // ------------------------------------------------------------------ analog prototypes (cut-off 1 rad/s)
 Zpk butterworthPrototype(int n)

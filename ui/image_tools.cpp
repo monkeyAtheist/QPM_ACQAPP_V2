@@ -12,3 +12,11 @@ bool ImageTools::copy(const QVariant &image) const
     clipboard->setImage(picture);
     return true;
 }
+
+bool ImageTools::copyText(const QString &text) const
+{
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    if (text.isEmpty() || !clipboard) return false;
+    clipboard->setText(text);
+    return true;
+}

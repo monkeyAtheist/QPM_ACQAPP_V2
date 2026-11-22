@@ -6,6 +6,7 @@ add_library(qacq_analysis STATIC
     src/calculus.cpp
     src/curves.cpp
     src/expression.cpp
+    src/filters.cpp
     src/generation.cpp
     src/measures.cpp
     src/playback.cpp

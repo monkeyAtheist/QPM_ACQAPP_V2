@@ -131,4 +131,8 @@ struct KaiserEstimate
     std::size_t taps = 0;
 };
 KaiserEstimate estimateKaiser(double attenuationDb, double transitionWidthHz, double sampleRateHz) noexcept;
+
+// Roots of a real polynomial given in ascending powers (its last coefficient not 0), by the Aberth-Ehrlich
+// iteration: O(degree²) per step; the zeros of a FIR of a few hundred taps in a few milliseconds.
+std::vector<Complex> polynomialRoots(std::span<const double> ascending);
 } // namespace qacq::dsp
