@@ -6,8 +6,9 @@ Ce dépôt est la réécriture de QtAcquisitionApp (« Architecture milestone 57
 
 **Statut : phase 4 (les modules) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle de
 session, l'acquisition sur ses threads et leurs tests sont en place. La fenêtre Qt Quick existe, sur la coquille
-de QTsignalApp V2 : modules Signaux (visualiser, mesurer, ajouter des courbes et des spectres) et
-Acquisition ; Générateur, Filtres et Modulations arrivent ensuite. L'ancienne application reste utilisable d'ici là.
+de QTsignalApp V2 : modules Signaux (visualiser, mesurer, ajouter des courbes et des spectres),
+Acquisition et Générateur ; Filtres et Modulations arrivent ensuite. L'ancienne application reste utilisable
+d'ici là.
 
 ## Décisions (20/11/2026)
 
@@ -66,6 +67,8 @@ app/                         qacq_app : couche applicative sur QtCore (sans fen�
   include/qacq/app/units.h          quantités pour les champs de QML : « 48 kHz » affiché, « 44,1 kHz » saisi
   include/qacq/app/analysis_controller.h  analyse (module Signaux) : calcul sur son thread, mesures mises en forme, export
   include/qacq/app/curves_controller.h    courbes ajoutées : liste (session), courbes du temps sur un thread
+  include/qacq/app/generator_controller.h module Générateur : recette, aperçu sur son thread (session à part), ajout
+  include/qacq/app/audio_player.h  écoute d'un signal sur la carte son (Qt Multimedia, préparée sur un thread)
 plot/                        qacq_plot : le moteur de tracé de toutes les vues, sans aucune dépendance Qt
   include/qacq/plot/axis.h          graduations 1-2-5 et log, un préfixe par axe, quantités affichées et saisies
   include/qacq/plot/trace.h         tracé à tout zoom : extrêmes par colonne de pixels, pyramide min/max, ruptures
@@ -74,14 +77,21 @@ analysis/                    qacq_analysis : l'analyse sans Qt (spectre d'une zo
   include/qacq/analysis/measures.h  statistiques A-B, mesures d'oscilloscope, pics, bande à −3 dB
   include/qacq/analysis/calculus.h  intégrale, dérivée, valeurs par période, courbe calculée (nouveau signal)
   include/qacq/analysis/curves.h    courbes ajoutées : sortes, noms, unités, liste en JSON, calcul, « Garder »
+  include/qacq/analysis/generation.h  recettes du générateur : voies, formes d'onde additionnées, séries de Fourier,
+                                    motifs dessinés (points, tracés, série exacte), récurrences, JSON, exemples
+  include/qacq/analysis/expression.h  formules tapées (coefficients de Fourier…) : opérateurs, fonctions, variables
+  include/qacq/analysis/playback.h    un signal prêt pour la carte son : voies, rééchantillonnage, niveau, format
 ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille de QTsignalApp V2)
   signal_plot.h                    le tracé (QQuickPaintedItem) : signal de la session, défilement, captures
   spectrum_plot.h                  le spectre : fréquences linéaires ou log, niveaux en dB ou linéaires, harmoniques
+  motif_editor.h                   l'éditeur d'un motif dessiné du générateur : points, tracés à main levée, grille
   qml/Main.qml                     fenêtre, barre des modules, ruban, liste des signaux, propriétés
   qml/AcquisitionView.qml          module Acquisition : tracé en direct, ruban, état et chiffres de la liaison
   qml/AcquisitionSettings.qml      réglages de la source, du format, de la cadence, des voies ; préréglages
   qml/SignalsView.qml              module Signaux : le signal choisi, les courbes du temps et les spectres ajoutés
   qml/AnalysisPanel.qml            onglet Mesures : mesures de la zone, pics des spectres, réglages des calculs
+  qml/GeneratorView.qml            module Générateur : aperçu du signal et de son spectre, ruban, ajout à la session
+  qml/GeneratorPanel.qml           onglet Composition : signal, voies, formes d'onde (WaveCard.qml), préréglages
   qml/ViewGroup.qml                groupe « Vue » du ruban, le même dans chaque module
 tests/                       qacq_tests (cœurs) et qacq_app_tests (couche Qt) : un groupe CTest par étiquette
   fixtures/scipy_reference.inc     résultats SciPy (générés, ne pas éditer)
@@ -208,7 +218,12 @@ bloqué ne fige jamais l'interface :
   puis la requête répétée ; la suivante part une fois la réponse entière reçue, une réponse en retard est
   redemandée. Une forme d'onde (`:WAV:DATA?`) devient un enregistrement marqué par une rupture. L'USB (VISA)
   viendra ensuite.
-- **Carte son** : entrée choisie par son nom, format vérifié avant de démarrer.
+- **Carte son** : entrée choisie par son nom, format vérifié avant de démarrer. Sa fréquence est celle de
+  l'enregistrement, quelle que soit la fréquence « annoncée » restée des autres sources (jusqu'au 22/11/2026,
+  une fréquence annoncée de 1 MHz pour le simulateur passait avant : 7 s de voix à 48 kHz duraient 337 ms ;
+  l'onglet Signal propose alors « Remettre 48 kHz »). Les signaux enregistrés s'appellent « Enregistrement »
+  (le nom d'une autre source, « Essai du simulateur », « Acquisition », devient celui de la source choisie ; un
+  nom à soi reste).
 - **Simulateur** : une carte imaginaire, au rythme réel.
 
 **Le contrôleur** démarre et arrête, publie les statistiques (octets, trames, rejets, erreurs de CRC, trames
@@ -264,7 +279,7 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
 21/11/2026, selon l'audit). En haut le signal choisi ; dessous, **seulement les courbes qu'on ajoute**
 (onglet Courbes ▸ Ajouter…, ou clic droit sur le tracé). Sans courbe, le signal prend toute la hauteur.
 - **Ruban** : deux onglets bien visibles (pastilles avec icône, l'onglet ouvert en couleur), et dans les
-  deux le groupe Fichier (Importer). **Onglet Visualiser** : Vue (Tout voir, Zoom ±, Précédente, sur le
+  deux le groupe Fichier (Importer) et le groupe Écouter (le signal sur la carte son : voir le Générateur). **Onglet Visualiser** : Vue (Tout voir, Zoom ±, Précédente, sur le
   dernier tracé survolé ; le même groupe que dans Acquisition), Voies (Superposées), Mesurer (Curseurs ; Pic
   et Suivant avec un spectre), Image. **Onglet Courbes** : Courbes (Ajouter…, Superposées, Garder, Tout
   retirer, Exporter ▾ : les courbes du temps ou les spectres en CSV), Zone analysée, Spectres (amplitude ou
@@ -330,8 +345,10 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
 - **Export** en CSV pour un tableur (virgule décimale, « ; » entre les colonnes, UTF-8 avec sa marque) : les
   spectres (fréquence, niveau en dB et en valeur) et les courbes du temps affichées (le temps, puis une
   colonne par courbe, « nan » là où une courbe n'a pas de valeur) ; aussi par clic droit sur leur graphe.
-- **Mesures temporelles** de chaque voie (comme un oscilloscope) : niveaux haut et bas (modes de
-  l'histogramme, ou extrêmes), période et fréquence par les fronts (hystérésis de 10 %), rapport cyclique,
+- **Mesures temporelles** de chaque voie (comme un oscilloscope) : niveaux haut et bas (deux modes de
+  l'histogramme séparés par un creux ; sinon, un bruit par exemple, les extrêmes), période et fréquence par
+  les fronts (hystérésis de 10 % ; des fronts trop irréguliers — bruit, balayage, salves — ne font pas de
+  période, et sans deux niveaux pas de temps de montée non plus), rapport cyclique,
   montée et descente 10-90 % ou 20-80 % (réglage), dépassements, moyenne et efficace sur les périodes entières
   (sans le biais d'une période coupée au bord de la zone), temps d'établissement à ±1 % et ±0,1 % après le
   dernier front (vers un niveau plat seulement : carré, échelon). **Pics du spectre** : les 8 plus hauts, un
@@ -339,6 +356,91 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
 - **Calculs des courbes du temps** : intégrale cumulée (trapèzes, moyenne retirée au choix), dérivée
   (différences centrées), moyenne, efficace et fréquence par période (une valeur par période, d'un front
   montant au suivant, vide hors des périodes entières).
+
+## Le module Générateur
+
+- **Une recette, voie par voie** : un signal de 1 à 16 voies, chacune avec son nom, son unité, son décalage
+  et jusqu'à 32 formes d'onde qui s'additionnent : sinus, carré, triangle, dent de scie, impulsions (rapport
+  cyclique), continu, échelon et Dirac (à l'instant choisi), bruit blanc (gaussien : écart type ; uniforme :
+  crête), balayage (de f1 à f2, linéaire ou logarithmique, sur toute la durée). Un sinus et un bruit font un
+  sinus bruité, trois sinus un multiton. Une forme d'onde se décoche pour l'écarter sans la perdre, se monte
+  ou se descend ; en changer de sorte garde ce que les deux partagent (amplitude, fréquence, phase…).
+- **Série de Fourier par ses coefficients** (forme d'onde « Série de Fourier ») : fondamentale f₀, N
+  harmoniques (0 : tous ceux sous fs/2), coefficients en formules de n : x(t) = a₀ + Σ aₙ cos(nω₀t) +
+  bₙ sin(nω₀t), ou les Cₙ complexes d'un signal réel (Re Cₙ et Im Cₙ, ou |Cₙ| et arg Cₙ en degrés ; C₀ = a₀,
+  Cₙ = (aₙ − j bₙ)/2, C₋ₙ = Cₙ*). Changer de forme réécrit les formules pour la même série, en restant
+  court : le nombre en tête est multiplié (bₙ = 4*E/(pi*n)*odd(n) → Im Cₙ = -2*E/(pi*n)*odd(n)), un terme de
+  signe constant prend une phase constante (|Cₙ| = 2*E/(pi*n)*odd(n), arg Cₙ = -90), et revenir à la forme
+  d'avant redonne les formules d'avant. Les formules, longues ou non, se lisent en entier (retour à la
+  ligne) ; Entrée les applique, Échap les rend. Les formules
+  connaissent n (aussi N ou k), Nmax, f0, w0, T0, fs, pi (π), e, les variables de la composante
+  (« E = 1 ; D = 0,25 ») ; + − * / ^, produits implicites (2n, 2pi, pi n, 2(n+1)), comparaisons (1 ou 0), sin, cos,
+  tan, asin, acos, atan, atan2, sinh, cosh, tanh, sqrt, abs, exp, ln, log (décimal), log2, floor, ceil, round,
+  sign, min, max, mod, pow, sinc, odd, even, sind, cosd, tand, deg, rad et if(condition; alors; sinon) (seule la
+  branche choisie est calculée : if(n == 1; 0; 1/(n−1))) ; « ; » entre les arguments, 0,5 ou 0.5 ; « bₙ = … »
+  ou « = … » devant une formule sont acceptés. Les erreurs disent quel terme, quoi et où (« bₙ : Nom inconnu
+  « D » (caractère 3) », « aₙ n'est pas un nombre fini pour n = 1 »). **Modèles** : carré, triangle, dent de
+  scie, impulsions, sinus redressé double et simple alternance (avec le E et le D des variables) ; un carré,
+  un triangle, une dent de scie ou des impulsions changés en série de Fourier gardent leur forme (mêmes
+  échantillons, à 1e-15 près). Le tableau des 12 premiers coefficients (aₙ, bₙ, Aₙ et φₙ de
+  Aₙ sin(nω₀t + φₙ)) suit chaque modification. Harmoniques à fs/2 ou au-delà laissés de côté (avertissement)
+  ou repliés au choix ; somme par le schéma de Horner (4·10⁸ harmoniques × échantillons au plus).
+- **Motif dessiné** (forme d'onde « Motif dessiné ») : une période dessinée à la souris dans le panneau
+  Composition, x de 0 à T, y de −A à +A. Un clic pose un point, un point se glisse entre ses voisins, un
+  double-clic ou un clic droit le retire, un tracé à main levée redessine le motif là où il passe (simplifié,
+  256 points au plus par tracé ; un trait vertical fait un saut) ; « Grille » (ou Maj) aimante les points au
+  1/32 de la période et au 1/8 de la hauteur ; Suppr et les flèches agissent sur le point choisi. Les points
+  se joignent par **paliers**, **segments** ou une **courbe lisse** (cubique monotone de Fritsch–Carlson :
+  jamais au-delà des points, plate à un sommet) ; deux points au même x font un saut. Le motif se répète à sa
+  fréquence (phase comprise), ou s'étale **une fois sur toute la durée**. Ses points se lisent et se tapent
+  aussi en texte (« 0 -1 ; 0,1 1 ; 0,5 1 ; 0,6 -1 », 1 024 points au plus). **Modèles** : rampe, escalier,
+  trapèze, charge et décharge RC (τ = T/10), cardiogramme ; un carré, des impulsions, un triangle ou une dent
+  de scie changés en motif gardent leurs échantillons (un sinus : 16 points, courbe lisse, à 0,6 % près).
+  Sans repliement, le motif est sa série de Fourier exacte sous fs/2 (chaque morceau est un polynôme : les
+  coefficients viennent des sauts de la valeur et de ses dérivées aux jonctions).
+- **Récurrence** (forme d'onde « Récurrence ») : y[n] tapé comme une formule des valeurs d'avant, y[n-1] à
+  y[n-16] et x[n] à x[n-16] (aussi « y(n-1) », « y_{n-1} », ou y1, x1…), de n, t (n/fs), fs, Te (1/fs), N et
+  de variables (« a = 0,9 ; w = 2*pi*f/fs »), à partir de valeurs initiales (« y[-1] = 1 ; y[-2] = 0 », les
+  autres à 0), avec les fonctions des séries de Fourier. **Entrée** x[n] : aucune, Dirac (réponse
+  impulsionnelle), échelon (réponse indicielle), bruit blanc gaussien, ou **les formes d'onde au-dessus**, que
+  y[n] remplace alors : la récurrence les filtre (celles d'en dessous s'ajoutent encore). Les erreurs se
+  disent à la frappe (« y[n] : Nom inconnu « b » », « y[n] ne dépend que des valeurs d'avant »), et une
+  valeur qui n'est plus un nombre fini arrête le calcul (« la récurrence diverge », avec n). Les 12 premières
+  valeurs (n, x[n], y[n]) suivent chaque calcul. **Modèles** : oscillateur (2 cos(w) y[n-1] − y[n-2] : un
+  sinus exact ; un sinus changé en récurrence devient le sien, phase comprise), passe-bas du premier ordre,
+  résonateur, moyenne glissante, marche aléatoire, suite logistique (chaos).
+- **Repliement ou pas** : un carré, un triangle, une dent de scie ou des impulsions sont échantillonnés tels
+  quels (leurs harmoniques au-delà de fs/2 se replient, comme sur un CAN sans filtre), ou « sans repliement »
+  par leur série de Fourier jusqu'à fs/2, éventuellement limitée à quelques harmoniques (Gibbs bien visible).
+  Au-delà d'environ 4·10⁸ harmoniques × échantillons (une seconde de calcul), la série est raccourcie et un
+  avertissement le dit.
+- **Aperçu** : le signal est calculé sur son propre thread un instant après chaque modification (le calcul en
+  cours s'arrête si la recette change), avec une roue et le pourcentage s'il dure ; il s'affiche avec le
+  spectre de chaque voie, et ses mesures (statistiques, tonalité, THD…) sont dans l'onglet Mesures du
+  panneau de droite. Les avertissements (fréquence au-delà de fs/2, Dirac hors de l'enregistrement) disent
+  la voie et la forme d'onde en cause. Cinquante millions d'échantillons au plus, toutes voies comprises
+  (400 Mo) ; au-delà, la recette est refusée avant tout calcul. L'aperçu n'est calculé que module ouvert.
+- **Ajouter à la session** : l'aperçu devient un signal de la liste (ses échantillons sont partagés, pas
+  copiés), en une étape d'annulation ; ses notes disent ce qu'il contient et sa provenance garde la recette.
+  Dans le panneau Signal, « Reprendre dans le générateur » remet cette recette dans le module.
+- **Écouter** (ruban, groupe Écouter, aussi dans le module Signaux pour le signal choisi) : l'aperçu joué
+  sur la carte son, une voie en mono ou les voies 1 et 2 en stéréo (gauche, droite). Il est préparé sur
+  son propre thread au format de la sortie : rééchantillonné à sa fréquence (sinc fenêtré de Kaiser, coupé
+  à 0,45 de la plus basse des deux fréquences : rien ne se replie quand on descend), **normalisé** (crête à
+  −1 dBFS) ou **tel quel** (±1 dans l'unité du signal = pleine échelle, au-delà écrêté et dit), une fois ou
+  **en boucle** (le rééchantillonnage raccorde alors la fin au début). **Son ▾** : voies, niveau, boucle,
+  volume (changé pendant l'écoute), sortie audio ; ces réglages sont retenus. Pendant l'écoute, chaque
+  nouvel aperçu remplace le précédent (en boucle surtout) : ce qu'on change dans la recette s'entend. Une
+  seule écoute à la fois dans l'application : tant qu'un son joue, le bouton est « Arrêter » dans les deux
+  modules (son info-bulle dit quoi, où et depuis combien de temps). Dix minutes au plus ; ce qui
+  dépasse ce que la carte rend (au-delà de 0,45 × sa fréquence) est dit.
+- **Exemples** (ruban) : sinus 1 kHz, sinus et bruit, multiton, carré avec et sans repliement, balayage
+  20 Hz → 20 kHz, échelon et bruit, Dirac, réseau 50 Hz (tension et courant déphasé avec un harmonique 3),
+  série de Fourier d'un carré (15 harmoniques, Gibbs), redressement double alternance, cardiogramme dessiné
+  avec le 50 Hz du secteur, carré filtré par une récurrence (passe-bas RC), bruit blanc. La recette en cours est retenue d'une fois sur l'autre ; les
+  préréglages en gardent d'autres.
+- **Bruit reproductible** : une graine pour tout le signal ; chaque bruit en tire une suite à lui (graine +
+  1000 × voie + forme d'onde), la même sur tout compilateur.
 
 ## Outils des tracés
 
@@ -420,7 +522,9 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
    temps en s, ms ou µs).
 4. **Modules** (en cours) : analyse (spectre, densité, mesures, courbes ajoutées), fusion de Signaux et
    Analyse en un module (audit du 21/11), export des courbes, garde-fou de la fréquence d'échantillonnage,
-   spectrogramme en courbe ajoutée : faits ; ensuite générateur, filtres, modulations ; VISA
+   spectrogramme en courbe ajoutée, générateur (voies, formes d'onde additionnées, aperçu, séries de Fourier
+   par leurs coefficients, motif dessiné, récurrence, écoute sur la carte son) : faits ;
+   puis filtres, modulations ; VISA
    pour les instruments en USB. À étudier : réponse en fréquence entre deux voies (gain, phase, marges),
    distorsion pondérée A.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.

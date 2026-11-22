@@ -150,7 +150,7 @@ Rectangle {
                 visible: list.count === 0
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-                text: qsTr("Aucun signal pour l'instant.\n\nImportez un fichier CSV ou WAV (ou déposez-le sur la fenêtre), ou lancez une acquisition (le simulateur ne demande aucun matériel).")
+                text: qsTr("Aucun signal pour l'instant.\n\nImportez un fichier CSV ou WAV (ou déposez-le sur la fenêtre), lancez une acquisition (le simulateur ne demande aucun matériel), ou composez-en un dans le Générateur (Ajouter le met ici).")
                 color: Theme.textMuted
                 font.pixelSize: Theme.smallText
             }

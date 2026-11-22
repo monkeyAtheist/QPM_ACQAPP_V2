@@ -8,7 +8,8 @@ import QtQuick.Layouts
 // while boxes are ticked and settings changed; a click outside or Échap closes it.
 //   mode "channels": the channels of a SignalPlot (`view`), hidden through its hiddenChannels;
 //   mode "time" / "spectrogram" / "frequency": the curves of that graph of the module "Signaux" (`curves`, a
-//   CurvesController).
+//   CurvesController);
+//   mode "plain": no list, the views and the actions only (the spectrum of the generator's preview).
 // (No property here is named "on" + a capital letter: QML takes such a name for the handler of a signal
 // and never evaluates its binding.)
 Popup {
@@ -23,10 +24,13 @@ Popup {
     property Component settings: null
     property string settingsTitle: ""
 
-    readonly property bool listsCurves: mode !== "channels"
-    readonly property bool stackable: mode !== "frequency" && mode !== "spectrogram" && view !== null && view.stacked !== undefined
+    readonly property bool lists: mode !== "plain"
+    readonly property bool listsCurves: mode !== "channels" && lists
+    readonly property bool stackable: lists && mode !== "frequency" && mode !== "spectrogram" && view !== null && view.stacked !== undefined
     readonly property var items: {
         const colors = Theme.channelColors
+        if (!lists)
+            return []
         if (!listsCurves) {
             if (!view || !view.channelNames || !view.hiddenChannels)
                 return []
@@ -84,6 +88,7 @@ Popup {
             Layout.alignment: Qt.AlignTop
             spacing: 2
             Label {
+                visible: root.lists
                 text: root.mode === "frequency" ? qsTr("Spectres affichés")
                       : root.mode === "spectrogram" ? qsTr("Spectrogrammes affichés")
                       : root.listsCurves ? qsTr("Courbes affichées") : qsTr("Voies affichées")
@@ -92,7 +97,7 @@ Popup {
                 font.bold: true
             }
             Label {
-                visible: root.items.length === 0
+                visible: root.lists && root.items.length === 0
                 text: qsTr("Aucune")
                 color: Theme.textMuted
                 font.pixelSize: Theme.smallText
@@ -136,8 +141,12 @@ Popup {
                 color: Theme.textMuted
                 font.pixelSize: Theme.smallText
             }
-            MenuSeparator { Layout.fillWidth: true }
+            MenuSeparator {
+                visible: root.lists
+                Layout.fillWidth: true
+            }
             ItemDelegate {
+                visible: root.lists
                 Layout.fillWidth: true
                 enabled: root.items.some((item) => !item.shown)
                 text: root.listsCurves ? qsTr("Tout afficher") : qsTr("Afficher toutes les voies")

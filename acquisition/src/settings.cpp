@@ -149,6 +149,31 @@ std::string_view sourceName(SourceKind kind) noexcept
     return "?";
 }
 
+double announcedRate(const AcquisitionSettings &settings) noexcept
+{
+    if (settings.source == SourceKind::Audio) return static_cast<double>(settings.audio.sampleRate);
+    return settings.declaredSampleRateHz > 0.0 ? settings.declaredSampleRateHz : 0.0;
+}
+
+std::string_view defaultSignalName(SourceKind kind) noexcept
+{
+    switch (kind)
+    {
+        case SourceKind::Simulated: return "Essai du simulateur";
+        case SourceKind::Audio: return "Enregistrement";
+        default: return "Acquisition";
+    }
+}
+
+std::string nameForSource(const std::string &name, SourceKind source)
+{
+    if (name.empty()) return std::string(defaultSignalName(source));
+    for (SourceKind other : {SourceKind::Serial, SourceKind::TcpClient, SourceKind::Udp, SourceKind::Scpi,
+                             SourceKind::Audio, SourceKind::Simulated})
+        if (name == defaultSignalName(other)) return std::string(defaultSignalName(source));
+    return name;
+}
+
 bool sourceFromKey(std::string_view key, SourceKind &kind) noexcept
 {
     return valueOf(key, kind, kSources);

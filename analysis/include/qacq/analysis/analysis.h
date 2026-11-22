@@ -94,13 +94,19 @@ struct Settling
 struct WaveMeasures
 {
     bool levels = false; // the signal is not flat
+    // Top and base are two modes of the histogram with a hollow between them (square wave, sine, steps);
+    // otherwise (one hump in the middle: noise; flat: triangle, sawtooth) they are the extremes.
+    bool twoLevels = false;
     // The level is a flat part (8 % of the samples in its class of the histogram at least: a square wave,
     // a step; a sine puts 6 % in its extreme classes). Settling is measured towards a flat level only.
     bool flatTop = false, flatBase = false;
     double top = 0.0, base = 0.0, amplitude = 0.0;
     double edgeLowFraction = 0.1; // rise and fall measured from this fraction of the amplitude to 1 − it
     std::size_t risingEdges = 0, fallingEdges = 0;
-    bool periodic = false; // at least two rising edges
+    bool periodic = false; // at least two rising edges, evenly spaced (within 25 %)
+    // Rising edges too unevenly spaced for a period (noise, a sweep, bursts): no period, duty cycle nor
+    // whole periods; without two levels (noise) no rise and fall times either.
+    bool irregular = false;
     double periodSeconds = 0.0, frequencyHz = 0.0;
     bool duty = false;
     double dutyCyclePercent = 0.0;

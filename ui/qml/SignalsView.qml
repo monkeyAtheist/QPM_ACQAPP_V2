@@ -14,6 +14,7 @@ Item {
     required property var session
     required property var analysis
     required property var curves
+    required property var player
     property var signalId: 0
     property Item ribbonHost: null
     property bool leftFolded: false
@@ -205,7 +206,7 @@ Item {
         currentTab: root.ribbonTab
         onTabClicked: (index) => root.ribbonTab = index
 
-        // ---- In both tabs: bring a file in ----
+        // ---- In both tabs: bring a file in, listen to the signal ----
         RibbonGroup {
             title: qsTr("Fichier")
             RibbonButton {
@@ -215,6 +216,15 @@ Item {
                 tip: qsTr("Un fichier CSV, texte ou WAV devient un signal de la session (Ctrl+I ; aussi en le déposant sur la fenêtre)")
                 onClicked: root.importRequested()
             }
+        }
+        ListenGroup {
+            player: root.player
+            session: root.session
+            signalId: root.hasSignal ? root.signalId : 0
+            // (The count is read so that this follows the list.)
+            channels: root.hasSignal ? (root.session.signalList.count, root.session.signalList.info(root.signalId).channels ?? []) : []
+            onInfoMessage: (text) => root.infoMessage(text)
+            onErrorMessage: (text) => root.errorMessage(text)
         }
 
         // ---- Visualiser: look and measure ----

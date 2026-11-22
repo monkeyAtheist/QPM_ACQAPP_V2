@@ -1,10 +1,14 @@
 # qacq_analysis: the "Analyse" module without Qt (spectrum of a zone of a signal as the plot shows it,
-# measurements of every channel, curves computed from the channels, export). Built on qacq_dsp, qacq_model and qacq_plot; tested on its own.
+# measurements of every channel, curves computed from the channels, export) and the recipes of the
+# generator. Built on qacq_dsp, qacq_model and qacq_plot; tested on its own.
 add_library(qacq_analysis STATIC
     src/analysis.cpp
     src/calculus.cpp
     src/curves.cpp
+    src/expression.cpp
+    src/generation.cpp
     src/measures.cpp
+    src/playback.cpp
 )
 add_library(qacq::analysis ALIAS qacq_analysis)
 

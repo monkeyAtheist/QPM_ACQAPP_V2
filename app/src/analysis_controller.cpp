@@ -413,7 +413,11 @@ QVariantList AnalysisController::measures() const
                  << row(tr("Fronts montants / descendants"), QStringLiteral("%1 / %2")
                                                                  .arg(formatCount(static_cast<qint64>(w.risingEdges)))
                                                                  .arg(formatCount(static_cast<qint64>(w.fallingEdges))));
-            if (!w.periodic) waveText = tr("Moins de deux fronts montants dans la zone : pas de période.");
+            if (w.irregular)
+                waveText = tr("Fronts trop irréguliers pour une période (bruit, balayage, salves…)%1.")
+                               .arg(w.twoLevels ? QString() : tr(" ; haut et bas sont les extrêmes"));
+            else if (!w.periodic)
+                waveText = tr("Moins de deux fronts montants dans la zone : pas de période.");
         }
         channel[QStringLiteral("wave")] = wave;
         channel[QStringLiteral("waveText")] = waveText;

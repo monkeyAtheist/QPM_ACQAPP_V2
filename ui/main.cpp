@@ -2,7 +2,9 @@
 #include "qacq/app/acquisition_controller.h"
 #include "qacq/app/analysis_controller.h"
 #include "qacq/app/app_settings.h"
+#include "qacq/app/audio_player.h"
 #include "qacq/app/curves_controller.h"
+#include "qacq/app/generator_controller.h"
 #include "qacq/app/serial_port_list.h"
 #include "qacq/app/session.h"
 #include "qacq/app/signal_list_model.h"
@@ -38,6 +40,8 @@ int main(int argc, char *argv[])
     qmlRegisterUncreatableType<qacq::app::AcquisitionController>("Qacq.App", 1, 0, "AcquisitionController", made);
     qmlRegisterUncreatableType<qacq::app::AnalysisController>("Qacq.App", 1, 0, "AnalysisController", made);
     qmlRegisterUncreatableType<qacq::app::CurvesController>("Qacq.App", 1, 0, "CurvesController", made);
+    qmlRegisterUncreatableType<qacq::app::GeneratorController>("Qacq.App", 1, 0, "GeneratorController", made);
+    qmlRegisterUncreatableType<qacq::app::AudioPlayer>("Qacq.App", 1, 0, "AudioPlayer", made);
     qmlRegisterUncreatableType<qacq::app::SerialPortList>("Qacq.App", 1, 0, "SerialPortList", made);
     qmlRegisterUncreatableType<qacq::app::AppSettings>("Qacq.App", 1, 0, "AppSettings", made);
     qmlRegisterSingletonType<qacq::app::Units>("Qacq.App", 1, 0, "Units",
@@ -50,6 +54,8 @@ int main(int argc, char *argv[])
     qacq::app::AcquisitionController acquisition(&session);
     qacq::app::AnalysisController analysis(&session);
     qacq::app::CurvesController curves(&session, &analysis);
+    qacq::app::GeneratorController generator(&session);
+    qacq::app::AudioPlayer player(&settings);
     qacq::app::SerialPortList serialPorts;
 
     QQmlApplicationEngine engine;
@@ -57,6 +63,8 @@ int main(int argc, char *argv[])
                                  {QStringLiteral("acquisition"), QVariant::fromValue(&acquisition)},
                                  {QStringLiteral("analysis"), QVariant::fromValue(&analysis)},
                                  {QStringLiteral("curves"), QVariant::fromValue(&curves)},
+                                 {QStringLiteral("generator"), QVariant::fromValue(&generator)},
+                                 {QStringLiteral("player"), QVariant::fromValue(&player)},
                                  {QStringLiteral("serialPorts"), QVariant::fromValue(&serialPorts)},
                                  {QStringLiteral("appSettings"), QVariant::fromValue(&settings)}});
     QObject::connect(

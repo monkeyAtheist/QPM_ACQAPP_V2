@@ -167,6 +167,18 @@ struct AcquisitionSettings
     std::vector<model::ChannelInfo> channels; // names and units; missing ones get defaults
 };
 
+// The rate the samples come at when it is known before they arrive: the sound card's own (whatever was
+// announced for another source and left in the settings), else the one announced (0: measured from their
+// arrival).
+double announcedRate(const AcquisitionSettings &settings) noexcept;
+
+// The name of the signals acquired unless another is given: "Essai du simulateur", "Enregistrement" (sound
+// card), "Acquisition".
+std::string_view defaultSignalName(SourceKind kind) noexcept;
+// The name of the signals of a source: none, or one left from another source (« Essai du simulateur » for the
+// sound card), becomes its own; a name of one's own is kept.
+std::string nameForSource(const std::string &name, SourceKind source);
+
 // Empty when the settings can be used, else the reason (in French).
 std::string validateSettings(const AcquisitionSettings &settings);
 

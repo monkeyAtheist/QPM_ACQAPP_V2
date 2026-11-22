@@ -1,7 +1,7 @@
 pragma Singleton
 import QtQuick
 
-// The lists of choices of the acquisition settings: key as the settings store it, name as shown.
+// The lists of choices of the settings (acquisition, generator): key as the settings store it, name as shown.
 QtObject {
     readonly property var sources: [
         { key: "simulated", name: qsTr("Simulateur"), icon: "sim" },
@@ -66,6 +66,71 @@ QtObject {
         { key: "pulse", name: qsTr("Impulsion") },
         { key: "dc", name: qsTr("Continu") },
         { key: "noise", name: qsTr("Bruit blanc") }
+    ]
+    // The waveforms of the generator (keys of qacq::analysis::waveformKey), in the order of its menus.
+    readonly property var generatorWaveforms: [
+        { key: "sine", name: qsTr("Sinus"), tip: qsTr("A·sin(2π f t + φ)") },
+        { key: "square", name: qsTr("Carré"), tip: qsTr("+A puis −A sur chaque période, selon le rapport cyclique") },
+        { key: "triangle", name: qsTr("Triangle"), tip: qsTr("Montée et descente linéaires entre −A et +A") },
+        { key: "sawtooth", name: qsTr("Dent de scie"), tip: qsTr("Montée linéaire de −A à +A, puis retour brusque") },
+        { key: "pulse", name: qsTr("Impulsions"), tip: qsTr("A pendant le rapport cyclique de chaque période, 0 ensuite") },
+        { key: "dc", name: qsTr("Continu"), tip: qsTr("Une valeur constante") },
+        { key: "step", name: qsTr("Échelon"), tip: qsTr("0, puis A à partir de l'instant choisi") },
+        { key: "impulse", name: qsTr("Dirac"), tip: qsTr("Une seule valeur non nulle, A, à l'instant choisi : un spectre plat") },
+        { key: "noise", name: qsTr("Bruit"), tip: qsTr("Bruit blanc, gaussien ou uniforme") },
+        { key: "sweep", name: qsTr("Balayage"), tip: qsTr("Un sinus dont la fréquence va d'une valeur à une autre sur toute la durée (vobulation, chirp)") },
+        { key: "fourier", name: qsTr("Série de Fourier"), tip: qsTr("Une somme d'harmoniques de f₀ dont les coefficients aₙ, bₙ (ou Cₙ) sont des formules de n") },
+        { key: "drawn", name: qsTr("Motif dessiné"), tip: qsTr("Une forme dessinée à la souris (ou tapée point par point), répétée à sa fréquence ou étalée sur toute la durée") },
+        { key: "recurrence", name: qsTr("Récurrence"), tip: qsTr("y[n] calculé à partir des valeurs d'avant et d'une entrée x[n] : oscillateurs, filtres, suites") }
+    ]
+    // The input x[n] of a recurrence (keys of the recipe).
+    readonly property var recurrenceInputs: [
+        { key: "none", name: qsTr("Aucune (0)"), tip: qsTr("x[n] = 0 : y[n] ne vit que de ses valeurs initiales.") },
+        { key: "impulse", name: qsTr("Dirac"), tip: qsTr("x[0] = 1, puis 0 : y[n] est la réponse impulsionnelle de la récurrence.") },
+        { key: "step", name: qsTr("Échelon"), tip: qsTr("x[n] = 1 dès n = 0 : y[n] est sa réponse indicielle.") },
+        { key: "noise", name: qsTr("Bruit blanc"), tip: qsTr("x[n] gaussien d'écart type 1, tiré de la graine du signal.") },
+        { key: "above", name: qsTr("Les formes d'onde au-dessus"), tip: qsTr("x[n] est la somme des formes d'onde au-dessus de celle-ci, que y[n] remplace : la récurrence les filtre.") }
+    ]
+    // Ready-made recurrences (GeneratorController.applyRecurrenceModel).
+    readonly property var recurrenceModels: [
+        { key: "oscillator", name: qsTr("Oscillateur (sinus)") },
+        { key: "lowpass", name: qsTr("Passe-bas du premier ordre (RC)") },
+        { key: "resonator", name: qsTr("Résonateur (réponse à un Dirac)") },
+        { key: "average", name: qsTr("Moyenne glissante sur 4 points") },
+        { key: "walk", name: qsTr("Marche aléatoire") },
+        { key: "logistic", name: qsTr("Suite logistique (chaos)") }
+    ]
+    // How the points of a drawn motif are joined (keys of the recipe).
+    readonly property var motifInterpolations: [
+        { key: "steps", name: qsTr("Paliers") },
+        { key: "linear", name: qsTr("Segments") },
+        { key: "smooth", name: qsTr("Courbe lisse") }
+    ]
+    // Ready-made drawn motifs (GeneratorController.applyMotifModel).
+    readonly property var motifModels: [
+        { key: "ramp", name: qsTr("Rampe de −A à +A") },
+        { key: "stairs", name: qsTr("Escalier (4 marches)") },
+        { key: "trapezoid", name: qsTr("Trapèze") },
+        { key: "rc", name: qsTr("Charge et décharge RC (τ = T/10)") },
+        { key: "heartbeat", name: qsTr("Cardiogramme") }
+    ]
+    // Forms of the coefficients of a Fourier series, and the names of its three formulas in each.
+    readonly property var seriesForms: [
+        { key: "ab", name: qsTr("aₙ et bₙ (réels)"), terms: ["a₀", "aₙ", "bₙ"],
+          tip: qsTr("x(t) = a₀ + Σ aₙ cos(nω₀t) + bₙ sin(nω₀t), n = 1…N ; a₀ est la valeur moyenne") },
+        { key: "cartesian", name: qsTr("Cₙ : parties réelle et imaginaire"), terms: ["C₀", "Re Cₙ", "Im Cₙ"],
+          tip: qsTr("Coefficients complexes d'un signal réel : C₀ = a₀, Cₙ = (aₙ − j bₙ)/2 et C₋ₙ = Cₙ*") },
+        { key: "polar", name: qsTr("Cₙ : module et phase"), terms: ["C₀", "|Cₙ|", "arg Cₙ (°)"],
+          tip: qsTr("Coefficients complexes d'un signal réel, en module et argument (degrés) : Cₙ = |Cₙ| e^(j arg Cₙ), C₋ₙ = Cₙ*") }
+    ]
+    // Models of coefficients (GeneratorController.applySeriesModel).
+    readonly property var seriesModels: [
+        { key: "square", name: qsTr("Carré ±E") },
+        { key: "triangle", name: qsTr("Triangle ±E") },
+        { key: "sawtooth", name: qsTr("Dent de scie de −E à +E") },
+        { key: "pulse", name: qsTr("Impulsions E, rapport cyclique D") },
+        { key: "fullwave", name: qsTr("Sinus redressé double alternance (E |sin|)") },
+        { key: "halfwave", name: qsTr("Sinus redressé simple alternance") }
     ]
     readonly property var audioTypes: [
         { key: "int16", name: qsTr("16 bits") },

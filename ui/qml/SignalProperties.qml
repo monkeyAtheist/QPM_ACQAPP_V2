@@ -10,9 +10,19 @@ ScrollView {
     id: root
     required property var session
     property var signalId: 0
+    property var generator: null
     property var info: ({})
     readonly property bool valid: info.signalId !== undefined
     readonly property var list: session.signalList
+    // Made by the generator: its recipe is in its provenance, and can be taken up again.
+    readonly property bool generated: valid && info.provenance !== undefined && info.provenance !== null
+                                      && info.provenance.generator !== undefined
+    // Recorded by the sound card: its rate is known (before 22/11/2026, a rate announced for another source
+    // could be taken in its place: a voice of 7 s lasted 337 ms).
+    readonly property real cardRate: valid && info.provenance !== undefined && info.provenance !== null
+                                     && info.provenance.source === "audio" ? (info.provenance.audio?.sampleRate ?? 0) : 0
+    readonly property bool offCard: cardRate > 0 && Math.abs((info.sampleRate ?? 1) - cardRate) > 1e-6 * cardRate
+    signal takeUpRequested(var id)
 
     contentWidth: availableWidth
     clip: true
@@ -117,6 +127,27 @@ ScrollView {
                 color: Theme.textMuted
                 font.pixelSize: Theme.smallText
             }
+            RowLayout {
+                visible: root.offCard
+                Layout.fillWidth: true
+                spacing: 8
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: qsTr("Enregistré par la carte son à %1 : ce n'est pas l'échelle des temps du signal (la durée serait %2).")
+                          .arg(Units.compact(root.cardRate, "Hz", 6))
+                          .arg(Units.compact((root.info.frameCount ?? 0) / Math.max(root.cardRate, 1e-9), "s", 4))
+                    color: Theme.warning
+                    font.pixelSize: Theme.smallText
+                }
+                Button {
+                    text: qsTr("Remettre %1").arg(Units.compact(root.cardRate, "Hz", 6))
+                    onClicked: root.applyRate(root.cardRate)
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: qsTr("La fréquence de la carte son devient celle du signal (Ctrl+Z la rend)")
+                }
+            }
             QuantityField {
                 label: qsTr("Instant du premier échantillon")
                 unit: "s"
@@ -180,9 +211,19 @@ ScrollView {
                 visible: provenance.text.length > 2
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: qsTr("Réglages de la source et statistiques au moment de l'acquisition (gardés dans le fichier de session).")
+                text: root.generated
+                      ? qsTr("La recette du générateur qui l'a fait (gardée dans le fichier de session) : elle peut être reprise, modifiée, et donner un autre signal.")
+                      : qsTr("Réglages de la source et statistiques au moment de l'acquisition (gardés dans le fichier de session).")
                 color: Theme.textMuted
                 font.pixelSize: Theme.smallText
+            }
+            Button {
+                visible: root.generated && root.generator !== null
+                text: qsTr("Reprendre dans le générateur")
+                onClicked: root.takeUpRequested(root.signalId)
+                ToolTip.visible: hovered
+                ToolTip.delay: 500
+                ToolTip.text: qsTr("Sa recette remplace celle du module Générateur, qui s'ouvre (ce signal ne change pas)")
             }
             TextArea {
                 id: provenance

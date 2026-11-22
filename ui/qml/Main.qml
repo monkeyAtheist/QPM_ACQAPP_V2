@@ -8,13 +8,16 @@ import Qacq.App
 
 // The window: the shell of QTsignalApp V2 (module bar, tool header across the window, side panels that
 // fold away) around the modules. One session: its signals are listed on the left in every module; on the
-// right, the measurements (Signaux) or the settings of the source (Acquisition), and the signal chosen.
+// right, the measurements (Signaux), the settings of the source (Acquisition) or the composition of the
+// signal (Générateur), and the signal chosen.
 ApplicationWindow {
     id: window
     required property var session
     required property var acquisition
     required property var analysis
     required property var curves
+    required property var generator
+    required property var player
     required property var serialPorts
     required property var appSettings
 
@@ -33,10 +36,14 @@ ApplicationWindow {
     Material.background: Theme.window
     color: Theme.window
 
-    // 0 Signaux (with the curves and the spectra), 1 Acquisition (the other modules come next).
+    // 0 Signaux (with the curves and the spectra), 1 Acquisition, 2 Générateur (filters and modulations
+    // come next).
     property int module: 1
     property var selectedId: 0
-    property int inspectorTab: 0 // 0 measurements or settings of the module, 1 the selected signal
+    // 0 measurements or settings of the module, then the selected signal (1; 2 in the generator, whose
+    // measurements of the preview are tab 1).
+    property int inspectorTab: 0
+    property int generatorChannel: 0 // the channel of the recipe edited
     property bool signalsPanelOpen: true
     property bool inspectorOpen: true
     property bool darkTheme: true
@@ -164,6 +171,8 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        if (module < 0 || module > 2)
+            module = 0
         if (windowSettings.splitState)
             split.restoreState(windowSettings.splitState)
         // The acquisition settings of the last run.
@@ -236,6 +245,10 @@ ApplicationWindow {
         target: window.session.signalList
         function onCountChanged() { window.selectAfterChange() }
         function onErrorOccurred(message) { window.showError(message) }
+    }
+    Connections {
+        target: window.generator
+        function onLastErrorChanged() { window.showError(window.generator.lastError) }
     }
     Connections {
         target: window.acquisition
@@ -490,7 +503,7 @@ ApplicationWindow {
 
         Sidebar {
             Layout.fillHeight: true
-            current: window.module === 1 ? 1 : 0
+            current: window.module
             onModuleSelected: (index) => window.switchModule(index)
         }
 
@@ -539,11 +552,12 @@ ApplicationWindow {
                     SignalsView {
                         id: signalsView
                         anchors.fill: parent
-                        visible: window.module !== 1
+                        visible: window.module === 0
                         ribbonHost: moduleRibbon
                         session: window.session
                         analysis: window.analysis
                         curves: window.curves
+                        player: window.player
                         signalId: window.selectedId
                         leftFolded: !window.signalsPanelOpen
                         rightFolded: !window.inspectorOpen
@@ -577,6 +591,29 @@ ApplicationWindow {
                         onInfoMessage: (text) => window.showInfo(text)
                         onErrorMessage: (text) => window.showError(text)
                     }
+                    GeneratorView {
+                        id: generatorView
+                        anchors.fill: parent
+                        visible: window.module === 2
+                        ribbonHost: moduleRibbon
+                        generator: window.generator
+                        player: window.player
+                        session: window.session
+                        appSettings: window.appSettings
+                        channel: window.generatorChannel
+                        leftFolded: !window.signalsPanelOpen
+                        rightFolded: !window.inspectorOpen
+                        onUnfoldLeft: window.signalsPanelOpen = true
+                        onUnfoldRight: window.inspectorOpen = true
+                        onChannelSelected: (index) => window.generatorChannel = index
+                        onCompositionRequested: {
+                            window.inspectorOpen = true
+                            window.inspectorTab = 0
+                        }
+                        onSignalAdded: (id) => window.selectSignal(id)
+                        onInfoMessage: (text) => window.showInfo(text)
+                        onErrorMessage: (text) => window.showError(text)
+                    }
                 }
 
                 Inspector {
@@ -589,10 +626,19 @@ ApplicationWindow {
                     appSettings: window.appSettings
                     analysis: window.analysis
                     curves: window.curves
-                    module: window.module === 1 ? 1 : 0
+                    generator: window.generator
+                    module: window.module
                     signalId: window.selectedId
                     tab: window.inspectorTab
+                    generatorChannel: window.generatorChannel
                     onTabSelected: (index) => window.inspectorTab = index
+                    onGeneratorChannelSelected: (index) => window.generatorChannel = index
+                    onTakeUpRequested: (id) => {
+                        if (window.generator.takeUp(id)) {
+                            window.generatorChannel = 0
+                            window.switchModule(2)
+                        }
+                    }
                     onCollapseRequested: window.inspectorOpen = false
                     onFirmwareRequested: firmwareDialog.open()
                 }

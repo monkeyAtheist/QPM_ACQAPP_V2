@@ -234,6 +234,15 @@ Canvas {
             box(3, 4, 18, 16)
             wave(5, 19, 12, 4, 2)
             break
+        case "speaker":
+            line([3, 9, 7, 9, 12, 5, 12, 19, 7, 15, 3, 15], true)
+            c.beginPath()
+            c.arc(13, 12, 4, -Math.PI / 4, Math.PI / 4, false)
+            c.stroke()
+            c.beginPath()
+            c.arc(13, 12, 8, -Math.PI / 4, Math.PI / 4, false)
+            c.stroke()
+            break
         // ---- Views ----
         case "fit":
             line([4, 9, 4, 4, 9, 4], false)
@@ -361,6 +370,14 @@ Canvas {
             line([18.5, 4, 18.5, 12], false)
             line([14.5, 8, 22.5, 8], false)
             line([2, 21, 22, 21], false)
+            break
+        case "addchannel":
+            // Two bands, each with its wave, and a plus.
+            wave(2, 14, 7, 2.5, 2)
+            wave(2, 14, 16, 2.5, 2)
+            line([2, 11.5, 14, 11.5], false)
+            line([19, 8, 19, 16], false)
+            line([15, 12, 23, 12], false)
             break
         case "keep":
             wave(3, 21, 6, 2.5, 2)

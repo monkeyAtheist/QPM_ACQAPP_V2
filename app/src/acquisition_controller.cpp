@@ -56,6 +56,9 @@ void AcquisitionController::setSettings(const QVariantMap &settings)
     AcquisitionSettings next = m_settings;
     std::string error;
     if (!acquisition::fromJson(variantToJson(settings), next, &error)) addWarning(toQString(error));
+    // A name left from another source becomes that of this one (a voice recorded on the sound card is not an
+    // « Essai du simulateur »), also in settings saved before.
+    next.name = acquisition::nameForSource(next.name, next.source);
     setAcquisitionSettings(next);
 }
 
@@ -86,9 +89,9 @@ double AcquisitionController::measuredRate() const
 double AcquisitionController::effectiveRate() const
 {
     const AcquisitionSettings &s = isRunning() || m_recorder.totalFrames() > 0 ? m_running : m_settings;
-    if (s.declaredSampleRateHz > 0.0) return s.declaredSampleRateHz;
-    if (s.source == acquisition::SourceKind::Audio) return s.audio.sampleRate;
-    return m_rate.rateHz();
+    // The sound card's own rate first: a rate announced for another source may be left in the settings.
+    const double announced = acquisition::announcedRate(s);
+    return announced > 0.0 ? announced : m_rate.rateHz();
 }
 
 QVariantMap AcquisitionController::statistics() const
@@ -367,17 +370,28 @@ qint64 AcquisitionController::keepSignal()
     }
     signal.data = m_recorder.snapshot();
     signal.provenance = acquisition::toJson(m_running);
+    // (A rate announced for the other sources does not apply to the sound card: not kept with what it recorded.)
+    if (m_running.source == acquisition::SourceKind::Audio) signal.provenance.erase("declaredSampleRateHz");
     signal.provenance["statistics"] = variantToJson(statistics());
     if (!m_instrument.isEmpty()) signal.provenance["instrument"] = toUtf8(m_instrument);
 
     QStringList notes;
-    if (m_running.declaredSampleRateHz > 0.0 && m_rate.rateHz() > 0.0)
+    const bool card = m_running.source == acquisition::SourceKind::Audio;
+    const double announced = acquisition::announcedRate(m_running);
+    const double measured = m_rate.rateHz();
+    if (card)
+    {
+        // Its own rate: said only if the samples did not come at it.
+        if (measured > 0.0 && announced > 0.0 && std::abs(measured / announced - 1.0) > 0.01)
+            notes << QStringLiteral("Carte son à %1, cadence mesurée %2 : des échantillons ont pu manquer.")
+                         .arg(formatQuantity(announced, QStringLiteral("Hz"), 6), formatQuantity(measured, QStringLiteral("Hz"), 6));
+    }
+    else if (announced > 0.0 && measured > 0.0)
         notes << QStringLiteral("Fréquence déclarée %1, mesurée %2.")
-                     .arg(formatQuantity(m_running.declaredSampleRateHz, QStringLiteral("Hz"), 6),
-                          formatQuantity(m_rate.rateHz(), QStringLiteral("Hz"), 6));
+                     .arg(formatQuantity(announced, QStringLiteral("Hz"), 6), formatQuantity(measured, QStringLiteral("Hz"), 6));
     else if (!(rate > 0.0))
         notes << QStringLiteral("Fréquence d'échantillonnage inconnue : 1 Hz par défaut, à corriger.");
-    else if (m_running.declaredSampleRateHz <= 0.0 && m_running.source != acquisition::SourceKind::Audio)
+    else if (announced <= 0.0)
         notes << QStringLiteral("Fréquence mesurée sur le flux : %1.").arg(formatQuantity(rate, QStringLiteral("Hz"), 6));
     if (m_recorder.full())
         notes << QStringLiteral("Mémoire pleine : %1 trames reçues après la limite n'ont pas été gardées.")

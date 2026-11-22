@@ -1,7 +1,8 @@
 # Layer 2 - application logic on QtCore (no widgets, no QML): the list of signals for the interface with
 # undo, the session (files, import, export), the remembered settings, and the acquisition: the sources on
 # their threads (serial port, TCP, UDP, SCPI, sound card, simulator), the list of serial ports and the
-# controller; quantities for the fields (Units). Testable without any window.
+# controller; the generator (its preview apart); quantities for the fields (Units). Testable without any
+# window.
 qt_add_library(qacq_app STATIC
     include/qacq/app/acquisition_controller.h
     include/qacq/app/analysis_controller.h
@@ -9,7 +10,9 @@ qt_add_library(qacq_app STATIC
     include/qacq/app/acquisition_source.h
     include/qacq/app/app_settings.h
     include/qacq/app/audio_format.h
+    include/qacq/app/audio_player.h
     include/qacq/app/format.h
+    include/qacq/app/generator_controller.h
     include/qacq/app/qt_convert.h
     include/qacq/app/serial_port_list.h
     include/qacq/app/session.h
@@ -21,7 +24,9 @@ qt_add_library(qacq_app STATIC
     src/acquisition_source.cpp
     src/app_settings.cpp
     src/audio_format.cpp
+    src/audio_player.cpp
     src/format.cpp
+    src/generator_controller.cpp
     src/qt_convert.cpp
     src/serial_port_list.cpp
     src/session.cpp

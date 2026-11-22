@@ -143,6 +143,24 @@ TEST_CASE("Sound card format and input list", "[sources]")
     AcquisitionController controller;
     const QStringList inputs = controller.audioInputs(); // may be empty on a PC without microphone
     CHECK(inputs.size() >= 0);
+
+    // From the simulator announced at 1 MHz to the sound card: its own rate, and a name of its own (a voice of
+    // 7 s at 48 kHz was taken at 1 MHz: 337 ms, an « Essai du simulateur »).
+    controller.setSettings({{QStringLiteral("source"), QStringLiteral("simulated")},
+                            {QStringLiteral("name"), QStringLiteral("Essai du simulateur")},
+                            {QStringLiteral("declaredSampleRateHz"), 1e6}});
+    CHECK(controller.sampleRate() == 1e6);
+    controller.setSettings({{QStringLiteral("source"), QStringLiteral("audio")}});
+    CHECK(controller.sampleRate() == 48000.0);
+    CHECK(controller.settings().value(QStringLiteral("name")).toString() == QStringLiteral("Enregistrement"));
+    controller.setSettings({{QStringLiteral("name"), QStringLiteral("Ma voix")}});
+    controller.setSettings({{QStringLiteral("source"), QStringLiteral("serial")}});
+    CHECK(controller.settings().value(QStringLiteral("name")).toString() == QStringLiteral("Ma voix"));
+    CHECK(controller.sampleRate() == 1e6); // announced for the other sources
+    // Settings saved before: the sound card with the simulator's name.
+    controller.setSettings({{QStringLiteral("source"), QStringLiteral("audio")},
+                            {QStringLiteral("name"), QStringLiteral("Essai du simulateur")}});
+    CHECK(controller.settings().value(QStringLiteral("name")).toString() == QStringLiteral("Enregistrement"));
 }
 
 TEST_CASE("Simulated source: frames flow, rate measured, signal kept at stop and undoable", "[sources]")

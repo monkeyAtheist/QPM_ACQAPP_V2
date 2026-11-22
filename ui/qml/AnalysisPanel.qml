@@ -13,6 +13,10 @@ ScrollView {
     required property var appSettings
     property var curves: null // CurvesController: are there spectrograms
     property real sampleRate: 0 // of the signal chosen: Δf and duration of a segment
+    // Where its settings are remembered (the generator's preview keeps its own), and what is said of the
+    // zone measured.
+    property string settingsKey: "analysis/settings"
+    property string zoneHint: qsTr("Sur %1 (zone : Courbes ▸ Zone analysée)")
     readonly property bool hasSpectrograms: curves !== null && curves.hasSpectrograms === true
 
     readonly property var s: analysis.settings
@@ -25,7 +29,7 @@ ScrollView {
     }
 
     Component.onCompleted: {
-        const saved = appSettings.value("analysis/settings", "")
+        const saved = appSettings.value(root.settingsKey, "")
         if (saved && saved.length > 0)
             analysis.restoreSettings(saved)
     }
@@ -36,7 +40,7 @@ ScrollView {
     Timer {
         id: rememberTimer
         interval: 800
-        onTriggered: root.appSettings.setValue("analysis/settings", root.analysis.settingsText())
+        onTriggered: root.appSettings.setValue(root.settingsKey, root.analysis.settingsText())
     }
 
     component Hint: Label {
@@ -73,7 +77,7 @@ ScrollView {
         SectionTitle { text: qsTr("Mesures") }
         Hint {
             visible: root.analysis.zoneText.length > 0
-            text: qsTr("Sur %1 (zone : Courbes ▸ Zone analysée)").arg(root.analysis.zoneText)
+            text: root.zoneHint.arg(root.analysis.zoneText)
         }
         Hint {
             visible: root.analysis.error.length > 0

@@ -44,6 +44,11 @@ qt_add_qml_module(QTacquisitionApp
         qml/WindowField.qml
         qml/SpectrumSettings.qml
         qml/SpectrogramSettings.qml
+        qml/GeneratorView.qml
+        qml/GeneratorPanel.qml
+        qml/WaveCard.qml
+        qml/FormulaField.qml
+        qml/ListenGroup.qml
     SOURCES
         signal_plot.h
         signal_plot.cpp
@@ -53,6 +58,8 @@ qt_add_qml_module(QTacquisitionApp
         spectrogram_plot.cpp
         image_tools.h
         image_tools.cpp
+        motif_editor.h
+        motif_editor.cpp
 )
 target_link_libraries(QTacquisitionApp PRIVATE qacq_app Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Qml)
 # Qt's generated QML-cache loader trips GCC's -Wnull-dereference inside qhash.h (inlined Qt code):

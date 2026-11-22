@@ -3,6 +3,7 @@
 
 #include "qacq/analysis/analysis.h"
 #include "qacq/analysis/measures.h"
+#include "qacq/dsp/random.h"
 #include "qacq/plot/axis.h"
 #include "qacq/plot/trace.h"
 
@@ -430,6 +431,41 @@ TEST_CASE("measures: statistics of a span, oscilloscope measures of a trapezoid 
     // Flat, or too short: nothing claimed.
     CHECK(!waveMeasures(std::vector<double>(100, 1.0), 1000.0).levels);
     CHECK(!waveMeasures(sine(1000, 1000.0, 0.2, 1.0), 1000.0).periodic); // a fifth of a period
+    CHECK(w.twoLevels && !w.irregular);
+    CHECK(ws.twoLevels && !ws.irregular);
+
+    // Gaussian noise: one hump, not two levels (its extremes are taken), edges far too uneven for a period;
+    // no absurd overshoot (the two halves of the hump gave 2 400 %).
+    qacq::dsp::Random random(11);
+    std::vector<double> noise(48000);
+    for (double &v : noise) v = random.normal();
+    const WaveMeasures wn = waveMeasures(noise, 48000.0);
+    REQUIRE(wn.levels);
+    CHECK(!wn.twoLevels);
+    CHECK(wn.top == *std::max_element(noise.begin(), noise.end()));
+    CHECK(wn.base == *std::min_element(noise.begin(), noise.end()));
+    CHECK(wn.overshootPercent == 0.0 && wn.undershootPercent == 0.0);
+    CHECK(wn.irregular);
+    CHECK(!wn.periodic && !wn.duty && !wn.cycles && !wn.rise && !wn.fall && !wn.settlingMeasured);
+    CHECK(wn.risingEdges > 100);
+
+    // A sine in some noise stays a sine: two levels, a period.
+    std::vector<double> noisy = sine(48000, 48000.0, 1000.0, 1.0);
+    for (double &v : noisy) v += 0.05 * random.normal();
+    const WaveMeasures wsn = waveMeasures(noisy, 48000.0);
+    CHECK(wsn.twoLevels && !wsn.irregular && wsn.periodic);
+    CHECK_NEAR(wsn.frequencyHz, 1000.0, 1e-3, 0.0);
+
+    // A sweep: evenly spaced edges nowhere, so no period.
+    std::vector<double> sweep(48000);
+    for (std::size_t i = 0; i < sweep.size(); ++i)
+    {
+        const double t = static_cast<double>(i) / 48000.0;
+        sweep[i] = std::sin(2.0 * std::numbers::pi * (10.0 * t + 0.5 * 990.0 * t * t)); // 10 Hz to 1 kHz in 1 s
+    }
+    const WaveMeasures wsw = waveMeasures(sweep, 48000.0);
+    CHECK(wsw.irregular && !wsw.periodic);
+    CHECK(wsw.twoLevels && wsw.rise); // clean edges between two levels: still timed
 }
 
 TEST_CASE("measures: peaks of a spectrum, power of a band", "[analysis]")

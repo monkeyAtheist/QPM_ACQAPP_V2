@@ -73,15 +73,24 @@ bool findLevels(std::span<const double> x, const SpanStatistics &stats, WaveMeas
     const auto highMode = std::max_element(histogram.begin() + kClasses / 2, histogram.end());
     const auto total = static_cast<double>(x.size());
     const double clear = 0.02 * total; // a level holds 2 % of the samples at least
-    const bool clearBase = static_cast<double>(*lowMode) >= clear;
-    const bool clearTop = static_cast<double>(*highMode) >= clear;
+    bool clearBase = static_cast<double>(*lowMode) >= clear;
+    bool clearTop = static_cast<double>(*highMode) >= clear;
+    if (clearBase && clearTop)
+    {
+        // Two levels have a hollow between them (under half the smaller one): the two halves of a single
+        // hump (Gaussian noise) are not two levels, its extremes are taken instead (as an oscilloscope does).
+        const std::size_t smaller = std::min(*lowMode, *highMode);
+        const std::size_t hollow = highMode - lowMode > 1 ? *std::min_element(lowMode + 1, highMode) : smaller;
+        if (2 * hollow > smaller) clearBase = clearTop = false;
+    }
+    w.twoLevels = clearBase && clearTop;
     w.base = clearBase ? mn + (static_cast<double>(lowMode - histogram.begin()) + 0.5) * width : mn;
     w.top = clearTop ? mn + (static_cast<double>(highMode - histogram.begin()) + 0.5) * width : mx;
     // The extreme classes hold the extremes themselves: no half class of error on a clean square wave.
     if (lowMode == histogram.begin()) w.base = mn;
     if (highMode == histogram.end() - 1) w.top = mx;
-    w.flatBase = static_cast<double>(*lowMode) >= 0.08 * total;
-    w.flatTop = static_cast<double>(*highMode) >= 0.08 * total;
+    w.flatBase = clearBase && static_cast<double>(*lowMode) >= 0.08 * total;
+    w.flatTop = clearTop && static_cast<double>(*highMode) >= 0.08 * total;
     w.amplitude = w.top - w.base;
     return w.amplitude > 0.0;
 }
@@ -201,7 +210,19 @@ WaveMeasures waveMeasures(std::span<const double> x, double fs, double edgeLowFr
     const std::vector<double> &falls = e.falls;
     w.risingEdges = rises.size();
     w.fallingEdges = falls.size();
-    if (rises.size() >= 2)
+    if (rises.size() >= 3)
+    {
+        // Evenly spaced rising edges make a period; very uneven ones (noise, a sweep, bursts) do not.
+        const double mean = (rises.back() - rises.front()) / static_cast<double>(rises.size() - 1);
+        double squares = 0.0;
+        for (std::size_t k = 0; k + 1 < rises.size(); ++k)
+        {
+            const double d = rises[k + 1] - rises[k] - mean;
+            squares += d * d;
+        }
+        w.irregular = std::sqrt(squares / static_cast<double>(rises.size() - 1)) > 0.25 * mean;
+    }
+    if (rises.size() >= 2 && !w.irregular)
     {
         w.periodic = true;
         w.periodSeconds = (rises.back() - rises.front()) / static_cast<double>(rises.size() - 1);
@@ -241,12 +262,14 @@ WaveMeasures waveMeasures(std::span<const double> x, double fs, double edgeLowFr
             w.cycleRms = std::sqrt(squares / count);
         }
     }
-    if (e.riseCount > 0)
+    // Noise has no edges to time: only clean edges between two levels, or evenly spaced ones (triangle).
+    const bool timed = w.twoLevels || !w.irregular;
+    if (e.riseCount > 0 && timed)
     {
         w.rise = true;
         w.riseSeconds = e.riseSum / static_cast<double>(e.riseCount);
     }
-    if (e.fallCount > 0)
+    if (e.fallCount > 0 && timed)
     {
         w.fall = true;
         w.fallSeconds = e.fallSum / static_cast<double>(e.fallCount);

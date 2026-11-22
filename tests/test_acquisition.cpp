@@ -140,6 +140,35 @@ TEST_CASE("Acquisition settings: JSON round trip, hex bytes, validation", "[acqu
     CHECK(!validateSettings(v).empty());
 }
 
+TEST_CASE("Rate and name that follow the source: the sound card gives its own", "[acquisition]")
+{
+    // A rate announced for the simulator, left in the settings: not that of the sound card (a voice of 7 s at
+    // 48 kHz was 337 ms long at 1 MHz).
+    AcquisitionSettings s;
+    s.source = SourceKind::Simulated;
+    s.declaredSampleRateHz = 1e6;
+    CHECK(announcedRate(s) == 1e6);
+    s.source = SourceKind::Audio;
+    CHECK(announcedRate(s) == 48000.0);
+    s.audio.sampleRate = 44100;
+    CHECK(announcedRate(s) == 44100.0);
+    s.source = SourceKind::Serial;
+    s.declaredSampleRateHz = 0.0;
+    CHECK(announcedRate(s) == 0.0); // measured
+    s.declaredSampleRateHz = -5.0;
+    CHECK(announcedRate(s) == 0.0);
+
+    // The name: that of another source (or none) becomes that of this one; one's own is kept.
+    CHECK(nameForSource("Essai du simulateur", SourceKind::Audio) == "Enregistrement");
+    CHECK(nameForSource("Enregistrement", SourceKind::Serial) == "Acquisition");
+    CHECK(nameForSource("Acquisition", SourceKind::Simulated) == "Essai du simulateur");
+    CHECK(nameForSource("", SourceKind::Audio) == "Enregistrement");
+    CHECK(nameForSource("Acquisition", SourceKind::TcpClient) == "Acquisition");
+    CHECK(nameForSource("Ma voix", SourceKind::Audio) == "Ma voix");
+    CHECK(nameForSource("Essai du simulateur", SourceKind::Simulated) == "Essai du simulateur");
+    CHECK(defaultSignalName(SourceKind::Scpi) == "Acquisition");
+}
+
 TEST_CASE("Effective decoder: sound card samples, SCPI answers, factory", "[acquisition]")
 {
     AcquisitionSettings s;

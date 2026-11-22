@@ -86,8 +86,9 @@ Rectangle {
                 value: Units.count(root.st.totalFrames ?? 0)
             }
             Figure {
-                name: (root.acquisition.settings.declaredSampleRateHz ?? 0) > 0 ? qsTr("Cadence mesurée (annoncée %1)").arg(root.st.rateText ?? "")
-                                                                                : qsTr("Cadence mesurée")
+                name: root.acquisition.settings.source === "audio" ? qsTr("Cadence mesurée (carte son : %1)").arg(root.st.rateText ?? "")
+                      : (root.acquisition.settings.declaredSampleRateHz ?? 0) > 0 ? qsTr("Cadence mesurée (annoncée %1)").arg(root.st.rateText ?? "")
+                      : qsTr("Cadence mesurée")
                 value: (root.st.measuredRate ?? 0) > 0
                        ? Units.format(root.st.measuredRate, "Hz", 5) + ((root.st.measuredRateUncertainty ?? 0) > 0
                              ? qsTr(" ± %1 %").arg(Units.compact(100 * root.st.measuredRateUncertainty, "", 2)) : "")

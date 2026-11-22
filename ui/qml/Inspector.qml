@@ -2,9 +2,11 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Right panel, two tabs: the page of the module on screen (for "Signaux", the measurements of the zone and
-// the settings of the computations; for "Acquisition", the source and the format), and the properties of
-// the selected signal. The session itself is in the top bar (its name, "Ouvrir ▾" for the recent ones).
+// Right panel: the pages of the module on screen (for "Signaux", the measurements of the zone and the
+// settings of the computations; for "Acquisition", the source and the format; for "Générateur", the
+// composition of the signal and the measurements of its preview), then the properties of the selected
+// signal (always the last tab: signalTab). The session itself is in the top bar (its name, "Ouvrir ▾" for
+// the recent ones).
 Rectangle {
     id: root
     required property var session
@@ -13,12 +15,17 @@ Rectangle {
     required property var appSettings
     required property var analysis
     property var curves: null // the curves added in "Signaux" (their spectrograms have settings here)
-    property int module: 0 // 0 Signaux, 1 Acquisition
+    property var generator: null
+    property int module: 0 // 0 Signaux, 1 Acquisition, 2 Générateur
     property var signalId: 0
     property int tab: 0
+    property int generatorChannel: 0 // the channel edited in the composition
+    readonly property int signalTab: module === 2 ? 2 : 1
     signal tabSelected(int index)
     signal collapseRequested()
     signal firmwareRequested()
+    signal generatorChannelSelected(int index)
+    signal takeUpRequested(var id) // the recipe of a generated signal, back into the generator
 
     // The rate of the selected signal, for the resolution of the spectrograms (Δf, duration of a segment).
     property real sampleRate: 0
@@ -55,14 +62,30 @@ Rectangle {
             spacing: 4
             TabBar {
                 id: tabs
+                visible: root.module !== 2
                 Layout.fillWidth: true
-                onCurrentIndexChanged: if (currentIndex !== root.tab) root.tabSelected(currentIndex)
+                onCurrentIndexChanged: if (visible && currentIndex !== root.tab) root.tabSelected(currentIndex)
                 TabButton { text: root.module === 1 ? qsTr("Acquisition") : qsTr("Mesures") }
+                TabButton { text: qsTr("Signal") }
+            }
+            // The generator has three: its composition, the measurements of its preview, the signal.
+            TabBar {
+                id: generatorTabs
+                visible: root.module === 2
+                Layout.fillWidth: true
+                onCurrentIndexChanged: if (visible && currentIndex !== root.tab) root.tabSelected(currentIndex)
+                TabButton { text: qsTr("Composition") }
+                TabButton { text: qsTr("Mesures") }
                 TabButton { text: qsTr("Signal") }
             }
             // The tab follows the shell (a signal chosen opens "Signal"); a click on a tab tells the shell.
             Binding {
                 target: tabs
+                property: "currentIndex"
+                value: Math.min(root.tab, 1)
+            }
+            Binding {
+                target: generatorTabs
                 property: "currentIndex"
                 value: root.tab
             }
@@ -90,18 +113,40 @@ Rectangle {
 
             AnalysisPanel {
                 anchors.fill: parent
-                visible: root.tab === 0 && root.module !== 1
+                visible: root.tab === 0 && root.module === 0
                 analysis: root.analysis
                 appSettings: root.appSettings
                 curves: root.curves
                 sampleRate: root.sampleRate
             }
 
+            GeneratorPanel {
+                anchors.fill: parent
+                visible: root.tab === 0 && root.module === 2 && root.generator !== null
+                generator: root.generator
+                appSettings: root.appSettings
+                channel: root.generatorChannel
+                onChannelSelected: (index) => root.generatorChannelSelected(index)
+            }
+
+            // The measurements of the preview of the generator, and the settings of its spectrum.
+            AnalysisPanel {
+                anchors.fill: parent
+                visible: root.tab === 1 && root.module === 2 && root.generator !== null
+                analysis: root.generator ? root.generator.previewAnalysis : root.analysis
+                appSettings: root.appSettings
+                sampleRate: root.generator ? (root.generator.recipe.sampleRate ?? 0) : 0
+                settingsKey: "generator/analysis"
+                zoneHint: qsTr("Sur tout l'aperçu, %1")
+            }
+
             SignalProperties {
                 anchors.fill: parent
-                visible: root.tab === 1
+                visible: root.tab === root.signalTab
                 session: root.session
                 signalId: root.signalId
+                generator: root.generator
+                onTakeUpRequested: (id) => root.takeUpRequested(id)
             }
         }
     }
