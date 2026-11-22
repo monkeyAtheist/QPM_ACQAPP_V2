@@ -543,11 +543,16 @@ Item {
                 }
                 Label {
                     visible: root.linkOk
+                    // French puts 0 and 1 in the singular: "aucune erreur", "1 erreur", "274 erreurs".
+                    readonly property int errors: root.result.bitErrors ?? 0
+                    readonly property string errorsText: errors === 0 ? qsTr("aucune erreur")
+                                                         : errors === 1 ? qsTr("1 erreur")
+                                                                        : qsTr("%1 erreurs").arg(Units.count(errors))
                     text: root.recipe.noise === true
-                          ? qsTr("TEB %1 (%2 erreurs) · théorie %3 · Eb/N0 = %4 dB").arg(root.result.berText ?? "")
-                                .arg(root.result.bitErrors ?? 0).arg(root.result.theoryText ?? "")
+                          ? qsTr("TEB %1 (%2) · théorie %3 · Eb/N0 = %4 dB").arg(root.result.berText ?? "")
+                                .arg(errorsText).arg(root.result.theoryText ?? "")
                                 .arg(Units.compact(root.recipe.ebN0 ?? 0, "", 3))
-                          : qsTr("Sans bruit · %1 erreurs").arg(root.result.bitErrors ?? 0)
+                          : qsTr("Sans bruit · %1").arg(errorsText)
                     color: (root.result.bitErrors ?? 0) > 0 ? Theme.warning : Theme.textMuted
                     font.pixelSize: Theme.smallText
                     elide: Text.ElideRight
@@ -666,6 +671,7 @@ Item {
                         anchors.bottomMargin: spectrumBar.height
                         analysis: root.analysis
                         logFrequency: false
+                        showHarmonics: false // the harmonics of a carrier modulated mean nothing
                         backgroundColor: Theme.canvas
                         gridColor: Theme.grid
                         textColor: Theme.text

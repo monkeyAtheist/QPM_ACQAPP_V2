@@ -180,6 +180,15 @@ TEST_CASE("an I/Q pair: two-sided spectrum, negative frequencies", "[analysis]")
     CHECK(d.bins == 256);
     CHECK(d.segments == 11); // hop 128: (1600 - 256) / 128 + 1
     CHECK_NEAR(d.frequencyAt(static_cast<double>(d.curves[0].peakBin)), -2000.0, 1e-9, 0.0);
+
+    // Pairs named alike ("I émis", "Q émis"): "I + jQ émis"; other names: both.
+    const Signal pairs = makeSignal({i, q, i, q}, {{"I émis", "V"}, {"Q émis", "V"}, {"voie a", "V"}, {"voie b", "V"}}, 16000.0,
+                                    Representation::IQ);
+    const AnalysisResult named = analyse(pairs, 0, n, AnalysisSettings{});
+    REQUIRE(named.ok());
+    REQUIRE(named.curves.size() == 2);
+    CHECK(named.curves[0].name == "I + jQ émis");
+    CHECK(named.curves[1].name == "voie a + jvoie b");
 }
 
 TEST_CASE("analysis: missing samples, short zones, cancellation", "[analysis]")

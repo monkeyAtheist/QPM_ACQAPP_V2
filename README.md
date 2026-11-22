@@ -673,11 +673,14 @@ modification (la plus récente l'emporte) :
   intégration sur le symbole), décision au point le plus proche (FSK : l'énergie de chaque tonalité). Les 6
   premiers et derniers symboles d'une racine de cosinus surélevé ne comptent pas (l'impulsion y est coupée).
 - **Liaison** (onglet) : les signaux émis et reçu (porteuse : deux voies ; I/Q : quatre) et leurs spectres, la
-  **constellation** reçue (les points décidés à tort en rouge, les points de la constellation avec leurs bits,
-  les frontières de décision en tirets ; FSK : le plan des deux énergies, la diagonale décide), le **diagramme de
-  l'œil** (la sortie du filtre adapté sur deux symboles autour de chaque instant de décision, I et Q), le **TEB
-  mesuré** avec son intervalle à 95 % contre la **théorie exacte**, le TES, l'**EVM** et le MER, le débit binaire
-  et la bande occupée. **Écouter** le signal émis ou reçu sur la carte son.
+  **constellation** reçue (les points décidés à tort en rouge, les points de la constellation en anneaux creux
+  avec leurs bits quand la place le permet, les frontières de décision en tirets ; FSK : le plan des deux
+  énergies, la diagonale décide), le **diagramme de l'œil** (la sortie du filtre adapté sur deux symboles autour
+  de chaque instant de décision, I et Q), le **TEB mesuré** avec son intervalle à 95 % contre la **théorie
+  exacte**, le TES, l'**EVM** et le MER, le débit binaire et la bande occupée. Au-dessus de la constellation et
+  de l'œil, ce qu'ils montrent (symboles, décidés à tort, EVM et MER ; traces), hors du tracé. Les spectres
+  d'une liaison en I/Q s'appellent « I + jQ émis » et « I + jQ reçu ». **Écouter** le signal émis ou reçu sur
+  la carte son.
 - **Courbe TEB** (onglet) : le TEB le long d'Eb/N0, mesuré point par point sur la même chaîne (des bits au
   hasard), chaque point avec autant de bits qu'il en faut pour compter environ 200 erreurs d'après la théorie
   (au plus « Bits par point ») : s'arrêter à la 200e erreur fausserait le taux vers le haut (environ +8 % vu
@@ -689,8 +692,8 @@ modification (la plus récente l'emporte) :
   une voie sur une porteuse, I et Q sinon), à écouter, filtrer, mesurer ; ses notes et sa provenance gardent la
   recette.
 - **Exemples** : BPSK rectangulaire, QPSK en cosinus surélevé, 8-PSK, 16-QAM, 64-QAM et 256-QAM en I/Q, un texte
-  en ASK et trame série, un modem FSK comme le Bell 202 (1 200 Bd, 1 200 et 2 200 Hz : des tonalités non
-  orthogonales, plus d'erreurs que la théorie), un texte en QPSK sans bruit.
+  en ASK et trame série, une FSK sur les tonalités du Bell 202 (1 200 Bd, 1 200 et 2 200 Hz : des tonalités
+  non orthogonales, plus d'erreurs que la théorie ; le 1 y est la tonalité haute), un texte en QPSK sans bruit.
 
 Le panneau de droite (**Liaison**) reprend la recette champ par champ et donne le résultat en détail (et le texte
 envoyé et reçu) ; **Mesures** celles des signaux émis et reçu. La recette et les réglages de la courbe sont

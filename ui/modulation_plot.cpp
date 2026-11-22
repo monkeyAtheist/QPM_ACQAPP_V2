@@ -78,6 +78,12 @@ QString count(std::size_t value)
     return text(out);
 }
 
+// "1 erreur", "3 erreurs": French puts 0 and 1 in the singular.
+QString counted(std::size_t value, const QString &one, const QString &many)
+{
+    return (value <= 1 ? one : many).arg(count(value));
+}
+
 // "10⁻³": the decade of a log10.
 QString decade(int exponent)
 {
@@ -197,10 +203,29 @@ void ModulationPlot::contentUpdated()
         emit viewChanged();
     }
     m_result = std::move(result);
+    countResult();
     if (m_theory.size() > 64) m_theory.clear();
     emit contentChanged();
     updateReadout();
     update();
+}
+
+void ModulationPlot::countResult()
+{
+    m_shown = m_wrong = m_traces = 0;
+    m_pointStep = m_traceStep = 1;
+    const analysis::LinkResult *r = m_result.get();
+    if (!r || !r->ok()) return;
+    const std::size_t n = std::min(r->reception.decisionPoints.size(), std::min(r->sentSymbols.size(), r->reception.symbols.size()));
+    const std::size_t first = std::min(r->skipSymbols, n), last = n > r->skipSymbols ? n - r->skipSymbols : 0;
+    m_shown = last > first ? last - first : 0;
+    for (std::size_t k = first; k < last; ++k)
+        if (r->sentSymbols[k] != r->reception.symbols[k]) ++m_wrong;
+    m_pointStep = std::max<std::size_t>(1, (m_shown + kMaximumPoints - 1) / kMaximumPoints);
+    const std::size_t t = r->reception.decisionTimes.size();
+    const std::size_t tFirst = std::min(r->skipSymbols, t), tLast = t > r->skipSymbols ? t - r->skipSymbols : 0;
+    m_traces = tLast > tFirst ? tLast - tFirst : 0;
+    m_traceStep = std::max<std::size_t>(1, (m_traces + kMaximumTraces - 1) / kMaximumTraces);
 }
 
 bool ModulationPlot::hasData() const
@@ -214,9 +239,87 @@ bool ModulationPlot::hasData() const
     return false;
 }
 
+QFont ModulationPlot::plotFont() const
+{
+    QFont font;
+    font.setPixelSize(std::max(8, m_fontSize));
+    return font;
+}
+
+QString ModulationPlot::headerTitle() const
+{
+    const analysis::LinkResult *r = m_result.get();
+    const bool ok = r && r->ok();
+    switch (m_kind)
+    {
+        case Kind::Constellation:
+            return ok && r->recipe.modulation == dsp::Modulation::Fsk ? tr("Énergie à fc − Δf (un 0)") : tr("Q (en quadrature)");
+        case Kind::Eye:
+            return ok && r->recipe.pulse == dsp::PulseShape::RootRaisedCosine ? tr("Sortie du filtre adapté (racine de cosinus surélevé)")
+                                                                               : tr("Sortie du filtre adapté (moyenne sur un symbole)");
+        case Kind::Ber: return tr("Taux d'erreur binaire (TEB)");
+    }
+    return {};
+}
+
+QStringList ModulationPlot::headerFacts() const
+{
+    QStringList facts;
+    const analysis::LinkResult *r = m_result.get();
+    if (!r || !r->ok()) return facts;
+    switch (m_kind)
+    {
+        case Kind::Constellation:
+        {
+            const QString symbols = counted(m_shown, tr("%1 symbole"), tr("%1 symboles"));
+            facts << (m_wrong == 0   ? tr("%1, aucun décidé à tort").arg(symbols)
+                      : m_wrong == 1 ? tr("%1, 1 décidé à tort (en rouge)").arg(symbols)
+                                     : tr("%1, %2 décidés à tort (en rouge)").arg(symbols, count(m_wrong)));
+            if (std::isfinite(r->evmPercent))
+                facts << tr("EVM %1 %, MER %2 dB")
+                             .arg(text(plot::formatFixed(r->evmPercent, r->evmPercent < 10.0 ? 2 : 1)),
+                                  std::isfinite(r->merDb) ? text(plot::formatFixed(r->merDb, 1)) : QStringLiteral("∞"));
+            if (m_pointStep > 1) facts << tr("un point juste sur %1 dessiné").arg(static_cast<qint64>(m_pointStep));
+            break;
+        }
+        case Kind::Eye:
+            if (!r->reception.matchedI.empty() && m_traces > 0)
+                facts << tr("%1 sur %2").arg(counted((m_traces + m_traceStep - 1) / m_traceStep, tr("%1 trace"), tr("%1 traces")),
+                                             counted(m_traces, tr("%1 symbole"), tr("%1 symboles")));
+            break;
+        case Kind::Ber: break;
+    }
+    return facts;
+}
+
+std::vector<ModulationPlot::HeaderRow> ModulationPlot::headerRows() const
+{
+    const QFontMetricsF metrics(plotFont());
+    const double room = std::max(40.0, width() - kRight - 4.0);
+    std::vector<HeaderRow> rows{{headerTitle(), QString()}};
+    const double titleWidth = metrics.horizontalAdvance(rows.front().left) + 24.0;
+    for (const QString &fact : headerFacts())
+    {
+        const QString joined = rows.back().right.isEmpty() ? fact : rows.back().right + QStringLiteral(" · ") + fact;
+        const double used = rows.size() == 1 ? titleWidth : 0.0;
+        if (used + metrics.horizontalAdvance(joined) <= room || (rows.size() > 1 && rows.back().right.isEmpty()))
+            rows.back().right = joined;
+        else
+            rows.push_back({QString(), fact});
+    }
+    return rows;
+}
+
+double ModulationPlot::topMargin() const
+{
+    const QFontMetricsF metrics(plotFont());
+    return std::max(kTop, 6.0 + static_cast<double>(headerRows().size()) * (metrics.height() + 1.0));
+}
+
 QRectF ModulationPlot::plotRect() const
 {
-    return QRectF(kLeft, kTop, std::max(0.0, width() - kLeft - kRight), std::max(0.0, height() - kTop - kBottom));
+    const double top = topMargin();
+    return QRectF(kLeft, top, std::max(0.0, width() - kLeft - kRight), std::max(0.0, height() - top - kBottom));
 }
 
 QColor ModulationPlot::curveColour(std::size_t index) const
@@ -246,8 +349,12 @@ ModulationPlot::View ModulationPlot::automaticView() const
                 v.y = v.x;
                 return v;
             }
+            // The extent of the constellation: its square (QAM, ASK), its circle (PSK: QPSK without noise shows its
+            // circle, not just its four points).
+            const bool circle = r->recipe.modulation == dsp::Modulation::Qpsk || r->recipe.modulation == dsp::Modulation::Psk8;
             double m = 0.0;
-            for (const auto &p : r->constellation) m = std::max({m, std::abs(p.real()), std::abs(p.imag())});
+            for (const auto &p : r->constellation)
+                m = std::max(m, circle ? std::abs(p) : std::max(std::abs(p.real()), std::abs(p.imag())));
             if (!(m > 0.0)) m = 1.0;
             double reach = 0.0;
             const std::size_t n = r->reception.decisionPoints.size();
@@ -514,9 +621,7 @@ void ModulationPlot::paint(QPainter *painter)
 {
     QPainter &p = *painter;
     p.fillRect(boundingRect(), m_background);
-    QFont font = p.font();
-    font.setPixelSize(std::max(8, m_fontSize));
-    p.setFont(font);
+    p.setFont(plotFont());
     const QRectF area = plotRect();
     if (area.width() < 40.0 || area.height() < 30.0) return;
     const qacq::app::ModulationController *controller = m_modulation.data();
@@ -546,11 +651,17 @@ void ModulationPlot::paint(QPainter *painter)
         case Kind::Eye: paintEye(p, area); break;
         case Kind::Ber: paintBer(p, area); break;
     }
+    paintHeader(p);
     if (m_hovering && !m_readout.isEmpty())
     {
+        // At the bottom of the band under the pointer (the eye: I or Q).
+        QRectF band = area;
+        if (m_kind == Kind::Eye)
+            for (const QRectF &lane : eyeLanes(area))
+                if (m_pointer.y() >= lane.top() && m_pointer.y() <= lane.bottom()) band = lane;
         const QFontMetricsF metrics(p.font());
-        const double w = std::min(area.width() - 8.0, metrics.horizontalAdvance(m_readout) + 14.0);
-        const QRectF box(area.left() + 4.0, area.bottom() - metrics.height() - 10.0, w, metrics.height() + 6.0);
+        const double w = std::min(band.width() - 8.0, metrics.horizontalAdvance(m_readout) + 14.0);
+        const QRectF box(band.left() + 4.0, band.bottom() - metrics.height() - 10.0, w, metrics.height() + 6.0);
         p.setPen(Qt::NoPen);
         p.setBrush(faded(m_panel, 0.9));
         p.drawRoundedRect(box, 4.0, 4.0);
@@ -566,25 +677,26 @@ void ModulationPlot::paintMessage(QPainter &p, const QString &message)
     p.drawText(boundingRect().adjusted(24.0, 0.0, -24.0, 0.0), Qt::AlignCenter | Qt::TextWordWrap, message);
 }
 
-void ModulationPlot::paintCorner(QPainter &p, const QRectF &area, const QStringList &lines)
+void ModulationPlot::paintHeader(QPainter &p)
 {
-    if (lines.isEmpty()) return;
     const QFontMetricsF metrics(p.font());
-    double w = 0.0;
-    for (const QString &l : lines) w = std::max(w, metrics.horizontalAdvance(l));
-    w = std::min(w + 14.0, area.width() * 0.7);
-    const double h = metrics.height() * static_cast<double>(lines.size()) + 8.0;
-    const QRectF box(area.right() - w - 6.0, area.top() + 6.0, w, h);
-    p.setPen(Qt::NoPen);
-    p.setBrush(faded(m_panel, 0.85));
-    p.drawRoundedRect(box, 4.0, 4.0);
+    const double line = metrics.height() + 1.0;
+    const double right = width() - kRight;
+    double y = 3.0;
     p.setPen(m_muted);
-    double y = box.top() + 4.0;
-    for (const QString &l : lines)
+    for (const HeaderRow &row : headerRows())
     {
-        p.drawText(QRectF(box.left() + 7.0, y, box.width() - 14.0, metrics.height()), Qt::AlignLeft | Qt::AlignVCenter,
-                   metrics.elidedText(l, Qt::ElideRight, box.width() - 14.0));
-        y += metrics.height();
+        double left = 4.0;
+        if (!row.left.isEmpty())
+        {
+            p.drawText(QRectF(left, y, std::max(0.0, right - left), line), Qt::AlignLeft | Qt::AlignVCenter,
+                       metrics.elidedText(row.left, Qt::ElideRight, std::max(0.0, right - left)));
+            left += metrics.horizontalAdvance(row.left) + 24.0;
+        }
+        if (!row.right.isEmpty() && right - left > 20.0)
+            p.drawText(QRectF(left, y, right - left, line), Qt::AlignRight | Qt::AlignVCenter,
+                       metrics.elidedText(row.right, Qt::ElideRight, right - left));
+        y += line;
     }
 }
 
@@ -635,14 +747,12 @@ void ModulationPlot::paintConstellation(QPainter &p, const QRectF &area)
     p.drawText(QRectF(area.left(), area.bottom() + 4.0 + metrics.height(), area.width(), metrics.height() + 2.0),
                Qt::AlignHCenter | Qt::AlignTop,
                fsk ? tr("Énergie à fc + Δf (un 1)") : tr("I (en phase), amplitude de la porteuse = 1"));
-    p.drawText(QRectF(4.0, 2.0, area.width(), kTop - 4.0), Qt::AlignLeft | Qt::AlignVCenter,
-               fsk ? tr("Énergie à fc − Δf (un 0)") : tr("Q (en quadrature)"));
 
     p.save();
     p.setClipRect(area);
     p.setRenderHint(QPainter::Antialiasing, true);
     // The edges of the decision regions.
-    QPen edge(faded(m_text, 0.45), 1.0, Qt::DashLine);
+    QPen edge(faded(m_text, r.constellation.size() > 16 ? 0.25 : 0.45), 1.0, Qt::DashLine);
     p.setPen(edge);
     const double far = 4.0 * std::max(v.x.span(), v.y.span());
     const auto line = [&](double i1, double q1, double i2, double q2) { p.drawLine(pl.toScreen(i1, q1), pl.toScreen(i2, q2)); };
@@ -691,22 +801,17 @@ void ModulationPlot::paintConstellation(QPainter &p, const QRectF &area)
     // The points received: right ones first, those decided wrong on top.
     const std::size_t n = std::min(r.reception.decisionPoints.size(), std::min(r.sentSymbols.size(), r.reception.symbols.size()));
     const std::size_t first = std::min(r.skipSymbols, n), last = n > r.skipSymbols ? n - r.skipSymbols : 0;
-    const std::size_t shown = last > first ? last - first : 0;
-    const std::size_t step = std::max<std::size_t>(1, (shown + kMaximumPoints - 1) / kMaximumPoints);
     QPolygonF right, wrong;
-    right.reserve(static_cast<qsizetype>(std::min(shown, kMaximumPoints)));
-    std::size_t wrongCount = 0;
+    right.reserve(static_cast<qsizetype>(std::min(m_shown, kMaximumPoints)));
     for (std::size_t k = first; k < last; ++k)
     {
-        const bool ok = r.sentSymbols[k] == r.reception.symbols[k];
-        if (!ok) ++wrongCount;
-        if (!ok)
+        if (r.sentSymbols[k] != r.reception.symbols[k])
             wrong << pl.toScreen(r.reception.decisionPoints[k].real(), r.reception.decisionPoints[k].imag());
-        else if ((k - first) % step == 0)
+        else if ((k - first) % m_pointStep == 0)
             right << pl.toScreen(r.reception.decisionPoints[k].real(), r.reception.decisionPoints[k].imag());
     }
-    const double dot = shown > 5000 ? 2.2 : 3.0;
-    p.setPen(QPen(faded(m_accent, shown > 5000 ? 0.35 : 0.55), dot, Qt::SolidLine, Qt::RoundCap));
+    const double dot = m_shown > 5000 ? 2.2 : 3.0;
+    p.setPen(QPen(faded(m_accent, m_shown > 5000 ? 0.35 : 0.55), dot, Qt::SolidLine, Qt::RoundCap));
     p.drawPoints(right);
     p.setPen(QPen(m_warning, dot + 0.8, Qt::SolidLine, Qt::RoundCap));
     p.drawPoints(wrong);
@@ -727,17 +832,19 @@ void ModulationPlot::paintConstellation(QPainter &p, const QRectF &area)
         default: break;
     }
     const bool labels = spacing * pl.scale >= metrics.horizontalAdvance(QStringLiteral("0")) * (bps + 1.5);
+    // A ring no wider than a fifth of the room between two points (256-QAM: a few pixels), hollow: the points
+    // received show through it.
+    const double ring = std::clamp(0.22 * spacing * pl.scale, 1.5, 4.5);
+    p.setBrush(Qt::NoBrush);
     for (std::size_t s = 0; s < r.constellation.size(); ++s)
     {
         const QPointF at = pl.toScreen(r.constellation[s].real(), r.constellation[s].imag());
-        p.setPen(QPen(m_text, 1.4));
-        p.setBrush(faded(m_panel, 0.8));
-        p.drawEllipse(at, 4.0, 4.0);
-        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(m_text, ring < 2.5 ? 1.0 : 1.4));
+        p.drawEllipse(at, ring, ring);
         if (!labels) continue;
         const QString bits = fsk ? QString::number(static_cast<int>(s)) : bitsOf(s, bps);
         const double w = metrics.horizontalAdvance(bits);
-        const QRectF box(at.x() - w / 2.0 - 3.0, at.y() - 7.0 - metrics.height(), w + 6.0, metrics.height());
+        const QRectF box(at.x() - w / 2.0 - 3.0, at.y() - ring - 3.0 - metrics.height(), w + 6.0, metrics.height());
         p.setPen(Qt::NoPen);
         p.setBrush(faded(m_panel, 0.75));
         p.drawRoundedRect(box, 3.0, 3.0);
@@ -746,14 +853,6 @@ void ModulationPlot::paintConstellation(QPainter &p, const QRectF &area)
         p.drawText(box, Qt::AlignCenter, bits);
     }
     p.restore();
-
-    QStringList corner;
-    corner << tr("%1 symboles, %2 décidés à tort (en rouge)").arg(count(shown)).arg(count(wrongCount));
-    if (std::isfinite(r.evmPercent))
-        corner << tr("EVM %1 %, MER %2 dB").arg(text(plot::formatFixed(r.evmPercent, r.evmPercent < 10.0 ? 2 : 1)))
-                      .arg(std::isfinite(r.merDb) ? text(plot::formatFixed(r.merDb, 1)) : QStringLiteral("∞"));
-    if (step > 1) corner << tr("un point juste sur %1 dessiné").arg(static_cast<qint64>(step));
-    paintCorner(p, area, corner);
 }
 
 void ModulationPlot::paintEye(QPainter &p, const QRectF &area)
@@ -785,14 +884,11 @@ void ModulationPlot::paintEye(QPainter &p, const QRectF &area)
     p.setPen(m_muted);
     p.drawText(QRectF(area.left(), bottomLane.bottom() + 4.0 + metrics.height(), area.width(), metrics.height() + 2.0),
                Qt::AlignHCenter | Qt::AlignTop, title);
-    p.drawText(QRectF(4.0, 2.0, area.width(), kTop - 4.0), Qt::AlignLeft | Qt::AlignVCenter,
-               r.recipe.pulse == dsp::PulseShape::RootRaisedCosine ? tr("Sortie du filtre adapté (racine de cosinus surélevé)")
-                                                                   : tr("Sortie du filtre adapté (moyenne sur un symbole)"));
 
     const std::size_t n = r.reception.decisionTimes.size();
     const std::size_t first = std::min(r.skipSymbols, n), last = n > r.skipSymbols ? n - r.skipSymbols : 0;
-    const std::size_t traces = last > first ? last - first : 0;
-    const std::size_t step = std::max<std::size_t>(1, (traces + kMaximumTraces - 1) / kMaximumTraces);
+    const std::size_t traces = m_traces;
+    const std::size_t step = m_traceStep;
     for (std::size_t laneIndex = 0; laneIndex < lanes.size(); ++laneIndex)
     {
         const QRectF lane = lanes[laneIndex];
@@ -853,9 +949,6 @@ void ModulationPlot::paintEye(QPainter &p, const QRectF &area)
         p.setPen(m_text);
         p.drawText(tag, Qt::AlignCenter, name);
     }
-    QStringList corner;
-    corner << tr("%1 traces sur %2 symboles").arg(count(traces / step)).arg(count(traces));
-    paintCorner(p, area, corner);
 }
 
 void ModulationPlot::paintBer(QPainter &p, const QRectF &area)
@@ -905,8 +998,6 @@ void ModulationPlot::paintBer(QPainter &p, const QRectF &area)
             if (ym >= area.top() && ym <= area.bottom()) p.drawLine(QPointF(area.left(), ym), QPointF(area.right(), ym));
         }
     }
-    p.setPen(m_muted);
-    p.drawText(QRectF(4.0, 2.0, area.width(), kTop - 4.0), Qt::AlignLeft | Qt::AlignVCenter, tr("Taux d'erreur binaire (TEB)"));
     p.setPen(QPen(faded(m_muted, 0.6), 1.0));
     p.drawRect(area.adjusted(0.5, 0.5, -0.5, -0.5));
     if (!controller) return;
@@ -999,10 +1090,16 @@ void ModulationPlot::paintBer(QPainter &p, const QRectF &area)
     // Legend, top right.
     if (!legend.isEmpty())
     {
-        double w = 0.0;
-        for (const QString &l : legend) w = std::max(w, metrics.horizontalAdvance(l));
-        w = std::min(w + 34.0, area.width() * 0.75);
-        const double h = metrics.height() * static_cast<double>(legend.size() + 1) + 8.0;
+        const QString key = tr("Trait : théorie ; points : mesures, intervalle à 95 %");
+        double w = metrics.horizontalAdvance(key) + 14.0;
+        for (const QString &l : legend) w = std::max(w, metrics.horizontalAdvance(l) + 34.0);
+        w = std::min(w, area.width() * 0.75);
+        QStringList footer;
+        if (metrics.horizontalAdvance(key) + 14.0 > w)
+            footer << tr("Trait : théorie ;") << tr("points : mesures, intervalle à 95 %");
+        else
+            footer << key;
+        const double h = metrics.height() * static_cast<double>(legend.size() + footer.size()) + 8.0;
         const QRectF box(area.right() - w - 6.0, area.top() + 6.0, w, h);
         p.setPen(Qt::NoPen);
         p.setBrush(faded(m_panel, 0.9));
@@ -1020,8 +1117,12 @@ void ModulationPlot::paintBer(QPainter &p, const QRectF &area)
             y += metrics.height();
         }
         p.setPen(m_muted);
-        p.drawText(QRectF(box.left() + 7.0, y, box.width() - 14.0, metrics.height()), Qt::AlignLeft | Qt::AlignVCenter,
-                   metrics.elidedText(tr("Trait : théorie ; points : mesures, intervalle à 95 %"), Qt::ElideRight, box.width() - 14.0));
+        for (const QString &l : footer)
+        {
+            p.drawText(QRectF(box.left() + 7.0, y, box.width() - 14.0, metrics.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                       metrics.elidedText(l, Qt::ElideRight, box.width() - 14.0));
+            y += metrics.height();
+        }
     }
     if (curves.empty())
     {
@@ -1092,9 +1193,10 @@ void ModulationPlot::updateReadout()
                         const double distance = std::hypot(x - m_pointer.x(), y - m_pointer.y());
                         if (distance >= best) continue;
                         best = distance;
-                        near = tr("%1 dB : TEB %2 (%3 erreurs sur %4 bits), théorie %5")
-                                   .arg(text(plot::formatFixed(point.ebN0Db, 1)), rate(point.ber), count(point.errors), count(point.bits),
-                                        rate(point.theory));
+                        near = tr("%1 dB : TEB %2 (%3 sur %4 bits), théorie %5")
+                                   .arg(text(plot::formatFixed(point.ebN0Db, 1)), rate(point.ber),
+                                        point.errors == 0 ? tr("aucune erreur") : counted(point.errors, tr("%1 erreur"), tr("%1 erreurs")),
+                                        count(point.bits), rate(point.theory));
                     }
                 if (!near.isEmpty())
                 {

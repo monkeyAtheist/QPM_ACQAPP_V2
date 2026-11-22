@@ -18,6 +18,15 @@ namespace qacq::analysis
 namespace
 {
 constexpr std::string_view kRootHertz = "\xE2\x88\x9AHz"; // √Hz
+
+// The name of the spectrum of a pair I, Q: "I + jQ"; a pair named alike, "I émis" and "Q émis": "I + jQ émis"
+// (shorter than "I émis + jQ émis"); otherwise both names.
+std::string complexCurveName(const std::string &i, const std::string &q)
+{
+    if (!i.empty() && !q.empty() && i.front() == 'I' && q.front() == 'Q' && i.compare(1, std::string::npos, q, 1) == 0)
+        return "I + jQ" + i.substr(1);
+    return i + " + j" + q;
+}
 constexpr std::size_t kPyramidFrom = 32768;
 constexpr std::size_t kMinimumZone = 8;
 
@@ -456,7 +465,7 @@ AnalysisResult analyse(const model::Signal &signal, std::size_t firstFrame, std:
             const std::vector<double> i = zoneOf(zone(ci), missingI);
             const std::vector<double> q = zoneOf(zone(cq), missingQ);
             missingTotal += missingI + missingQ;
-            curve.name = signal.channels[ci].name + " + j" + signal.channels[cq].name;
+            curve.name = complexCurveName(signal.channels[ci].name, signal.channels[cq].name);
             curve.unit = signal.channels[ci].unit;
             curve.channels = {static_cast<int>(ci), static_cast<int>(cq)};
             dsp::ComplexSpectrum s;

@@ -11,15 +11,20 @@
 //                    its points with their 95 % interval (a point without error: a triangle under its upper bound);
 //                    the theory of the link as it is dashed, and its point (a diamond)
 //
+// Above the frame, the title of the plot and what it shows (symbols, those decided wrong, EVM; traces drawn), on as
+// many lines as they need: never over the points.
+//
 // Mouse: the wheel zooms about the pointer (the constellation both ways; the eye its values, Ctrl its time; the
 // curves Eb/N0, Ctrl the rates); a drag moves the view; a double click shows everything again. Under the pointer,
-// what is there (`readout`, also drawn in the corner).
+// what is there (`readout`, also drawn at the bottom of the band under the pointer).
 #include "qacq/plot/trace.h"
 
 #include <QColor>
+#include <QFont>
 #include <QPointer>
 #include <QQuickPaintedItem>
 #include <QString>
+#include <QStringList>
 #include <QVariantList>
 #include <QtQml/qqmlregistration.h>
 
@@ -120,7 +125,19 @@ private:
         double qAt(double y) const;
     };
 
+    // A line above the frame: the title on the left, facts on the right.
+    struct HeaderRow
+    {
+        QString left, right;
+    };
+
     void contentUpdated();
+    void countResult();
+    QFont plotFont() const;
+    QString headerTitle() const;
+    QStringList headerFacts() const;
+    std::vector<HeaderRow> headerRows() const; // the title, then the facts on as many lines as they need
+    double topMargin() const;
     QRectF plotRect() const;
     View automaticView() const;
     View currentView() const; // automatic or as set
@@ -138,7 +155,7 @@ private:
     void paintEye(QPainter &p, const QRectF &area);
     void paintBer(QPainter &p, const QRectF &area);
     void paintMessage(QPainter &p, const QString &message);
-    void paintCorner(QPainter &p, const QRectF &area, const QStringList &lines);
+    void paintHeader(QPainter &p);
     QColor curveColour(std::size_t index) const;
 
     QPointer<qacq::app::ModulationController> m_modulation;
@@ -148,6 +165,9 @@ private:
     View m_view;
     std::vector<View> m_history;
     std::map<std::string, std::vector<double>> m_theory;
+    // Counted once per result: the symbols shown (ends left out), those decided wrong, one point drawn in
+    // m_pointStep; the traces of the eye, one drawn in m_traceStep.
+    std::size_t m_shown = 0, m_wrong = 0, m_pointStep = 1, m_traces = 0, m_traceStep = 1;
 
     bool m_hovering = false;
     QPointF m_pointer;

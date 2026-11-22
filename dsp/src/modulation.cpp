@@ -363,8 +363,8 @@ ModulatedSignal modulate(const ModulationSpec &spec)
             out.occupiedBandwidthHz = 2.0 * spec.fskDeviationHz + 2.0 * rs;
             const double spacing = 2.0 * spec.fskDeviationHz / rs; // tone spacing in units of Rs
             if (spacing < 0.99 || std::abs(spacing - std::round(spacing)) > 0.01)
-                out.warnings.emplace_back("Tonalités FSK non orthogonales (écart 2 delta f non multiple du débit) : "
-                                          "le taux d'erreur dépasse la théorie.");
+                out.warnings.emplace_back("Tonalités FSK non orthogonales (leur écart 2 Δf n'est pas un multiple du débit) : "
+                                          "le taux d'erreur dépasse la théorie, faite pour des tonalités orthogonales.");
         }
         else
         {

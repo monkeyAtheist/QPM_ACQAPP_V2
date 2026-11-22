@@ -797,8 +797,9 @@ const std::vector<LinkExample> &linkExamples()
                 r.symbols = 2400;
                 r.ebN0Db = 12.0;
             });
-        add("FSK comme un modem Bell 202 (1 200 Bd, 1 200 et 2 200 Hz)",
-            "Deux tonalités 1 000 Hz l'une de l'autre à 1 200 Bd : pas orthogonales, plus d'erreurs que la théorie (le prix d'un modem simple)",
+        add("FSK sur les tonalités du Bell 202 (1 200 Bd, 1 200 et 2 200 Hz)",
+            "Deux tonalités 1 000 Hz l'une de l'autre à 1 200 Bd : pas orthogonales, plus d'erreurs que la théorie (le prix "
+            "d'un modem simple). Ici le 1 est la tonalité haute ; le Bell 202 met le sien, la marque, à 1 200 Hz",
             [](LinkRecipe &r) {
                 r.modulation = dsp::Modulation::Fsk;
                 r.pulse = dsp::PulseShape::Rectangular;
