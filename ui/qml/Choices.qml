@@ -83,13 +83,60 @@ QtObject {
         { key: "drawn", name: qsTr("Motif dessiné"), tip: qsTr("Une forme dessinée à la souris (ou tapée point par point), répétée à sa fréquence ou étalée sur toute la durée") },
         { key: "recurrence", name: qsTr("Récurrence"), tip: qsTr("y[n] calculé à partir des valeurs d'avant et d'une entrée x[n] : oscillateurs, filtres, suites") },
         { key: "formula", name: qsTr("Opération entre voies"), tip: qsTr("y, une formule des autres voies (v1 + v2, v1*v2, v1/v2…), du temps t ou des formes d'onde au-dessus (x)") },
-        { key: "modulation", name: qsTr("Porteuse modulée"), tip: qsTr("Une porteuse modulée en amplitude (AM), en fréquence (FM) ou en phase (PM) par un message : un sinus, une autre voie, les formes d'onde au-dessus") }
+        { key: "modulation", name: qsTr("Porteuse modulée"), tip: qsTr("Une porteuse modulée en amplitude (AM, DBL, BLU), en fréquence (FM) ou en phase (PM) par un message : un sinus, une autre voie, les formes d'onde au-dessus (un signal enregistré, par exemple)") },
+        { key: "recorded", name: qsTr("Signal enregistré"), tip: qsTr("Une voie d'un signal de la session (acquis, importé, filtré, déjà généré) : pour lui ajouter un bruit, le mêler à d'autres, le lire dans une opération ou en faire le message d'une porteuse") },
+        { key: "frame", name: qsTr("Trame numérique"), tip: qsTr("Des données (bits, hexadécimal, texte) en deux niveaux : telles quelles (NRZ, NRZI, Manchester, RZ) ou mises en trame UART, I2C, SPI ou USB, avec la trame construite détaillée ; les autres lignes du bus (horloge, SCL, MISO, D−…) s'ajoutent comme des voies") }
+    ]
+    // A digital frame of the generator (keys of the recipe): its protocols, the formats of its data, the line
+    // codes of bits sent as they are, the packets of USB.
+    readonly property var frameProtocols: [
+        { key: "bits", name: qsTr("Bits tels quels (code de ligne)") },
+        { key: "uart", name: qsTr("UART (liaison série)") },
+        { key: "i2c", name: qsTr("I2C (SDA, SCL)") },
+        { key: "spi", name: qsTr("SPI (MOSI, MISO, SCLK, CS)") },
+        { key: "usb", name: qsTr("USB (D+, D−)") }
+    ]
+    readonly property var frameFormats: [
+        { key: "auto", name: qsTr("Automatique") },
+        { key: "bin", name: qsTr("Binaire") },
+        { key: "hex", name: qsTr("Hexadécimal") },
+        { key: "dec", name: qsTr("Décimal (octets)") },
+        { key: "text", name: qsTr("Texte (UTF-8)") }
+    ]
+    readonly property var lineCodes: [
+        { key: "nrz", name: qsTr("NRZ (le niveau est le bit)") },
+        { key: "nrzi", name: qsTr("NRZI (un 1 change le niveau)") },
+        { key: "manchester", name: qsTr("Manchester (un front par bit)") },
+        { key: "rz", name: qsTr("RZ (retour à zéro)") }
+    ]
+    // Usual bit rates of each protocol, for the menu beside the rate of a frame.
+    readonly property var frameRates: ({
+        bits: [100, 1000, 10000, 100000, 1000000],
+        uart: [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600],
+        i2c: [10000, 100000, 400000, 1000000, 3400000],
+        spi: [100000, 1000000, 4000000, 10000000],
+        usb: [1500000, 12000000]
+    })
+    readonly property var usbPackets: [
+        { key: "setup", name: qsTr("Jeton SETUP") },
+        { key: "out", name: qsTr("Jeton OUT") },
+        { key: "in", name: qsTr("Jeton IN") },
+        { key: "sof", name: qsTr("Début de trame (SOF)") },
+        { key: "data0", name: qsTr("Données DATA0") },
+        { key: "data1", name: qsTr("Données DATA1") },
+        { key: "ack", name: qsTr("Acquittement ACK") },
+        { key: "nak", name: qsTr("Refus NAK") },
+        { key: "stall", name: qsTr("Blocage STALL") },
+        { key: "setup-transaction", name: qsTr("Transaction SETUP (jeton, DATA0, ACK)") }
     ]
     // How a carrier is modulated (keys of the recipe).
     readonly property var carrierModulations: [
         { key: "am", name: qsTr("AM (amplitude)"), tip: qsTr("A·(1 + m·message)·cos(2π fc t + φ) : l'enveloppe suit le message ; avec un sinus de fréquence fm, deux raies latérales à fc ± fm.") },
         { key: "fm", name: qsTr("FM (fréquence)"), tip: qsTr("La fréquence instantanée vaut fc + Δf·message : avec un sinus de fréquence fm, des raies tous les fm autour de fc (fonctions de Bessel de β = Δf/fm), sur la bande de Carson 2(Δf + fm).") },
-        { key: "pm", name: qsTr("PM (phase)"), tip: qsTr("La phase vaut φ + Δφ·message : c'est une FM du message dérivé.") }
+        { key: "pm", name: qsTr("PM (phase)"), tip: qsTr("La phase vaut φ + Δφ·message : c'est une FM du message dérivé.") },
+        { key: "dsb", name: qsTr("DBL (amplitude, sans porteuse)"), tip: qsTr("A·message·cos(2π fc t + φ) : les deux bandes latérales sans la raie de la porteuse (double bande latérale à porteuse supprimée). L'enveloppe ne suit plus le message : il faut une démodulation cohérente.") },
+        { key: "usb", name: qsTr("BLU supérieure (bande latérale unique)"), tip: qsTr("A·(m·cos − m̂·sin) : seule la bande au-dessus de fc reste (m̂ : la transformée de Hilbert du message, prise sur tout le signal). Moitié moins de bande qu'en AM ; 1 048 576 échantillons au plus.") },
+        { key: "lsb", name: qsTr("BLU inférieure"), tip: qsTr("A·(m·cos + m̂·sin) : seule la bande au-dessous de fc reste, le spectre du message retourné. 1 048 576 échantillons au plus.") }
     ]
     // The input x[n] of a recurrence (keys of the recipe).
     readonly property var recurrenceInputs: [
@@ -179,6 +226,8 @@ QtObject {
 
     // ---- Filters ----
     readonly property var filterKinds: [
+        { key: "none", name: qsTr("Aucun filtre (la sortie est l'entrée)"),
+          tip: qsTr("La page vierge : H = 1, rien n'est filtré ; choisissez un RII, un RIF ou des coefficients pour concevoir un filtre") },
         { key: "iir", name: qsTr("RII : récursif (Butterworth, Chebyshev, Bessel, elliptique)"),
           tip: qsTr("Réponse impulsionnelle infinie : des flancs raides pour peu de calcul ; phase non linéaire") },
         { key: "fir", name: qsTr("RIF : non récursif (fenêtre ou équiondulation)"),
@@ -270,8 +319,48 @@ QtObject {
         { key: "text", name: qsTr("Un texte"), tip: qsTr("Les octets d'un texte (UTF-8), envoyés à la suite ou en trame série 8N1, et le texte reçu à côté") },
         { key: "bits", name: qsTr("Des bits tapés"), tip: qsTr("Une suite de 0 et de 1, répétée") }
     ]
+    readonly property var linkReceivers: [
+        { key: "ideal", name: qsTr("Idéal : il connaît le canal"), short: qsTr("Idéal"),
+          tip: qsTr("Le récepteur connaît le retard, la porteuse et l'horloge, et les défait exactement : ce que suppose la théorie du TEB") },
+        { key: "sync", name: qsTr("Synchronisé : il le cherche"), short: qsTr("Synchronisé"),
+          tip: qsTr("Un préambule connu lui donne le début de la trame, l'écart de fréquence et la phase ; deux boucles suivent ensuite le rythme et la porteuse, symbole après symbole") }
+    ]
     readonly property var linkRepresentations: [
         { key: "passband", name: qsTr("Sur une porteuse"), tip: qsTr("Un signal réel, Re{(I + jQ) e^(j2πfc t)} : ce que joue une carte son, ce que capte une antenne") },
         { key: "iq", name: qsTr("En I/Q (enveloppe complexe)"), tip: qsTr("Les voies I et Q seules, sans porteuse : ce que traite un récepteur numérique après sa descente en fréquence") }
+    ]
+    // Channels with several paths, as the recipe writes them: "retard en symboles : gain en dB @ phase en degrés",
+    // one path after the other (the key is that text).
+    readonly property var linkPaths: [
+        { key: "", name: qsTr("Un seul trajet"), tip: qsTr("Le signal arrive une seule fois : chaque symbole seul à son instant de décision") },
+        { key: "0 : 0 ; 1 : -6", name: qsTr("Un écho à −6 dB, un symbole plus tard"),
+          tip: qsTr("Chaque symbole reçoit la moitié du précédent : chaque point de la constellation devient plusieurs") },
+        { key: "0 : 0 ; 1 : -6 @ 180", name: qsTr("Le même écho, en opposition de phase"),
+          tip: qsTr("L'écho se retranche au lieu de s'ajouter : le creux passe des bords de la bande à son milieu") },
+        { key: "0 : 0 ; 0,5 : -3", name: qsTr("Un écho à −3 dB, un demi-symbole plus tard"),
+          tip: qsTr("Un écho entre deux instants de décision : il s'étale sur plusieurs symboles voisins") },
+        { key: "0 : 0 ; 1 : -1", name: qsTr("Deux trajets presque égaux"),
+          tip: qsTr("Un creux profond dans la bande : l'égaliseur le comble en amplifiant aussi le bruit qui s'y trouve") },
+        { key: "0 : 0 ; 1 : -3 @ 180 ; 2 : -9 @ 60", name: qsTr("Trois trajets"),
+          tip: qsTr("Deux échos de phases différentes, un et deux symboles plus tard") },
+        { key: "0 : -10 ; 2 : 0", name: qsTr("Un trajet faible, puis le plus fort"),
+          tip: qsTr("Le récepteur se cale sur le trajet le plus fort : le premier arrive en avance, sur les symboles suivants") }
+    ]
+    readonly property var linkEqualizers: [
+        { key: "none", name: qsTr("Aucun égaliseur"), short: qsTr("Égaliseur"),
+          tip: qsTr("Les symboles sont décidés tels que le canal les rend : avec plusieurs trajets, chacun reçoit une part de ses voisins") },
+        { key: "linear", name: qsTr("Linéaire : des prises au rythme des symboles"), short: qsTr("Égalisé"),
+          tip: qsTr("Un filtre au rythme des symboles défait ce que les trajets ont mêlé. Le récepteur idéal, qui connaît le canal, calcule ses prises (erreur quadratique minimale) ; le récepteur synchronisé les apprend sur le préambule, puis sur ses propres décisions") },
+        { key: "dfe", name: qsTr("À retour de décision"), short: qsTr("Retour"),
+          tip: qsTr("Des prises avant, puis des prises sur les symboles déjà décidés, qui retirent ce que ceux-ci laissent sur le suivant : les prises avant n'ont plus à combattre ces échos, et laissent passer bien moins de bruit dans un creux. Une décision fausse renvoie un symbole faux : les erreurs viennent en salves") }
+    ]
+    // Fading paths (the key is the recipe's).
+    readonly property var linkFadings: [
+        { key: "none", name: qsTr("Aucun évanouissement"), short: qsTr("Fixe"),
+          tip: qsTr("Le canal ne change pas pendant la trame") },
+        { key: "rayleigh", name: qsTr("Rayleigh : sans visée directe"), short: qsTr("Rayleigh"),
+          tip: qsTr("Des ondes venues de partout, décalées par l'effet Doppler jusqu'à ±fd : le gain de chaque trajet erre, et plonge de temps à autre de 20 dB ou plus. À fort Eb/N0, le TEB ne baisse plus que comme 1 / Eb/N0") },
+        { key: "rice", name: qsTr("Rice : une visée directe"), short: qsTr("Rice"),
+          tip: qsTr("Une onde directe K fois plus forte que celles dispersées autour d'elle (sur le premier trajet) : moins de creux, et moins profonds, à mesure que K grandit") }
     ]
 }

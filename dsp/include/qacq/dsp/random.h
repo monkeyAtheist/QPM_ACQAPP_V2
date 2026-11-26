@@ -2,7 +2,10 @@
 
 // Reproducible random numbers: the same seed gives the same noise on every compiler and system
 // (std::normal_distribution does not: libstdc++ and MSVC differ). xoshiro256** seeded by splitmix64,
-// normal values by the Box-Muller transform.
+// normal values by the polar method (Marsaglia): two at a time from a point drawn in the unit disc, exact,
+// for one logarithm and one square root (the Box-Muller transform of before 23/11/2026 also took a cosine
+// and a sine, most of the time of a noise where the mathematical library is slow; the values drawn from a
+// seed are no longer those it gave).
 
 #include <cmath>
 #include <cstdint>
@@ -44,13 +47,19 @@ public:
             m_hasSpare = false;
             return m_spare;
         }
-        double u1 = uniform();
-        while (u1 <= 0.0) u1 = uniform();
-        const double u2 = uniform();
-        const double radius = std::sqrt(-2.0 * std::log(u1));
-        m_spare = radius * std::sin(kTwoPi * u2);
+        // A point uniform in the unit disc (0.785 of the tries); s, its squared radius, is uniform in (0, 1) and
+        // independent of its direction (u, v) / sqrt(s).
+        double u = 0.0, v = 0.0, s = 0.0;
+        do
+        {
+            u = 2.0 * uniform() - 1.0;
+            v = 2.0 * uniform() - 1.0;
+            s = u * u + v * v;
+        } while (s >= 1.0 || s <= 0.0);
+        const double scale = std::sqrt(-2.0 * std::log(s) / s);
+        m_spare = v * scale;
         m_hasSpare = true;
-        return radius * std::cos(kTwoPi * u2);
+        return u * scale;
     }
 
 private:

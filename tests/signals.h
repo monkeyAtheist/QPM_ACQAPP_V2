@@ -3,6 +3,7 @@
 // Deterministic test signals, reproduced bit for bit by tools/reference/make_scipy_reference.py.
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <numbers>
 #include <vector>

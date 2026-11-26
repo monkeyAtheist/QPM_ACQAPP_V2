@@ -10,8 +10,8 @@ import Qacq.App
 // its output; a band low in the spectrum shown on logarithmic frequencies; then tried on the signal chosen:
 // one channel before and after, with their spectra, applied causal, at zero phase or aligned; and the whole
 // signal filtered into the session in one click (undoable); or written in C for a microcontroller (Code C).
-// The recipe is remembered from one run to the next; its detail and its coefficients are in the right panel
-// (Filtre).
+// The page opens blank, without filter (H = 1), and so does « Par défaut »; the recipe of the last run can be taken
+// up again (Exemples ▸ Reprendre…). Its detail and its coefficients are in the right panel (Filtre).
 Item {
     id: root
     required property var filters
@@ -38,7 +38,9 @@ Item {
     readonly property bool typed: recipe.kind === "typed"
     readonly property bool iir: recipe.kind === "iir"
     readonly property bool fir: recipe.kind === "fir"
-    readonly property bool band: !typed && (recipe.response === "bandpass" || recipe.response === "bandstop")
+    // No filter yet (the blank page): H = 1, the output is the input.
+    readonly property bool none: recipe.kind === "none"
+    readonly property bool band: !typed && !none && (recipe.response === "bandpass" || recipe.response === "bandstop")
     // A FIR: by a window (its key), or equiripple (Parks-McClellan).
     readonly property bool equiripple: fir && recipe.firDesign === "equiripple"
     readonly property string firDesign: equiripple ? "equiripple" : (recipe.window ?? "hamming")
@@ -48,7 +50,7 @@ Item {
     readonly property bool hasAttenuation: (iir && (recipe.family === "chebyshev2" || recipe.family === "elliptic")) || equiripple
     // The order (the taps) computed from a template (gabarit): the edges of its bands, Amax over the pass band,
     // Amin over the stop band; the recipe as designed has what was computed.
-    readonly property bool fromTemplate: !typed && recipe.fromTemplate === true
+    readonly property bool fromTemplate: !typed && !none && recipe.fromTemplate === true
     readonly property var designedRecipe: design.recipe ?? recipe
     // The edges of the template in their order along the frequencies, as its response has them.
     readonly property var templateEdges: {
@@ -78,7 +80,7 @@ Item {
     readonly property real topEdge: fromTemplate ? (band ? Math.max(recipe.pass2 ?? 0, recipe.stop2 ?? 0)
                                                          : Math.max(recipe.pass1 ?? 0, recipe.stop1 ?? 0))
                                     : band ? (recipe.frequency2 ?? 0) : (recipe.frequency1 ?? 0)
-    readonly property bool lowBand: !typed && topEdge > 0 && topEdge < 0.03 * (recipe.sampleRate ?? 0) / 2
+    readonly property bool lowBand: !typed && !none && topEdge > 0 && topEdge < 0.03 * (recipe.sampleRate ?? 0) / 2
     onLowBandChanged: followScale()
     function followScale() {
         responsePlot.logFrequency = root.lowBand
@@ -131,17 +133,17 @@ Item {
         value: root.visible && root.ribbonTab === 1 ? root.filters.previewId : 0
     }
 
-    // The recipe of the last run comes back; each change is remembered a moment after.
+    // The page opens blank (no filter); the recipe of the last run is kept, to be taken up again (Exemples ▸
+    // Reprendre…), and each change is remembered a moment after.
+    property string previousRecipe: ""
     Component.onCompleted: {
         const saved = appSettings.value("filters/recipe", "")
-        if (saved && saved.length > 0)
-            filters.restoreRecipe(saved)
-        Qt.callLater(() => { if (root.lowBand) root.followScale() })
+        root.previousRecipe = saved && saved.length > 0 ? saved : ""
     }
     Timer {
         id: rememberTimer
         interval: 800
-        onTriggered: root.appSettings.setValue("filters/recipe", root.filters.recipeText())
+        onTriggered: if (!root.none) root.appSettings.setValue("filters/recipe", root.filters.recipeText()) // not "no filter"
     }
 
     // While the preview plays, each new preview plays in its place: what is changed in the filter is heard.
@@ -321,12 +323,24 @@ Item {
                         onObjectAdded: (index, object) => examplesMenu.insertItem(index, object)
                         onObjectRemoved: (index, object) => examplesMenu.removeItem(object)
                     }
+                    MenuSeparator { }
+                    MenuItem {
+                        text: qsTr("Reprendre le filtre de la dernière fois")
+                        enabled: root.previousRecipe.length > 0
+                        onTriggered: {
+                            root.filters.restoreRecipe(root.previousRecipe)
+                            Qt.callLater(() => { if (root.lowBand) root.followScale() })
+                        }
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 400
+                        ToolTip.text: qsTr("Le filtre où le module en était quand l'application a été fermée (il s'ouvre sur une page vierge, sans filtre)")
+                    }
                 }
             }
             RibbonButton {
                 glyph: "rotate"
                 text: qsTr("Par défaut")
-                tip: qsTr("Repartir d'un passe-bas Butterworth d'ordre 4 à 1 kHz (ou fs/10), appliqué en causal")
+                tip: qsTr("Repartir d'une page vierge : aucun filtre (la sortie est l'entrée) ; le premier type choisi part d'un passe-bas à 1 kHz (ou fs/10)")
                 onClicked: root.filters.reset()
             }
             RibbonButton {
@@ -342,9 +356,10 @@ Item {
             RibbonButton {
                 glyph: "chip"
                 text: qsTr("Code C")
-                enabled: root.designed
-                tip: root.designed ? qsTr("Le filtre en C pour microcontrôleur : flottant (float, double) ou virgule fixe (Q15, Q31), ce que l'arrondi lui fait, un autotest ; à copier ou enregistrer (.h et .c)")
-                                   : (root.design.error ?? "")
+                enabled: root.designed && !root.none
+                tip: root.none ? qsTr("Aucun filtre : rien à écrire en C ; choisissez d'abord un type de filtre")
+                     : root.designed ? qsTr("Le filtre en C pour microcontrôleur : flottant (float, double) ou virgule fixe (Q15, Q31), ce que l'arrondi lui fait, un autotest ; à copier ou enregistrer (.h et .c)")
+                                     : (root.design.error ?? "")
                 onClicked: codeDialog.open()
             }
         }
@@ -352,17 +367,19 @@ Item {
             visible: root.ribbonTab === 0
             title: qsTr("Filtre")
             ChoiceButton {
-                glyph: root.typed ? "typed" : root.iir ? "iir" : "fir"
-                text: root.typed ? qsTr("b, a") : root.iir ? qsTr("RII") : qsTr("RIF")
+                glyph: root.none ? "nofilter" : root.typed ? "typed" : root.iir ? "iir" : "fir"
+                text: root.none ? qsTr("Aucun") : root.typed ? qsTr("b, a") : root.iir ? qsTr("RII") : qsTr("RIF")
+                primary: root.none
                 options: Choices.filterKinds
-                current: root.recipe.kind ?? "iir"
-                tip: root.typed ? qsTr("Coefficients tapés : b[k] et a[k] de y[n] = Σ b[k] x[n − k] − Σ a[k] y[n − k], dans le panneau Filtre (F10)")
+                current: root.recipe.kind ?? "none"
+                tip: root.none ? qsTr("Aucun filtre pour l'instant (la sortie est l'entrée) : choisissez un RII, un RIF ou des coefficients tapés ; le premier part d'un passe-bas à 1 kHz")
+                     : root.typed ? qsTr("Coefficients tapés : b[k] et a[k] de y[n] = Σ b[k] x[n − k] − Σ a[k] y[n − k], dans le panneau Filtre (F10)")
                      : root.iir ? qsTr("Récursif (réponse impulsionnelle infinie) : peu de calcul pour des flancs raides ; sa phase n'est pas linéaire")
                                 : qsTr("Non récursif (réponse impulsionnelle finie) : phase linéaire, toujours stable ; il lui faut plus de coefficients")
                 onChosen: (key) => root.set({ kind: key })
             }
             ChoiceButton {
-                visible: !root.typed
+                visible: !root.typed && !root.none
                 glyph: "response"
                 text: root.nameOf(Choices.filterResponses, root.recipe.response ?? "")
                 options: Choices.filterResponses
@@ -396,7 +413,7 @@ Item {
             title: qsTr("Réglage")
             // The order chosen, or computed from a template.
             RibbonButton {
-                visible: !root.typed
+                visible: !root.typed && !root.none
                 glyph: "template"
                 text: qsTr("Gabarit")
                 checked: root.fromTemplate
@@ -415,7 +432,7 @@ Item {
                 onClicked: root.designRequested()
             }
             RibbonField {
-                visible: !root.typed && !root.fromTemplate
+                visible: !root.typed && !root.none && !root.fromTemplate
                 anchors.verticalCenter: parent.verticalCenter
                 label: root.band ? qsTr("f basse") : qsTr("Coupure")
                 fieldWidth: 80
@@ -719,7 +736,7 @@ Item {
             }
         }
         RibbonGroup {
-            visible: root.ribbonTab === 1
+            visible: root.ribbonTab === 1 && !root.none
             title: qsTr("Application")
             RibbonButton {
                 glyph: "causal"
@@ -943,6 +960,32 @@ Item {
                 warningColor: Theme.error
                 panelColor: Theme.panel
                 emptyText: qsTr("Aucun filtre")
+            }
+            // The blank page: what to do with it.
+            Rectangle {
+                visible: root.none
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top
+                anchors.topMargin: 44
+                width: Math.min(parent.width - 140, 560)
+                height: noneHint.implicitHeight + 24
+                radius: 8
+                color: Qt.alpha(Theme.panel, 0.94)
+                border.color: Theme.border
+                Label {
+                    id: noneHint
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 12
+                    wrapMode: Text.WordWrap
+                    color: Theme.text
+                    font.pixelSize: Theme.smallText
+                    lineHeight: 1.15
+                    text: qsTr("Page vierge : aucun filtre, la sortie est l'entrée (gain plat à 0 dB).")
+                          + "\n• " + qsTr("Aucun ▾ (ruban ▸ Filtre) : un RII (Butterworth, Chebyshev, Bessel, elliptique), un RIF ou des coefficients tapés ; le premier part d'un passe-bas à %1 ;").arg(Units.compact(root.recipe.frequency1 ?? 1000, "Hz", 4))
+                          + "\n• " + qsTr("Exemples ▾ : un filtre tout prêt, ou celui de la dernière fois.")
+                }
             }
         }
 

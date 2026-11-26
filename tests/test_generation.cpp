@@ -184,10 +184,11 @@ TEST_CASE("generator: the recipe as JSON, read back within its bounds", "[analys
     REQUIRE(parsed.has_value());
     CHECK(toJson(generatorRecipeFromJson(*parsed)) == j);
 
-    // Nothing usable: the default recipe.
+    // Nothing usable: a blank page.
     const GeneratorRecipe empty = generatorRecipeFromJson(Json::object());
-    CHECK(toJson(empty) == toJson(defaultGeneratorRecipe()));
+    CHECK(toJson(empty) == toJson(blankGeneratorRecipe()));
     CHECK(empty.channels.size() == 1 && empty.channels[0].name == "Voie 1" && empty.channels[0].unit == "V");
+    CHECK(empty.channels[0].components.empty());
 
     // Wrong values: defaults, or brought within the bounds; unknown waveforms dropped.
     const auto bad = Json::parse(R"({"sampleRate": -5, "duration": "long", "seed": -3, "channels": [
@@ -228,12 +229,12 @@ TEST_CASE("generator: the recipe as JSON, read back within its bounds", "[analys
 
 TEST_CASE("generator: what cannot be generated is said before, by channel and component after", "[analysis]")
 {
-    GeneratorRecipe r = defaultGeneratorRecipe();
+    GeneratorRecipe r = sineGeneratorRecipe();
     r.sampleRateHz = 1e6;
     r.durationSeconds = 60.0;
     CHECK(contains(checkGeneratorRecipe(r), "60 000 000 échantillons : au plus 50 000 000"));
     r.durationSeconds = 30.0;
-    r.channels.push_back(defaultGeneratorChannel(1));
+    r.channels.push_back(sineGeneratorChannel(1));
     CHECK(contains(checkGeneratorRecipe(r), "(30 000 000 par voie)"));
     const GeneratorResult tooBig = generateSignal(r);
     CHECK(!tooBig.ok() && !tooBig.cancelled && tooBig.signal.frameCount() == 0);
@@ -262,9 +263,9 @@ TEST_CASE("generator: what cannot be generated is said before, by channel and co
 
 TEST_CASE("generator: progress by component, and a stop on request", "[analysis]")
 {
-    GeneratorRecipe r = defaultGeneratorRecipe();
+    GeneratorRecipe r = sineGeneratorRecipe();
     r.channels[0].components.push_back(make(Waveform::Triangle, 0.5, 300.0));
-    r.channels.push_back(defaultGeneratorChannel(1));
+    r.channels.push_back(sineGeneratorChannel(1));
     std::atomic<bool> cancelled{false};
     std::atomic<int> permille{0};
     const GeneratorResult g = generateSignal(r, {&cancelled, &permille});
@@ -1141,7 +1142,7 @@ TEST_CASE("generator: an operation between channels, made after the channels it 
 TEST_CASE("generator: a channel read by another is not removed; the others are renumbered", "[analysis]")
 {
     GeneratorRecipe r;
-    r.channels = {defaultGeneratorChannel(0), defaultGeneratorChannel(1), defaultGeneratorChannel(2), defaultGeneratorChannel(3)};
+    r.channels = {sineGeneratorChannel(0), sineGeneratorChannel(1), sineGeneratorChannel(2), sineGeneratorChannel(3)};
     GeneratorComponent op = defaultGeneratorComponent(Waveform::Formula);
     op.expression = "v1*v3 + V3 - fv3 + v3x";
     r.channels[3].components = {op};
@@ -1162,7 +1163,7 @@ TEST_CASE("generator: a channel read by another is not removed; the others are r
     REQUIRE(kept.channels.size() == 3);
     CHECK(kept.channels[2].components[0].expression == "v1*v2 + V2 - fv3 + v3x");
     GeneratorRecipe one;
-    one.channels = {defaultGeneratorChannel(0)};
+    one.channels = {sineGeneratorChannel(0)};
     CHECK(!removeGeneratorChannel(one, 0, &why));
     CHECK(why == "Le signal garde au moins une voie.");
     GeneratorRecipe two = r;
@@ -1309,4 +1310,1114 @@ TEST_CASE("generator: a modulated carrier, as the module Modulations makes it", 
     CHECK(fromSine.variables == "fm = 200");
     CHECK(fromSine.deviationHz == 400.0);
     CHECK(withWaveform(fm, Waveform::Sine).frequencyHz == 10000.0);
+}
+
+namespace
+{
+// A record of the session: its channels as given, an id and a name.
+qacq::model::SignalPtr record(std::uint64_t id, std::string name, double rate, std::vector<std::vector<double>> channels,
+                              std::vector<std::string> names = {})
+{
+    qacq::model::Signal s;
+    s.id = id;
+    s.name = std::move(name);
+    s.sampleRateHz = rate;
+    for (std::size_t c = 0; c < channels.size(); ++c)
+        s.channels.push_back({c < names.size() ? names[c] : "Voie " + std::to_string(c + 1), "V"});
+    auto data = std::make_shared<qacq::model::SampleData>();
+    data->channels = std::move(channels);
+    s.data = data;
+    return std::make_shared<const qacq::model::Signal>(std::move(s));
+}
+
+GeneratorResult withRecord(const GeneratorComponent &component, double rate, double duration,
+                           const std::vector<qacq::model::SignalPtr> &sources)
+{
+    GeneratorRecipe r;
+    r.sampleRateHz = rate;
+    r.durationSeconds = duration;
+    GeneratorChannel channel;
+    channel.components = {component};
+    r.channels = {channel};
+    return generateSignal(r, {}, sources);
+}
+} // namespace
+
+TEST_CASE("generator: a recorded signal as a waveform, placed, repeated, scaled", "[analysis]")
+{
+    // A record of 80 samples at 8 kHz: a ramp, and a sine of 400 Hz.
+    std::vector<double> ramp(80), sine(80);
+    for (std::size_t i = 0; i < 80; ++i)
+    {
+        ramp[i] = 0.01 * static_cast<double>(i + 1);
+        sine[i] = 0.5 * std::sin(2.0 * std::numbers::pi * 400.0 * static_cast<double>(i) / 8000.0);
+    }
+    const std::vector<qacq::model::SignalPtr> sources = {record(3, "Autre", 8000.0, {sine}),
+                                                         record(7, "Voix", 8000.0, {ramp, sine}, {"Micro", "Ligne"})};
+    GeneratorComponent c = defaultGeneratorComponent(Waveform::Recorded, 8000.0, 0.01);
+    CHECK(c.amplitude == 1.0);
+    CHECK(c.sourceId == 0);
+    setRecordedSource(c, *sources[1], 0);
+    CHECK(c.sourceId == 7);
+    CHECK(c.sourceName == "Voix");
+    CHECK(c.sourceFrames == 80);
+    CHECK(c.sourceChannelName == "Micro");
+    CHECK(componentText(c, "V") == "Signal enregistré « Voix » (voie Micro)");
+
+    // At its rate and for its duration: its samples.
+    GeneratorResult g = withRecord(c, 8000.0, 0.01, sources);
+    REQUIRE(g.ok());
+    CHECK(g.warnings.empty());
+    CHECK((g.signal.data->channels[0] == ramp));
+    // Its other channel, times a gain.
+    GeneratorComponent second = c;
+    setRecordedSource(second, *sources[1], 1);
+    second.amplitude = -2.0;
+    g = withRecord(second, 8000.0, 0.01, sources);
+    REQUIRE(g.ok());
+    for (std::size_t i = 0; i < 80; ++i) CHECK(g.signal.data->channels[0][i] == -2.0 * sine[i]);
+    CHECK(componentText(second, "V") == "Signal enregistré « Voix » (voie Ligne), × −2");
+
+    // Read from 2,5 ms (sample 20), placed 1,25 ms (10 samples) into a signal of 12,5 ms (100 samples): 0, then the
+    // 60 samples left, then 0 again, which is said.
+    GeneratorComponent placed = c;
+    placed.sourceStartSeconds = 0.0025;
+    placed.eventSeconds = 0.00125;
+    g = withRecord(placed, 8000.0, 0.0125, sources);
+    REQUIRE(g.ok());
+    const std::vector<double> &y = g.signal.data->channels[0];
+    REQUIRE(y.size() == 100);
+    for (std::size_t i = 0; i < 10; ++i) CHECK(y[i] == 0.0);
+    for (std::size_t i = 10; i < 70; ++i) CHECK(y[i] == ramp[i + 10]);
+    for (std::size_t i = 70; i < 100; ++i) CHECK(y[i] == 0.0);
+    REQUIRE(g.warnings.size() == 1);
+    CHECK(contains(g.warnings[0], "l'enregistrement s'arrête à 8,75 ms : la suite vaut 0"));
+    CHECK(componentText(placed, "V") == "Signal enregistré « Voix » (voie Micro), à partir de 2,5 ms, retardé de 1,25 ms");
+    // In a loop: the part read again and again, shifted by the delay; nothing to say.
+    GeneratorComponent looped = placed;
+    looped.sourceLoop = true;
+    g = withRecord(looped, 8000.0, 0.0125, sources);
+    REQUIRE(g.ok());
+    CHECK(g.warnings.empty());
+    for (std::size_t i = 0; i < 100; ++i) CHECK(g.signal.data->channels[0][i] == ramp[20 + (i + 50) % 60]);
+    // A delay before the start reads further into the record; one beyond the end reads nothing.
+    GeneratorComponent early = c;
+    early.eventSeconds = -0.00125;
+    g = withRecord(early, 8000.0, 0.005, sources);
+    REQUIRE(g.ok());
+    for (std::size_t i = 0; i < 40; ++i) CHECK(g.signal.data->channels[0][i] == ramp[i + 10]);
+    GeneratorComponent late = c;
+    late.eventSeconds = 1.0;
+    g = withRecord(late, 8000.0, 0.005, sources);
+    REQUIRE(g.ok());
+    CHECK(largestGap(g.signal.data->channels[0], std::vector<double>(40, 0.0)) == 0.0);
+    REQUIRE(g.warnings.size() == 1);
+    CHECK(contains(g.warnings[0], "il commence après la fin du signal"));
+    GeneratorComponent beyond = c;
+    beyond.sourceStartSeconds = 0.5;
+    g = withRecord(beyond, 8000.0, 0.005, sources);
+    CHECK(contains(g.error, "est après la fin de l'enregistrement (10 ms)"));
+
+    // Scaled to a peak: the largest absolute value of the part read becomes the amplitude.
+    GeneratorComponent levelled = c;
+    levelled.sourceNormalize = true;
+    levelled.amplitude = 2.0;
+    g = withRecord(levelled, 8000.0, 0.005, sources); // the first 40 samples: a peak of 0.40
+    REQUIRE(g.ok());
+    CHECK_NEAR(g.signal.data->channels[0][39], 2.0, 1e-12, 0.0);
+    CHECK_NEAR(g.signal.data->channels[0][0], 0.05, 1e-12, 0.0);
+    CHECK(componentText(levelled, "V") == "Signal enregistré « Voix » (voie Micro), crête ramenée à 2 V");
+
+    // It adds up with the other waveforms, and is what a carrier is modulated by (x: the waveforms above it).
+    GeneratorRecipe r;
+    r.sampleRateHz = 8000.0;
+    r.durationSeconds = 0.01;
+    GeneratorChannel channel;
+    channel.offset = 1.0;
+    channel.components = {c, make(Waveform::Dc, 0.25)};
+    r.channels = {channel};
+    g = generateSignal(r, {}, sources);
+    REQUIRE(g.ok());
+    for (std::size_t i = 0; i < 80; ++i) CHECK_NEAR(g.signal.data->channels[0][i], ramp[i] + 1.25, 1e-15, 0.0);
+    CHECK(contains(g.signal.notes, "Voie 1 : Signal enregistré « Voix » (voie Micro) + Continu 250 mV ; décalage 1 V."));
+    GeneratorComponent carrier = defaultGeneratorComponent(Waveform::Modulation, 8000.0, 0.01);
+    carrier.frequencyHz = 2000.0;
+    carrier.message = "x";
+    carrier.variables.clear();
+    GeneratorComponent typed = carrier;
+    typed.message = "0,5*sin(2*pi*400*t)";
+    channel.offset = 0.0;
+    channel.components = {second, carrier};
+    channel.components[0].amplitude = 1.0;
+    r.channels = {channel};
+    g = generateSignal(r, {}, sources);
+    REQUIRE(g.ok());
+    CHECK(largestGap(g.signal.data->channels[0], alone(typed, 8000.0, 0.01)) < 1e-12);
+    CHECK(readsRecordedSignals(r));
+    CHECK(!readsRecordedSignals(sineGeneratorRecipe()));
+}
+
+TEST_CASE("generator: a recorded signal at another rate, found again or said missing", "[analysis]")
+{
+    // A second of a sine of 100 Hz and 0,8 V at 8 kHz, read at 48 kHz then at 2 kHz: the same sine (away from the
+    // two ends, where the interpolation reads beyond the record).
+    std::vector<double> sine(8000);
+    for (std::size_t i = 0; i < sine.size(); ++i) sine[i] = 0.8 * std::sin(2.0 * std::numbers::pi * 100.0 * static_cast<double>(i) / 8000.0);
+    std::vector<qacq::model::SignalPtr> sources = {record(4, "Capteur", 8000.0, {sine})};
+    GeneratorComponent c = defaultGeneratorComponent(Waveform::Recorded);
+    setRecordedSource(c, *sources[0], 0);
+    GeneratorResult g = withRecord(c, 48000.0, 1.0, sources);
+    REQUIRE(g.ok());
+    REQUIRE(g.signal.frameCount() == 48000);
+    double gap = 0.0;
+    for (std::size_t i = 2000; i < 46000; ++i)
+        gap = std::max(gap, std::abs(g.signal.data->channels[0][i] - 0.8 * std::sin(2.0 * std::numbers::pi * 100.0 * static_cast<double>(i) / 48000.0)));
+    CHECK(gap < 1e-4);
+    REQUIRE(g.warnings.size() == 1);
+    CHECK(contains(g.warnings[0], "Voie 1, composante 1 (Signal enregistré) — rééchantillonné de 8 kHz à 48 kHz."));
+    g = withRecord(c, 2000.0, 1.0, sources);
+    REQUIRE(g.ok());
+    REQUIRE(g.signal.frameCount() == 2000);
+    gap = 0.0;
+    for (std::size_t i = 100; i < 1900; ++i)
+        gap = std::max(gap, std::abs(g.signal.data->channels[0][i] - 0.8 * std::sin(2.0 * std::numbers::pi * 100.0 * static_cast<double>(i) / 2000.0)));
+    CHECK(gap < 1e-4);
+    REQUIRE(g.warnings.size() == 1);
+    CHECK(contains(g.warnings[0], "rééchantillonné de 8 kHz à 2 kHz : ce qu'il contient au-delà de 900 Hz est retiré."));
+    // Only what the signal lasts is read: half a second of it, no warning about its end.
+    g = withRecord(c, 48000.0, 0.5, sources);
+    REQUIRE(g.ok());
+    CHECK(g.warnings.size() == 1);
+    CHECK(std::abs(g.signal.data->channels[0][23990] - 0.8 * std::sin(2.0 * std::numbers::pi * 100.0 * 23990.0 / 48000.0)) < 1e-4);
+    // In a loop at another rate: the end joined to the start (a whole number of periods: the same sine throughout).
+    GeneratorComponent looped = c;
+    looped.sourceLoop = true;
+    g = withRecord(looped, 48000.0, 2.5, sources);
+    REQUIRE(g.ok());
+    gap = 0.0;
+    for (std::size_t i = 0; i < g.signal.frameCount(); ++i)
+        gap = std::max(gap, std::abs(g.signal.data->channels[0][i] - 0.8 * std::sin(2.0 * std::numbers::pi * 100.0 * static_cast<double>(i) / 48000.0)));
+    CHECK(gap < 1e-4);
+
+    // The recipe takes the rate and the duration of the record (from where it is read, after its delay).
+    GeneratorRecipe r;
+    GeneratorChannel channel;
+    channel.components = {make(Waveform::Sine, 1.0), c};
+    channel.components[1].sourceStartSeconds = 0.25;
+    channel.components[1].eventSeconds = 0.125;
+    r.channels = {channel};
+    CHECK(!adoptRecordedTiming(r, 0, 0, sources)); // a sine
+    CHECK(!adoptRecordedTiming(r, 0, 5, sources));
+    CHECK(!adoptRecordedTiming(r, 0, 1, {}));       // not in the session
+    CHECK(r.sampleRateHz == 48000.0);
+    REQUIRE(adoptRecordedTiming(r, 0, 1, sources));
+    CHECK(r.sampleRateHz == 8000.0);
+    CHECK(r.durationSeconds == 0.875);
+
+    // Found again: by its id whatever its new name; by its name under another id (another session); its channel
+    // by its name when its place changed.
+    std::vector<qacq::model::SignalPtr> renamed = {record(4, "Capteur de couple", 8000.0, {sine})};
+    RecordedSource found = findRecordedSource(c, renamed);
+    REQUIRE(found.ok());
+    CHECK(found.signal == renamed[0]);
+    std::vector<qacq::model::SignalPtr> moved = {record(4, "Bruit", 8000.0, {std::vector<double>(50, 1.0)}), record(9, "Capteur", 8000.0, {sine})};
+    found = findRecordedSource(c, moved);
+    REQUIRE(found.ok());
+    CHECK(found.signal == moved[1]); // not the stranger of the same id
+    std::vector<qacq::model::SignalPtr> stranger = {record(4, "Bruit", 8000.0, {std::vector<double>(50, 1.0)})};
+    found = findRecordedSource(c, stranger);
+    CHECK(!found.ok());
+    CHECK(found.error == "Le signal enregistré « Capteur » n'est pas dans la session : choisissez-en un autre.");
+    g = withRecord(c, 48000.0, 0.1, stranger);
+    CHECK(g.error == "Voie 1, composante 1 (Signal enregistré) — Le signal enregistré « Capteur » n'est pas dans la session : choisissez-en un autre.");
+    CHECK(withRecord(defaultGeneratorComponent(Waveform::Recorded), 48000.0, 0.1, sources).error ==
+          "Voie 1, composante 1 (Signal enregistré) — Aucun signal enregistré choisi.");
+    std::vector<qacq::model::SignalPtr> three = {record(5, "Trois", 8000.0, {sine, sine, std::vector<double>(8000, 0.25)}, {"a", "b", "c"})};
+    GeneratorComponent third = defaultGeneratorComponent(Waveform::Recorded);
+    setRecordedSource(third, *three[0], 2);
+    std::vector<qacq::model::SignalPtr> two = {record(5, "Trois", 8000.0, {sine, std::vector<double>(8000, 0.25)}, {"a", "c"})};
+    found = findRecordedSource(third, two);
+    REQUIRE(found.ok());
+    CHECK(found.channel == 1); // "c", now the second
+    g = withRecord(third, 8000.0, 0.01, two);
+    REQUIRE(g.ok());
+    CHECK(g.signal.data->channels[0][5] == 0.25);
+    std::vector<qacq::model::SignalPtr> gone = {record(5, "Trois", 8000.0, {sine, sine}, {"a", "b"})};
+    found = findRecordedSource(third, gone);
+    CHECK(!found.ok());
+    CHECK(found.error == "La voie « c » du signal « Trois » n'existe plus : choisissez-en une autre.");
+    // A channel renamed stays where it was.
+    std::vector<qacq::model::SignalPtr> other = {record(5, "Trois", 8000.0, {sine, sine, std::vector<double>(8000, 0.25)}, {"a", "b", "z"})};
+    found = findRecordedSource(third, other);
+    REQUIRE(found.ok());
+    CHECK(found.channel == 2);
+
+    // As JSON, and back.
+    GeneratorComponent full = third;
+    full.amplitude = 0.5;
+    full.sourceStartSeconds = 0.1;
+    full.eventSeconds = 0.02;
+    full.sourceLoop = true;
+    full.sourceNormalize = true;
+    const Json j = toJson(full);
+    CHECK(j["waveform"].toString() == "recorded");
+    CHECK(j["source"].toNumber() == 5.0);
+    CHECK(j["sourceName"].toString() == "Trois");
+    CHECK(j["sourceFrames"].toNumber() == 8000.0);
+    CHECK(j["sourceChannel"].toNumber() == 2.0);
+    CHECK(j["sourceChannelName"].toString() == "c");
+    CHECK(j["sourceStart"].toNumber() == 0.1);
+    CHECK(j["loop"].toBool());
+    CHECK(j["normalize"].toBool());
+    CHECK((toJson(generatorComponentFromJson(j)) == j));
+    Waveform w = Waveform::Sine;
+    CHECK(waveformFromKey("recorded", w));
+    CHECK(w == Waveform::Recorded);
+    CHECK(generatorWaveformName(Waveform::Recorded) == "Signal enregistré");
+    // Another waveform made a recorded signal keeps its amplitude as a gain, and has no record yet.
+    const GeneratorComponent made = withWaveform(make(Waveform::Sine, 0.5), Waveform::Recorded);
+    CHECK(made.amplitude == 0.5);
+    CHECK(made.sourceId == 0);
+    CHECK(componentText(made, "V") == "Signal enregistré (à choisir), × 0,5");
+}
+
+TEST_CASE("generator: a blank page; a signal of the session made a channel, or the message of a carrier", "[analysis]")
+{
+    // A blank page: one channel without waveform, zero; a constant is not blank.
+    const GeneratorRecipe page = blankGeneratorRecipe();
+    REQUIRE(page.channels.size() == 1);
+    CHECK(page.channels[0].name == "Voie 1");
+    CHECK(page.channels[0].unit == "V");
+    CHECK(page.channels[0].components.empty());
+    CHECK(isBlankRecipe(page));
+    CHECK(blankGeneratorChannel(2).name == "Voie 3");
+    CHECK(blankGeneratorChannel(2).components.empty());
+    GeneratorResult g = generateSignal(page);
+    REQUIRE(g.ok());
+    REQUIRE(g.signal.frameCount() == 48000);
+    CHECK(std::all_of(g.signal.channel(0).begin(), g.signal.channel(0).end(), [](double v) { return v == 0.0; }));
+    GeneratorRecipe constant = page;
+    constant.channels[0].offset = 0.5;
+    CHECK(!isBlankRecipe(constant));
+    CHECK(!isBlankRecipe(sineGeneratorRecipe()));
+
+    // A record of two channels, 0,5 s at 16 kHz: a burst of 150 Hz of 0,09 V at most on its second channel.
+    std::vector<double> voice(8000), line(8000, 0.0);
+    for (std::size_t i = 0; i < voice.size(); ++i)
+    {
+        const double t = static_cast<double>(i) / 16000.0;
+        voice[i] = 0.09 * std::sin(2.0 * std::numbers::pi * 150.0 * t) * std::sin(std::numbers::pi * t / 0.5);
+    }
+    const qacq::model::SignalPtr rec = record(7, "Voix", 16000.0, {line, voice}, {"Ligne", "Micro"});
+
+    // On a blank page, its second channel modulates a carrier in amplitude: the page is that channel alone, at the
+    // rate and for the duration of the record, the message scaled to a peak of 1, the index 0,8.
+    GeneratorRecipe r = blankGeneratorRecipe();
+    SignalUse used = useSignalInRecipe(r, *rec, 1, "am");
+    REQUIRE(used.ok());
+    CHECK(used.alone);
+    CHECK(used.timed);
+    CHECK(used.channel == 0);
+    CHECK(r.sampleRateHz == 16000.0);
+    CHECK(r.durationSeconds == 0.5);
+    CHECK(r.name == "Voix modulé");
+    REQUIRE(r.channels.size() == 1);
+    CHECK(r.channels[0].name == "Micro modulé");
+    REQUIRE(r.channels[0].components.size() == 2);
+    CHECK(r.channels[0].components[0].waveform == Waveform::Recorded);
+    CHECK(r.channels[0].components[0].sourceChannel == 1);
+    CHECK(r.channels[0].components[0].sourceNormalize);
+    CHECK(r.channels[0].components[0].amplitude == 1.0);
+    {
+        const GeneratorComponent &carrier = r.channels[0].components[1];
+        CHECK(carrier.waveform == Waveform::Modulation);
+        CHECK(carrier.modulation == CarrierModulation::Am);
+        CHECK(carrier.amIndex == 0.8);
+        CHECK(carrier.message == "x");
+        CHECK(carrier.frequencyHz == 2000.0); // 10 kHz at most fs/4, rounded down to 1, 2 or 5
+    }
+    CHECK(used.text == "Voie 1 « Micro modulé » : « Voix » (voie Micro), ramené à 1 V crête, est le message d'une porteuse de 2 kHz "
+                       "modulée en amplitude (indice 0,8 : aux crêtes du message, l'enveloppe va de 200 mV à 1,8 V), à la fréquence "
+                       "d'échantillonnage et pour la durée de l'enregistrement (16 kHz, 500 ms). Sa carte « Porteuse modulée » règle la "
+                       "modulation (AM, FM, PM, DBL, BLU), la porteuse et l'indice ; « Ajouter » met le signal dans la session.");
+    // Its envelope follows the message: 1 V where the burst starts, 1,8 V at its peak.
+    g = generateSignal(r, {}, std::vector<qacq::model::SignalPtr>{rec});
+    REQUIRE(g.ok());
+    REQUIRE(g.signal.frameCount() == 8000);
+    double peak = 0.0, start = 0.0;
+    for (std::size_t i = 0; i < 8000; ++i) peak = std::max(peak, std::abs(g.signal.channel(0)[i]));
+    for (std::size_t i = 0; i < 32; ++i) start = std::max(start, std::abs(g.signal.channel(0)[i]));
+    CHECK(std::abs(peak - 1.8) < 0.01);
+    CHECK(std::abs(start - 1.0) < 0.02);
+
+    // The page no longer blank: its first channel comes after (named after its channel), the timing stays.
+    used = useSignalInRecipe(r, *rec, 0, "wave");
+    REQUIRE(used.ok());
+    CHECK(!used.alone);
+    CHECK(!used.timed);
+    CHECK(used.channel == 1);
+    REQUIRE(r.channels.size() == 2);
+    CHECK(r.channels[1].name == "Ligne");
+    REQUIRE(r.channels[1].components.size() == 1);
+    CHECK(!r.channels[1].components[0].sourceNormalize);
+    CHECK(r.sampleRateHz == 16000.0);
+    CHECK(used.text == "Voie 2 « Ligne » : le signal « Voix » (voie Ligne). Ajoutez-lui d'autres formes d'onde (un bruit…), ou lisez-la "
+                       "dans une opération (v2).");
+    // A blank channel takes the next one in its place; a blank channel that another reads does not.
+    r.channels.push_back(blankGeneratorChannel(2));
+    used = useSignalInRecipe(r, *rec, 1, "fm");
+    REQUIRE(used.ok());
+    CHECK(used.channel == 2);
+    REQUIRE(r.channels.size() == 3);
+    CHECK(r.channels[2].components[1].modulation == CarrierModulation::Fm);
+    CHECK(contains(used.text, "est le message d'une porteuse de 2 kHz modulée en fréquence (Δf = 400 Hz). Sa carte"));
+    r.channels.push_back(blankGeneratorChannel(3));
+    r.channels[2].components[1].message = "x + 0*v4";
+    used = useSignalInRecipe(r, *rec, 1, "pm");
+    REQUIRE(used.ok());
+    CHECK(used.channel == 4);
+    CHECK(r.channels.size() == 5);
+    CHECK(contains(used.text, "modulée en phase (Δφ = 90°)"));
+    // Wrong channel, unknown use, no room: said, nothing changed.
+    const std::string before = toJson(r).dump();
+    used = useSignalInRecipe(r, *rec, 2, "am");
+    CHECK(used.error == "Ce signal n'a pas cette voie.");
+    used = useSignalInRecipe(r, *rec, 0, "qam");
+    CHECK(used.error == "Usage inconnu d'un signal : « qam ».");
+    while (r.channels.size() < kMaximumGeneratorChannels) r.channels.push_back(sineGeneratorChannel(r.channels.size()));
+    r.channels[3] = sineGeneratorChannel(3);
+    const std::string full = toJson(r).dump();
+    used = useSignalInRecipe(r, *rec, 0, "wave");
+    CHECK(used.error == "Au plus 16 voies : retirez-en une du Générateur.");
+    CHECK(toJson(r).dump() == full);
+    CHECK(before != full);
+    // A blank page named by hand keeps its name.
+    GeneratorRecipe named = blankGeneratorRecipe();
+    named.name = "Essai AM";
+    REQUIRE(useSignalInRecipe(named, *rec, 1, "dsb").ok());
+    CHECK(named.name == "Essai AM");
+    CHECK(named.channels[0].components[1].modulation == CarrierModulation::Dsb);
+
+    // The message of a carrier chosen among the signals of the session: placed just above it, read as x.
+    GeneratorRecipe m = blankGeneratorRecipe();
+    m.sampleRateHz = 16000.0;
+    m.durationSeconds = 0.5;
+    m.channels[0].components = {defaultGeneratorComponent(Waveform::Modulation, 16000.0, 0.5)};
+    std::string why = "?";
+    CHECK(useSignalAsMessage(m, 0, 0, *rec, 1, &why));
+    CHECK(why.empty());
+    REQUIRE(m.channels[0].components.size() == 2);
+    CHECK(m.channels[0].components[0].waveform == Waveform::Recorded);
+    CHECK(m.channels[0].components[0].sourceChannel == 1);
+    CHECK(m.channels[0].components[0].sourceNormalize);
+    CHECK(m.channels[0].components[1].message == "x");
+    CHECK(m.channels[0].components[1].variables.empty()); // its fm, which x does not need
+    // Another one: in the place of the first, not a third component.
+    CHECK(useSignalAsMessage(m, 0, 1, *rec, 0, &why));
+    REQUIRE(m.channels[0].components.size() == 2);
+    CHECK(m.channels[0].components[0].sourceChannel == 0);
+    CHECK(m.channels[0].components[0].sourceChannelName == "Ligne");
+    // Not a carrier, no such channel, no such component: said, nothing changed.
+    CHECK(!useSignalAsMessage(m, 0, 0, *rec, 0, &why));
+    CHECK(why == "Seule une porteuse modulée a un message.");
+    CHECK(!useSignalAsMessage(m, 0, 1, *rec, 2, &why));
+    CHECK(why == "Ce signal n'a pas cette voie.");
+    CHECK(!useSignalAsMessage(m, 3, 0, *rec, 0, &why));
+    CHECK(why == "Cette forme d'onde n'existe plus.");
+    CHECK(m.channels[0].components.size() == 2);
+
+    // A page that keeps its timing, not that of the record: said, with what sets it.
+    GeneratorRecipe longer = sineGeneratorRecipe(); // 48 kHz, 1 s
+    used = useSignalInRecipe(longer, *rec, 1, "am");
+    REQUIRE(used.ok());
+    CHECK(!used.alone);
+    CHECK(!used.timed);
+    CHECK(used.channel == 1);
+    CHECK(longer.sampleRateHz == 48000.0);
+    CHECK(contains(used.text, "« Ajouter » met le signal dans la session. Le signal dure 500 ms, la page 1 s : « Sa fréquence et sa "
+                              "durée », dans la carte du signal enregistré, règle la page sur lui."));
+    GeneratorRecipe faster = sineGeneratorRecipe();
+    faster.durationSeconds = 0.5;
+    used = useSignalInRecipe(faster, *rec, 0, "wave");
+    REQUIRE(used.ok());
+    CHECK(used.text == "Voie 2 « Ligne » : le signal « Voix » (voie Ligne). Ajoutez-lui d'autres formes d'onde (un bruit…), ou lisez-la "
+                       "dans une opération (v2). Le signal est à 16 kHz, la page à 48 kHz : « Sa fréquence et sa durée », dans la carte "
+                       "du signal enregistré, règle la page sur lui.");
+
+    // Peaks far above its level (a crest factor of 5, as a voice or music has): in amplitude, the envelope moves little
+    // but at them, which is said, with how to see it; not in frequency.
+    std::vector<double> clicks(1000, 0.0);
+    for (std::size_t i = 0; i < clicks.size(); i += 25) clicks[i] = 1.0;
+    const qacq::model::SignalPtr loud = record(8, "Clics", 8000.0, {clicks}, {"G"});
+    GeneratorRecipe clicked = blankGeneratorRecipe();
+    used = useSignalInRecipe(clicked, *loud, 0, "am");
+    REQUIRE(used.ok());
+    CHECK(used.timed);
+    CHECK(contains(used.text, "(8 kHz, 125 ms). Sa carte"));
+    CHECK(contains(used.text, "« Ajouter » met le signal dans la session. Son facteur de crête (crête ÷ valeur efficace) est de 5 : "
+                              "l'enveloppe ne va de 200 mV à 1,8 V qu'à ses crêtes, et ne s'écarte de 1 V que de 16 % en valeur "
+                              "efficace. Pour mieux voir la modulation : un passage fort (zoom), les bandes latérales autour de 2 kHz "
+                              "dans le spectre, ou un indice plus grand (jusqu'à 1)."));
+    GeneratorRecipe swept = blankGeneratorRecipe();
+    used = useSignalInRecipe(swept, *loud, 0, "fm");
+    REQUIRE(used.ok());
+    CHECK(!contains(used.text, "facteur de crête"));
+}
+
+TEST_CASE("generator: a channel of the page as the message of a carrier, read as it is", "[analysis]")
+{
+    // A sine of 1 kHz, 1 V, at 48 kHz: it modulates a carrier in amplitude, in a channel of its own that reads it (v1).
+    GeneratorRecipe r = sineGeneratorRecipe();
+    SignalUse used = modulateChannelInRecipe(r, 0, "am");
+    REQUIRE(used.ok());
+    CHECK(!used.alone);
+    CHECK(!used.timed);
+    CHECK(used.channel == 1);
+    REQUIRE(r.channels.size() == 2);
+    CHECK(r.channels[0].components.size() == 1); // the message stays as it was, in the signal
+    CHECK(r.channels[0].output);
+    CHECK(r.channels[1].name == "Voie 1 modulée");
+    CHECK(r.channels[1].unit == "V");
+    REQUIRE(r.channels[1].components.size() == 1);
+    {
+        const GeneratorComponent &carrier = r.channels[1].components[0];
+        CHECK(carrier.waveform == Waveform::Modulation);
+        CHECK(carrier.modulation == CarrierModulation::Am);
+        CHECK(carrier.message == "v1");
+        CHECK(carrier.variables.empty());
+        CHECK(carrier.amIndex == 0.8);
+        CHECK(carrier.frequencyHz == 10000.0);
+    }
+    CHECK(r.sampleRateHz == 48000.0);
+    CHECK(r.durationSeconds == 1.0);
+    CHECK(used.text == "Voie 2 « Voie 1 modulée » : la voie 1 « Voie 1 », lue telle quelle (v1), est le message d'une porteuse de 10 kHz "
+                       "modulée en amplitude (indice 0,8 : l'enveloppe vaut 1 V × (1 + 0,8 × v1), sans surmodulation tant que la crête de "
+                       "v1 reste sous 1,25). Sa carte « Porteuse modulée » règle la modulation (AM, FM, PM, DBL, BLU), la porteuse et "
+                       "l'indice ; décochez « Dans le signal » de la voie 1 pour ne garder que la porteuse modulée.");
+    // Its envelope: 1 V × (1 ± 0,8), the message of 1 V crest as it is; no warning.
+    GeneratorResult g = generateSignal(r);
+    REQUIRE(g.ok());
+    REQUIRE(g.signal.channelCount() == 2);
+    double peak = 0.0;
+    for (const double v : g.signal.channel(1)) peak = std::max(peak, std::abs(v));
+    CHECK(peak <= 1.8 + 1e-9);
+    CHECK(peak > 1.78);
+    CHECK(g.warnings.empty());
+    // Read by the carrier: the message cannot be removed first.
+    GeneratorRecipe kept = r;
+    std::string why;
+    CHECK(!removeGeneratorChannel(kept, 0, &why));
+    CHECK(why == "La voie 1 est lue par la voie 2 (v1 dans son opération ou son message) : changez d'abord sa formule.");
+
+    // Again, in frequency: after the others; in phase: in the place of a blank channel nothing reads.
+    used = modulateChannelInRecipe(r, 0, "fm");
+    REQUIRE(used.ok());
+    CHECK(used.channel == 2);
+    CHECK(r.channels[2].components[0].modulation == CarrierModulation::Fm);
+    CHECK(contains(used.text, "modulée en fréquence (Δf = 2 kHz pour v1 = 1). Sa carte"));
+    r.channels.push_back(blankGeneratorChannel(3));
+    used = modulateChannelInRecipe(r, 0, "pm");
+    REQUIRE(used.ok());
+    CHECK(used.channel == 3);
+    CHECK(r.channels.size() == 4);
+    CHECK(contains(used.text, "modulée en phase (Δφ = 90° pour v1 = 1)"));
+    // A channel named otherwise: "… modulé".
+    GeneratorRecipe named = sineGeneratorRecipe();
+    named.channels[0].name = "A";
+    REQUIRE(modulateChannelInRecipe(named, 0, "dsb").ok());
+    CHECK(named.channels[1].name == "A modulé");
+    CHECK(named.channels[1].components[0].modulation == CarrierModulation::Dsb);
+
+    // No such channel, an empty one, an unknown modulation, no room: said, nothing changed.
+    r.channels.push_back(blankGeneratorChannel(4));
+    const std::string before = toJson(r).dump();
+    used = modulateChannelInRecipe(r, 9, "am");
+    CHECK(used.error == "Cette voie n'existe plus.");
+    used = modulateChannelInRecipe(r, 4, "am");
+    CHECK(used.error == "La voie 5 « Voie 5 » est vide : rien pour moduler une porteuse.");
+    used = modulateChannelInRecipe(r, 0, "qam");
+    CHECK(used.error == "Modulation inconnue : « qam ».");
+    CHECK(toJson(r).dump() == before);
+    r.channels[4] = sineGeneratorChannel(4);
+    while (r.channels.size() < kMaximumGeneratorChannels) r.channels.push_back(sineGeneratorChannel(r.channels.size()));
+    const std::string full = toJson(r).dump();
+    used = modulateChannelInRecipe(r, 0, "am");
+    CHECK(used.error == "Au plus 16 voies : retirez-en une du Générateur.");
+    CHECK(toJson(r).dump() == full);
+}
+
+TEST_CASE("generator: channels left out of the signal are made, read, and not kept", "[analysis]")
+{
+    // A carrier and a message as channels of computation, their product as the signal.
+    GeneratorRecipe r;
+    r.sampleRateHz = 48000.0;
+    r.durationSeconds = 0.01;
+    GeneratorChannel carrier, message, product;
+    carrier.name = "cos";
+    carrier.output = false;
+    carrier.components = {make(Waveform::Sine, 1.0, 6000.0)};
+    carrier.components[0].phaseDegrees = 90.0;
+    message.name = "I";
+    message.output = false;
+    message.components = {make(Waveform::Sine, 0.5, 500.0)};
+    product.name = "s";
+    product.unit = "mV";
+    GeneratorComponent times = defaultGeneratorComponent(Waveform::Formula);
+    times.expression = "v1*v2";
+    product.components = {times};
+    r.channels = {carrier, message, product};
+    GeneratorResult g = generateSignal(r);
+    REQUIRE(g.ok());
+    REQUIRE(g.signal.channelCount() == 1);
+    REQUIRE(g.signal.data->channelCount() == 1);
+    CHECK(g.signal.channels[0].name == "s");
+    CHECK(g.signal.channels[0].unit == "mV");
+    CHECK(qacq::model::validateSignal(g.signal).empty());
+    for (std::size_t i = 0; i < 480; ++i)
+    {
+        const double t = static_cast<double>(i) / 48000.0;
+        CHECK_NEAR(g.signal.data->channels[0][i], std::cos(2.0 * std::numbers::pi * 6000.0 * t) * 0.5 * std::sin(2.0 * std::numbers::pi * 500.0 * t),
+                   1e-12, 1e-12);
+    }
+    CHECK(contains(g.signal.notes, "cos (voie de calcul, hors du signal) : Sinus 6 kHz, 1 V crête, phase 90°."));
+    CHECK(contains(g.signal.notes, "\ns : Opération entre voies : v1*v2."));
+    // The whole recipe is in its provenance: taken up again, the channels of computation come back.
+    const GeneratorRecipe back = generatorRecipeFromJson(g.signal.provenance["generator"]);
+    REQUIRE(back.channels.size() == 3);
+    CHECK(!back.channels[0].output);
+    CHECK(!back.channels[1].output);
+    CHECK(back.channels[2].output);
+    CHECK((toJson(back) == toJson(r)));
+    CHECK(toJson(r.channels[0])["output"].toBool(true) == false);
+    // A recipe written before channels could be left out: all of them are in the signal.
+    Json old = toJson(r.channels[0]);
+    old.erase("output");
+    CHECK(generatorChannelFromJson(old, 0).output);
+    // Two kept: in their order.
+    r.channels[1].output = true;
+    g = generateSignal(r);
+    REQUIRE(g.ok());
+    REQUIRE(g.signal.channelCount() == 2);
+    CHECK(g.signal.channels[0].name == "I");
+    CHECK(g.signal.channels[1].name == "s");
+    // None kept: said before anything is made.
+    for (GeneratorChannel &c : r.channels) c.output = false;
+    g = generateSignal(r);
+    CHECK(g.error == "Aucune voie n'est gardée dans le signal : cochez « Dans le signal » pour l'une d'elles au moins.");
+}
+
+TEST_CASE("generator: a carrier in double sideband, and in single sideband", "[analysis]")
+{
+    // A message sin(2π 500 t) of 0,02 s (ten periods) on a carrier of 2 V, 6 kHz and 30°.
+    GeneratorComponent carrier = defaultGeneratorComponent(Waveform::Modulation, 48000.0, 0.02);
+    carrier.amplitude = 2.0;
+    carrier.frequencyHz = 6000.0;
+    carrier.phaseDegrees = 30.0;
+    carrier.message = "sin(2*pi*500*t)";
+    carrier.variables.clear();
+    const double phi = 30.0 * std::numbers::pi / 180.0;
+    const auto t = [](std::size_t i) { return static_cast<double>(i) / 48000.0; };
+    // Double sideband: the message times the carrier, without the carrier itself.
+    carrier.modulation = CarrierModulation::Dsb;
+    std::vector<std::string> warnings;
+    std::vector<double> y = alone(carrier, 48000.0, 0.02, &warnings);
+    REQUIRE(y.size() == 960);
+    CHECK(warnings.empty());
+    for (std::size_t i = 0; i < 960; ++i)
+        CHECK_NEAR(y[i], 2.0 * std::sin(2.0 * std::numbers::pi * 500.0 * t(i)) * std::cos(2.0 * std::numbers::pi * 6000.0 * t(i) + phi), 1e-12, 1e-12);
+    CHECK(componentText(carrier, "V") ==
+          "Porteuse 6 kHz, 2 V crête, phase 30°, modulée en amplitude sans porteuse (double bande latérale) par sin(2*pi*500*t)");
+    // Upper sideband: one line at fc + fm, of the amplitude of the carrier; lower: one at fc − fm.
+    carrier.modulation = CarrierModulation::Usb;
+    y = alone(carrier, 48000.0, 0.02, &warnings);
+    REQUIRE(y.size() == 960);
+    CHECK(warnings.empty());
+    for (std::size_t i = 0; i < 960; ++i) CHECK_NEAR(y[i], 2.0 * std::sin(2.0 * std::numbers::pi * 6500.0 * t(i) + phi), 1e-10, 1e-10);
+    CHECK(contains(componentText(carrier, "V"), "modulée en bande latérale unique (supérieure) par"));
+    carrier.modulation = CarrierModulation::Lsb;
+    y = alone(carrier, 48000.0, 0.02, &warnings);
+    REQUIRE(y.size() == 960);
+    for (std::size_t i = 0; i < 960; ++i) CHECK_NEAR(y[i], -2.0 * std::sin(2.0 * std::numbers::pi * 5500.0 * t(i) + phi), 1e-10, 1e-10);
+    CHECK(contains(componentText(carrier, "V"), "modulée en bande latérale unique (inférieure) par"));
+    // An odd number of samples (another DFT), a message of two tones: each on its side only.
+    carrier.message = "sin(2*pi*480*t) + 0,5*cos(2*pi*960*t)";
+    carrier.modulation = CarrierModulation::Usb;
+    y = alone(carrier, 48000.0, 0.03125 - 1.0 / 48000.0); // 1 499 samples, not a whole number of periods
+    REQUIRE(y.size() == 1499);
+    double gap = 0.0;
+    for (std::size_t i = 300; i < 1200; ++i)
+        gap = std::max(gap, std::abs(y[i] - 2.0 * (std::sin(2.0 * std::numbers::pi * 6480.0 * t(i) + phi) +
+                                                    0.5 * std::cos(2.0 * std::numbers::pi * 6960.0 * t(i) + phi))));
+    CHECK(gap < 0.05); // the ends ring: the message does not end as it starts
+    // The keys of the recipe; a signal too long for a single sideband says so.
+    for (CarrierModulation kind : {CarrierModulation::Dsb, CarrierModulation::Usb, CarrierModulation::Lsb})
+    {
+        carrier.modulation = kind;
+        const Json j = toJson(carrier);
+        CHECK(j["modulation"].toString() == std::string(carrierModulationKey(kind)));
+        CHECK(generatorComponentFromJson(j).modulation == kind);
+    }
+    CHECK(carrierModulationKey(CarrierModulation::Dsb) == "dsb");
+    CHECK(carrierModulationKey(CarrierModulation::Usb) == "usb");
+    CHECK(carrierModulationKey(CarrierModulation::Lsb) == "lsb");
+    Json unknown = toJson(carrier);
+    unknown["modulation"] = "qam";
+    CHECK(generatorComponentFromJson(unknown).modulation == CarrierModulation::Am);
+    std::string error;
+    carrier.modulation = CarrierModulation::Lsb;
+    alone(carrier, 48000.0, 30.0, nullptr, &error);
+    CHECK(contains(error, "une bande latérale unique se calcule sur 1 048 576 échantillons au plus"));
+    carrier.modulation = CarrierModulation::Dsb;
+    CHECK(alone(carrier, 48000.0, 30.0).size() == 1440000);
+}
+
+
+namespace
+{
+// The samples as levels: '1' at `high`, '0' at `low`, '?' for anything else.
+std::string levelsOf(std::span<const double> samples, double high = 1.0, double low = 0.0)
+{
+    std::string s;
+    for (const double v : samples) s += v == high ? '1' : v == low ? '0' : '?';
+    return s;
+}
+
+std::string times(std::size_t count, char c)
+{
+    return std::string(count, c);
+}
+
+// Each character of `ticks`, `count` times.
+std::string stretched(const std::string &ticks, std::size_t count)
+{
+    std::string s;
+    for (const char c : ticks) s += times(count, c);
+    return s;
+}
+
+GeneratorComponent uartFrame(const std::string &data, double rate, double start)
+{
+    GeneratorComponent c = defaultGeneratorComponent(Waveform::Frame);
+    c.frame = withFrameProtocol(FrameSpec{}, FrameProtocol::Uart);
+    c.frame.data = data;
+    c.frequencyHz = rate;
+    c.eventSeconds = start;
+    return c;
+}
+} // namespace
+
+TEST_CASE("generator: a digital frame, each sample the level of its tick", "[analysis]")
+{
+    Waveform w;
+    CHECK(waveformFromKey("frame", w));
+    CHECK(w == Waveform::Frame);
+    CHECK(waveformKey(Waveform::Frame) == "frame");
+    CHECK(generatorWaveformName(Waveform::Frame) == "Trame numérique");
+    qacq::dsp::Waveform none;
+    CHECK(!dspWaveform(Waveform::Frame, none));
+
+    // A new one: "Bonjour" as bits, at a rate it fits the signal at, after a tenth of the duration.
+    GeneratorComponent d = defaultGeneratorComponent(Waveform::Frame);
+    CHECK((d.frame == FrameSpec{}));
+    CHECK(d.frequencyHz == 100.0);
+    CHECK(d.eventSeconds == 0.1);
+    CHECK(d.amplitude == 1.0);
+    CHECK(d.frameLow == 0.0);
+    CHECK(!d.frameRepeat);
+    CHECK(d.frameGroup == 0);
+    CHECK(defaultGeneratorComponent(Waveform::Frame, 48000.0, 0.02).frequencyHz == 5000.0);
+    CHECK(defaultGeneratorComponent(Waveform::Frame, 8000.0, 0.01).frequencyHz == 1000.0); // eight samples a bit at least
+    std::vector<std::string> warnings;
+    std::string error;
+    std::vector<double> x = alone(d, 48000.0, 1.0, &warnings, &error);
+    CHECK(error.empty());
+    CHECK(warnings.empty());
+    REQUIRE(x.size() == 48000);
+    // B o n j o u r, the most significant bit of each first, 480 samples a bit from 0,1 s; low before and after.
+    CHECK(levelsOf(x) == times(4800, '0') +
+                             stretched("01000010" "01101111" "01101110" "01101010" "01101111" "01110101" "01110010", 480) +
+                             times(48000 - 4800 - 56 * 480, '0'));
+    CHECK(componentText(d, "V") == "Bits NRZ à 100 bit/s (7 octets : 42 6F 6E 6A 6F 75 72), de 0 V à 1 V, à partir de 100 ms");
+    // Taken from a sine: its amplitude is the high level.
+    const GeneratorComponent from = withWaveform(make(Waveform::Sine, 3.3, 2000.0), Waveform::Frame, 48000.0, 1.0);
+    CHECK(from.waveform == Waveform::Frame);
+    CHECK(from.amplitude == 3.3);
+    CHECK(from.frequencyHz == 100.0); // a bit rate, not the frequency of the sine
+
+    // "B" in UART 8N1 at 9 600 bit/s, ten samples a bit, from 1 ms, between 0 and 3,3 V: the line at rest (high),
+    // the start bit, 0x42 from its least significant bit, the stop bit, the rest.
+    GeneratorComponent c = uartFrame("B", 9600.0, 1e-3);
+    c.amplitude = 3.3;
+    x = alone(c, 96000.0, 3e-3, &warnings, &error);
+    CHECK(error.empty());
+    CHECK(warnings.empty());
+    REQUIRE(x.size() == 288);
+    CHECK(levelsOf(x, 3.3) == times(96, '1') + stretched("0" "01000010" "1", 10) + times(288 - 96 - 100, '1'));
+    CHECK(componentText(c, "V") == "Trame UART 8N1 à 9,6 kbit/s (1 octet : 42), de 0 V à 3,3 V, à partir de 1 ms");
+    const FrameTiming timing = frameTiming(c, 96000.0);
+    REQUIRE(timing.ok());
+    CHECK(timing.line == 0);
+    CHECK(timing.frame.bitCount() == 10.0);
+    CHECK_REL(timing.bitSeconds, 1.0 / 9600.0, 1e-15);
+    CHECK_REL(timing.durationSeconds, 10.0 / 9600.0, 1e-15);
+    CHECK_REL(timing.endSeconds, 1e-3 + 10.0 / 9600.0, 1e-15);
+    CHECK(timing.samplesPerBit == 10.0);
+    CHECK(timing.samplesPerTick == 5.0);
+    // Its two levels: −1 and +1.
+    c.amplitude = 1.0;
+    c.frameLow = -1.0;
+    x = alone(c, 96000.0, 3e-3);
+    CHECK(levelsOf(x, 1.0, -1.0) == times(96, '1') + stretched("0010000101", 10) + times(92, '1'));
+    CHECK(componentText(c, "V") == "Trame UART 8N1 à 9,6 kbit/s (1 octet : 42), de −1 V à 1 V, à partir de 1 ms");
+    // A rate that is not a whole number of samples a bit: each sample still reads the bit it is in.
+    c = uartFrame("B", 9600.0, 0.0);
+    x = alone(c, 48000.0, 2e-3, &warnings);
+    CHECK(warnings.empty());
+    REQUIRE(x.size() == 96);
+    for (std::size_t i = 0; i < 96; ++i)
+    {
+        const auto bit = static_cast<std::size_t>(static_cast<double>(i) / 5.0 + 1e-9);
+        const char expected = bit < 10 ? "0010000101"[bit] : '1';
+        CHECK((x[i] == 1.0 ? '1' : '0') == expected);
+    }
+    // Started before the signal: its beginning is not there.
+    c.eventSeconds = -5.0 / 9600.0;
+    x = alone(c, 96000.0, 1e-3);
+    CHECK(levelsOf(x) == stretched("00101", 10) + times(46, '1'));
+
+    // A line of a bus: SCL of an I2C write (four ticks a bit), SDA by default.
+    GeneratorComponent bus = defaultGeneratorComponent(Waveform::Frame);
+    bus.frame = withFrameProtocol(FrameSpec{}, FrameProtocol::I2c);
+    bus.frame.data = "0xA5";
+    bus.frequencyHz = 1000.0;
+    bus.eventSeconds = 0.0;
+    x = alone(bus, 4000.0, 0.02);
+    REQUIRE(x.size() == 80);
+    const BuiltFrame built = buildFrame(bus.frame);
+    REQUIRE(built.tickCount == 80);
+    for (std::size_t i = 0; i < 80; ++i) CHECK(x[i] == static_cast<double>(built.levels[0][i]));
+    bus.frameLine = "scl";
+    x = alone(bus, 4000.0, 0.02);
+    for (std::size_t i = 0; i < 80; ++i) CHECK(x[i] == static_cast<double>(built.levels[1][i]));
+    CHECK(componentText(bus, "V") ==
+          "Trame I2C, écriture à 0x48, à 1 kbit/s, ligne SCL (1 octet écrit : A5), de 0 V à 1 V");
+    bus.frameLine = "sda";
+    CHECK(contains(componentText(bus, "V"), ", ligne SDA ("));
+    // The clock of bits sent as they are is said; their data line is not.
+    d.frameLine = "clock";
+    CHECK(contains(componentText(d, "V"), "Bits NRZ à 100 bit/s, ligne Horloge ("));
+
+    // Again and again: "10" without rest is a square at half the bit rate; with a rest, the line stays low between.
+    GeneratorComponent square = defaultGeneratorComponent(Waveform::Frame);
+    square.frame.data = "10";
+    square.frequencyHz = 1000.0;
+    square.eventSeconds = 0.0;
+    square.frameRepeat = true;
+    square.frameGapBits = 0.0;
+    x = alone(square, 8000.0, 0.008, &warnings);
+    CHECK(warnings.empty());
+    CHECK(levelsOf(x) == stretched("10101010", 8));
+    CHECK(componentText(square, "V") == "Bits NRZ à 1 kbit/s (2 bits), de 0 V à 1 V, répétée");
+    square.frameGapBits = 1.5;
+    x = alone(square, 8000.0, 0.008);
+    CHECK(levelsOf(x) == times(8, '1') + times(20, '0') + times(8, '1') + times(20, '0') + times(8, '1')); // 3,5 bits a turn
+    square.frameRepeat = false;
+    CHECK(levelsOf(alone(square, 8000.0, 0.008)) == stretched("10000000", 8));
+}
+
+TEST_CASE("generator: a digital frame says what is wrong, what is missed and what does not fit", "[analysis]")
+{
+    std::vector<std::string> warnings;
+    std::string error;
+    // Too few samples for its levels.
+    GeneratorComponent c = uartFrame("Bonjour", 115200.0, 0.0);
+    alone(c, 48000.0, 0.01, &warnings, &error);
+    CHECK(error.empty());
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0] == "Voie 1, composante 1 (Trame numérique) — 0,4167 échantillon par bit à 115,2 kbit/s : il en faut au moins 2 "
+                         "pour que tous ses niveaux y soient ; montez la fréquence d'échantillonnage ou baissez le débit (« Cadrer la "
+                         "trame » le fait).");
+    // Two samples a bit are enough for a UART (two ticks a bit); an I2C bus needs four.
+    c.frequencyHz = 24000.0;
+    alone(c, 48000.0, 0.01, &warnings);
+    CHECK(warnings.empty());
+    c.frame = withFrameProtocol(c.frame, FrameProtocol::I2c);
+    alone(c, 48000.0, 0.01, &warnings);
+    REQUIRE(warnings.size() == 1);
+    CHECK(contains(warnings[0], "2 échantillons par bit à 24 kbit/s : il en faut au moins 4"));
+    // It ends after the signal; it starts after it.
+    c = uartFrame("Bonjour", 9600.0, 1e-3);
+    alone(c, 96000.0, 5e-3, &warnings);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0] == "Voie 1, composante 1 (Trame numérique) — elle dure 7,292 ms et finit à 8,292 ms, après la fin du signal (5 ms) : "
+                         "sa fin manque (« Cadrer la trame » ajuste la durée).");
+    c.eventSeconds = 2.0;
+    const std::vector<double> x = alone(c, 96000.0, 5e-3, &warnings);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0] == "Voie 1, composante 1 (Trame numérique) — elle commence à 2 s, après la fin du signal (5 ms) : rien n'en est généré.");
+    CHECK(std::all_of(x.begin(), x.end(), [](double v) { return v == 1.0; })); // the line at rest
+    // Repeated, it has no end to miss.
+    c.eventSeconds = 0.0;
+    c.frameRepeat = true;
+    alone(c, 96000.0, 5e-3, &warnings);
+    CHECK(warnings.empty());
+    // What the frame itself warns of.
+    c = uartFrame("0x80", 9600.0, 0.0);
+    c.frame.dataBits = 7;
+    alone(c, 96000.0, 5e-3, &warnings);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0] == "Voie 1, composante 1 (Trame numérique) — 0x80 ne tient pas sur 7 bits : les bits de poids fort ne sont pas envoyés.");
+    // What is wrong in its data or its rate stops the generation.
+    c = uartFrame("0x4G", 9600.0, 0.0);
+    alone(c, 96000.0, 5e-3, &warnings, &error);
+    CHECK(error == "Voie 1, composante 1 (Trame numérique) — Données : « G » n'est pas un chiffre hexadécimal (0 à 9, A à F).");
+    CHECK(componentText(c, "V") == "Trame UART 8N1 à 9,6 kbit/s (à corriger), de 0 V à 1 V");
+    CHECK(!frameTiming(c, 96000.0).ok());
+    c = uartFrame("B", 0.0, 0.0);
+    alone(c, 96000.0, 5e-3, &warnings, &error);
+    CHECK(error == "Voie 1, composante 1 (Trame numérique) — Le débit doit être positif.");
+    CHECK(frameTiming(c, 96000.0).frame.error == "Le débit doit être positif.");
+    // Counted out, it stops nothing.
+    c.enabled = false;
+    alone(c, 96000.0, 5e-3, &warnings, &error);
+    CHECK(error.empty());
+}
+
+TEST_CASE("generator: the lines of a frame as channels of a group, the signal framed on it", "[analysis]")
+{
+    // An I2C frame in a new recipe: its other line becomes a channel, both named after their line.
+    GeneratorRecipe r = sineGeneratorRecipe();
+    r.channels[0].unit = "mV";
+    r.channels[0].components[0] = defaultGeneratorComponent(Waveform::Frame);
+    r.channels[0].components[0].frame = withFrameProtocol(FrameSpec{}, FrameProtocol::I2c);
+    r.channels[0].components[0].frame.data = "0x01 0xA5";
+    REQUIRE(frameMembers(r, 0, 0).size() == 1);
+    CHECK(frameMembers(r, 0, 0)[0].line == 0);
+    std::size_t added = 99;
+    std::string error;
+    REQUIRE(addFrameLines(r, 0, 0, &added, &error));
+    CHECK(added == 1);
+    CHECK(error.empty());
+    REQUIRE(r.channels.size() == 2);
+    CHECK(r.channels[0].name == "SDA");
+    CHECK(r.channels[1].name == "SCL");
+    CHECK(r.channels[1].unit == "mV");
+    REQUIRE(r.channels[1].components.size() == 1);
+    const GeneratorComponent &sda = r.channels[0].components[0];
+    const GeneratorComponent &scl = r.channels[1].components[0];
+    CHECK(sda.frameGroup == 1);
+    CHECK(scl.frameGroup == 1);
+    CHECK(scl.frameLine == "scl");
+    CHECK((scl.frame == sda.frame));
+    std::vector<FrameMember> members = frameMembers(r, 1, 0);
+    REQUIRE(members.size() == 2);
+    CHECK(members[0].channel == 0);
+    CHECK(members[0].line == 0);
+    CHECK(members[1].channel == 1);
+    CHECK(members[1].line == 1);
+    // Nothing more to add; a line alone (a UART) needs none, and no group.
+    REQUIRE(addFrameLines(r, 1, 0, &added));
+    CHECK(added == 0);
+    CHECK(r.channels.size() == 2);
+    GeneratorChannel serial = sineGeneratorChannel(2);
+    serial.name = "Console";
+    serial.components[0] = uartFrame("ok", 9600.0, 0.0);
+    r.channels.push_back(serial);
+    REQUIRE(addFrameLines(r, 2, 0, &added));
+    CHECK(added == 0);
+    CHECK(r.channels[2].components[0].frameGroup == 0);
+    CHECK(frameMembers(r, 2, 0).size() == 1);
+    CHECK(frameMembers(r, 0, 1).empty()); // no such component
+    CHECK(!addFrameLines(r, 7, 0));
+    // A channel named by hand keeps its name; its frame takes the next group.
+    r.channels[2].components[0].frame = withFrameProtocol(r.channels[2].components[0].frame, FrameProtocol::Spi);
+    REQUIRE(addFrameLines(r, 2, 0, &added));
+    CHECK(added == 3);
+    REQUIRE(r.channels.size() == 6);
+    CHECK(r.channels[2].name == "Console");
+    CHECK(r.channels[3].name == "MISO");
+    CHECK(r.channels[4].name == "SCLK");
+    CHECK(r.channels[5].name == "CS");
+    CHECK(r.channels[2].components[0].frameGroup == 2);
+    CHECK(r.channels[5].components[0].frameGroup == 2);
+    CHECK(r.channels[5].components[0].frameLine == "cs");
+    CHECK(frameMembers(r, 4, 0).size() == 4);
+    CHECK(frameMembers(r, 0, 0).size() == 2); // the first group is still its own
+
+    // What is set on a line goes to the others of its group, and to them only.
+    r.channels[1].components[0].frequencyHz = 400000.0;
+    r.channels[1].components[0].eventSeconds = 1e-5;
+    r.channels[1].components[0].amplitude = 5.0;
+    r.channels[1].components[0].frameLow = 0.2;
+    r.channels[1].components[0].frameRepeat = true;
+    r.channels[1].components[0].frameGapBits = 3.0;
+    r.channels[1].components[0].frame.data = "0xFF";
+    r.channels[1].components[0].frame.i2cAddress = 0x20;
+    spreadFrame(r, 1, 0, FrameProtocol::I2c);
+    CHECK(r.channels[0].components[0].frequencyHz == 400000.0);
+    CHECK(r.channels[0].components[0].eventSeconds == 1e-5);
+    CHECK(r.channels[0].components[0].amplitude == 5.0);
+    CHECK(r.channels[0].components[0].frameLow == 0.2);
+    CHECK(r.channels[0].components[0].frameRepeat);
+    CHECK(r.channels[0].components[0].frameGapBits == 3.0);
+    CHECK(r.channels[0].components[0].frame.data == "0xFF");
+    CHECK(r.channels[0].components[0].frame.i2cAddress == 0x20);
+    CHECK(r.channels[0].components[0].frameLine == "sda"); // its line is its own
+    CHECK(r.channels[2].components[0].frame.data == "ok");
+    CHECK(r.channels[2].components[0].frequencyHz == 9600.0);
+    // Another protocol: each line takes the part it played (the clock stays a clock).
+    GeneratorComponent &edited = r.channels[0].components[0];
+    edited.frame = withFrameProtocol(edited.frame, FrameProtocol::Bits);
+    edited.frameLine = std::string(frameLineFor(FrameProtocol::I2c, edited.frameLine, FrameProtocol::Bits));
+    spreadFrame(r, 0, 0, FrameProtocol::I2c);
+    CHECK(r.channels[0].components[0].frameLine == "data");
+    CHECK(r.channels[1].components[0].frameLine == "clock");
+    CHECK(r.channels[1].components[0].frame.protocol == FrameProtocol::Bits);
+    // The whole is written and read back: the groups too.
+    CHECK((toJson(generatorRecipeFromJson(toJson(r))) == toJson(r)));
+    const Json j = toJson(r.channels[1].components[0]);
+    CHECK(j["waveform"].toString() == "frame");
+    CHECK(j["protocol"].toString() == "bits");
+    CHECK(j["line"].toString() == "clock");
+    CHECK(j["group"].toNumber() == 1.0);
+    CHECK(j["low"].toNumber() == 0.2);
+    CHECK(j["repeat"].toBool());
+    CHECK(j["gap"].toNumber() == 3.0);
+    CHECK(j["frequency"].toNumber() == 400000.0);
+    Json odd = j;
+    odd["line"] = "scl"; // not a line of bits sent as they are: the first one
+    odd["gap"] = -4.0;
+    odd.erase("group");
+    const GeneratorComponent read = generatorComponentFromJson(odd);
+    CHECK(read.frameLine == "data");
+    CHECK(read.frameGapBits == 0.0);
+    CHECK(read.frameGroup == 0);
+    CHECK(toJson(defaultGeneratorComponent(Waveform::Frame))["line"].toString() == "data");
+    CHECK(!toJson(make(Waveform::Sine, 1.0)).contains("protocol"));
+
+    // No room for the lines: said, nothing added.
+    GeneratorRecipe full = sineGeneratorRecipe();
+    full.channels[0].components[0] = defaultGeneratorComponent(Waveform::Frame);
+    full.channels[0].components[0].frame = withFrameProtocol(FrameSpec{}, FrameProtocol::Spi);
+    while (full.channels.size() < kMaximumGeneratorChannels - 2) full.channels.push_back(sineGeneratorChannel(full.channels.size()));
+    CHECK(!addFrameLines(full, 0, 0, &added, &error));
+    CHECK(added == 0);
+    CHECK(error == "Il faudrait 3 voies de plus pour les autres lignes : au plus 16 voies.");
+    CHECK(full.channels.size() == kMaximumGeneratorChannels - 2);
+    CHECK(full.channels[0].components[0].frameGroup == 0);
+    full.channels[0].components[0].frame = withFrameProtocol(FrameSpec{}, FrameProtocol::I2c);
+    full.channels.push_back(sineGeneratorChannel(14));
+    full.channels.push_back(sineGeneratorChannel(15));
+    CHECK(!addFrameLines(full, 0, 0, &added, &error));
+    CHECK(error == "Il faudrait une voie de plus pour les autres lignes : au plus 16 voies.");
+
+    // Framed: two bits of rest, the frame, two bits of rest; ten samples a bit at least, a whole number of them.
+    GeneratorRecipe framed = sineGeneratorRecipe();
+    framed.channels[0].components[0] = uartFrame("B", 9600.0, 0.5);
+    REQUIRE(adoptFrameTiming(framed, 0, 0));
+    CHECK(framed.sampleRateHz == 96000.0);
+    CHECK_REL(framed.durationSeconds, 14.0 / 9600.0, 1e-12);
+    CHECK_REL(framed.channels[0].components[0].eventSeconds, 2.0 / 9600.0, 1e-12);
+    CHECK(framed.channels[0].components[0].frequencyHz == 9600.0);
+    GeneratorResult g = generateSignal(framed);
+    REQUIRE(g.ok());
+    CHECK(g.warnings.empty());
+    REQUIRE(g.signal.frameCount() == 140);
+    CHECK(levelsOf(g.signal.channel(0)) == times(20, '1') + stretched("0010000101", 10) + times(20, '1'));
+    // A rate that already gives a whole number of samples a tick stays: 1 kbit/s at 48 kHz.
+    framed = sineGeneratorRecipe();
+    framed.channels[0].components[0] = uartFrame("B", 1000.0, 0.0);
+    REQUIRE(adoptFrameTiming(framed, 0, 0));
+    CHECK(framed.sampleRateHz == 48000.0);
+    CHECK_REL(framed.durationSeconds, 0.014, 1e-12);
+    // An I2C bus: five samples a tick, twenty a bit; the other line follows.
+    framed = sineGeneratorRecipe();
+    framed.channels[0].components[0] = defaultGeneratorComponent(Waveform::Frame);
+    framed.channels[0].components[0].frame = withFrameProtocol(FrameSpec{}, FrameProtocol::I2c);
+    framed.channels[0].components[0].frame.data = "0x01 0xA5";
+    framed.channels[0].components[0].frequencyHz = 100000.0;
+    REQUIRE(addFrameLines(framed, 0, 0));
+    REQUIRE(adoptFrameTiming(framed, 1, 0)); // from its clock
+    CHECK(framed.sampleRateHz == 2e6);
+    CHECK_REL(framed.durationSeconds, 33.0 / 100000.0, 1e-12);
+    CHECK_REL(framed.channels[0].components[0].eventSeconds, 2e-5, 1e-12);
+    CHECK_REL(framed.channels[1].components[0].eventSeconds, 2e-5, 1e-12);
+    // USB at the rate of its speed, ten samples a bit.
+    framed = sineGeneratorRecipe();
+    framed.channels[0].components[0] = defaultGeneratorComponent(Waveform::Frame);
+    framed.channels[0].components[0].frame = withFrameProtocol(FrameSpec{}, FrameProtocol::Usb);
+    REQUIRE(adoptFrameTiming(framed, 0, 0)); // at the rate it has: 100 bit/s, 480 samples a bit
+    CHECK(framed.sampleRateHz == 48000.0);
+    CHECK(framed.channels[0].components[0].frequencyHz == 100.0);
+    CHECK_REL(framed.durationSeconds, 39.0 / 100.0, 1e-12);
+    REQUIRE(adoptFrameTiming(framed, 0, 0, true));
+    CHECK(framed.channels[0].components[0].frequencyHz == 1.5e6);
+    CHECK(framed.sampleRateHz == 15e6);
+    CHECK_REL(framed.durationSeconds, 39.0 / 1.5e6, 1e-12);
+    framed.channels[0].components[0].frame.usbFullSpeed = true;
+    REQUIRE(adoptFrameTiming(framed, 0, 0, true));
+    CHECK(framed.channels[0].components[0].frequencyHz == 12e6);
+    CHECK(framed.sampleRateHz == 120e6);
+    // The real rate of a protocol that has none: the rate it has.
+    framed = sineGeneratorRecipe();
+    framed.channels[0].components[0] = uartFrame("B", 9600.0, 0.0);
+    REQUIRE(adoptFrameTiming(framed, 0, 0, true));
+    CHECK(framed.channels[0].components[0].frequencyHz == 9600.0);
+    // Repeated: three frames and the rests between them.
+    framed.channels[0].components[0].frameRepeat = true;
+    framed.channels[0].components[0].frameGapBits = 5.0;
+    REQUIRE(adoptFrameTiming(framed, 0, 0));
+    CHECK_REL(framed.durationSeconds, (2.0 + 3.0 * 10.0 + 2.0 * 5.0 + 2.0) / 9600.0, 1e-12);
+    // Not a frame, or one that cannot be built: nothing changes.
+    GeneratorRecipe same = sineGeneratorRecipe();
+    CHECK(!adoptFrameTiming(same, 0, 0));
+    CHECK(!adoptFrameTiming(same, 0, 5));
+    same.channels[0].components[0] = uartFrame("0x4G", 9600.0, 0.25);
+    CHECK(!adoptFrameTiming(same, 0, 0));
+    CHECK(same.sampleRateHz == 48000.0);
+    CHECK(same.durationSeconds == 1.0);
+    CHECK(same.channels[0].components[0].eventSeconds == 0.25);
+
+    // The examples: a frame each, its lines as channels, read back from the samples of the UART one.
+    std::size_t found = 0;
+    for (const GeneratorExample &e : generatorExamples())
+    {
+        if (e.recipe.channels[0].components[0].waveform != Waveform::Frame) continue;
+        ++found;
+        const FrameProtocol protocol = e.recipe.channels[0].components[0].frame.protocol;
+        CHECK(e.recipe.channels.size() == frameLines(protocol).size());
+        for (std::size_t c = 0; c < e.recipe.channels.size(); ++c) CHECK(e.recipe.channels[c].name == frameLines(protocol)[c].name);
+        const FrameTiming t = frameTiming(e.recipe.channels[0].components[0], e.recipe.sampleRateHz);
+        REQUIRE(t.ok());
+        CHECK(t.samplesPerTick >= 5.0);
+        CHECK(t.samplesPerTick == std::round(t.samplesPerTick));
+        CHECK_REL(e.recipe.durationSeconds, t.durationSeconds + 4.0 * t.bitSeconds, 1e-9);
+        if (protocol != FrameProtocol::Uart) continue;
+        g = generateSignal(e.recipe);
+        REQUIRE(g.ok());
+        const std::span<const double> tx = g.signal.channel(0);
+        // A receiver: the falling edge of each start bit, then the middle of each of the eight bits after it.
+        const double perBit = t.samplesPerBit;
+        std::string received;
+        std::size_t i = 1;
+        while (i < tx.size())
+        {
+            if (!(tx[i - 1] > 1.65 && tx[i] < 1.65))
+            {
+                ++i;
+                continue;
+            }
+            unsigned value = 0;
+            for (std::size_t b = 0; b < 8; ++b)
+            {
+                const auto at = static_cast<std::size_t>(static_cast<double>(i) + (1.5 + static_cast<double>(b)) * perBit);
+                REQUIRE(at < tx.size());
+                if (tx[at] > 1.65) value |= 1u << b;
+            }
+            received += static_cast<char>(value);
+            i += static_cast<std::size_t>(9.5 * perBit); // into the stop bit
+        }
+        CHECK(received == "Bonjour");
+    }
+    CHECK(found == 5);
 }

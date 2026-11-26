@@ -191,6 +191,62 @@ TEST_CASE("Signal list model: metadata edits, merged timing steps, information",
     CHECK(model.info(999).isEmpty());
 }
 
+TEST_CASE("Signal list model: channels taken out of a signal, one step of the history each", "[app]")
+{
+    SignalListModel model;
+    Counter c;
+    watch(model, c);
+    model::Signal source = makeSignal("m", 4);
+    source.channels[0].name = "sin";
+    source.channels[1].name = "cos";
+    source.channels[2].name = "I";
+    source.channels[3].name = "s";
+    const qint64 id = model.addSignal(source, QStringLiteral("Ajouter"));
+    const model::SignalPtr whole = model.signalById(id);
+    REQUIRE(whole != nullptr);
+
+    // One channel out: the row is updated, the step named after the channel.
+    const int changed = c.changed;
+    CHECK(model.removeChannel(id, 1));
+    CHECK(c.changed > changed);
+    CHECK(model.undoText() == QStringLiteral("Supprimer la voie « cos »"));
+    CHECK(model.data(model.index(0), SignalListModel::ChannelCountRole).toInt() == 3);
+    CHECK(model.data(model.index(0), SignalListModel::ChannelNamesRole).toStringList() ==
+          QStringList({QStringLiteral("sin"), QStringLiteral("I"), QStringLiteral("s")}));
+    const model::SignalPtr three = model.signalById(id);
+    REQUIRE(three != nullptr);
+    CHECK((three->data->channels[1] == whole->data->channels[2]));
+    CHECK(model.info(id).value(QStringLiteral("notes")).toString() == QStringLiteral("Voie retirée : cos."));
+    // Several at once: those named stay, in the order named.
+    CHECK(model.keepChannels(id, QVariantList{2, 0}));
+    CHECK(model.undoText() == QStringLiteral("Supprimer la voie « I »"));
+    CHECK(model.data(model.index(0), SignalListModel::ChannelNamesRole).toStringList() ==
+          QStringList({QStringLiteral("s"), QStringLiteral("sin")}));
+    // The same channels in the same order: nothing to undo more.
+    const int steps = c.history;
+    CHECK(model.keepChannels(id, QVariantList{0, 1}));
+    CHECK(c.history == steps);
+    // Undo gives the channels back, with their samples.
+    model.undo();
+    model.undo();
+    CHECK(model.signalById(id) == whole);
+    CHECK(model.data(model.index(0), SignalListModel::ChannelCountRole).toInt() == 4);
+    CHECK(model.keepChannels(id, QVariantList{3}));
+    CHECK(model.undoText() == QStringLiteral("Supprimer 3 voies de « m »"));
+    CHECK(model.data(model.index(0), SignalListModel::ChannelCountRole).toInt() == 1);
+
+    // What is refused is said, and changes nothing: the last channel, a channel that is not there, none kept.
+    const int errors = c.errors;
+    CHECK(!model.removeChannel(id, 0));
+    CHECK(!model.removeChannel(id, 4));
+    CHECK(!model.removeChannel(999, 0));
+    CHECK(!model.keepChannels(id, QVariantList()));
+    CHECK(!model.keepChannels(id, QVariantList{0, 0}));
+    CHECK(!model.keepChannels(id, QVariantList{-1}));
+    CHECK(c.errors == errors + 6);
+    CHECK(model.data(model.index(0), SignalListModel::ChannelCountRole).toInt() == 1);
+}
+
 TEST_CASE("Session: save, reopen, modified flag, title, module settings", "[app]")
 {
     QTemporaryDir dir;

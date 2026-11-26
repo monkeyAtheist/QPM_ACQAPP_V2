@@ -520,6 +520,11 @@ EmbeddedFilter embedFilter(const FilterDesign &design, const CodeOptions &option
         e.error = design.error.empty() ? std::string("Aucun filtre n'est conçu.") : design.error;
         return e;
     }
+    if (design.recipe.kind == FilterKind::None)
+    {
+        e.error = "Aucun filtre : rien à écrire en C. Choisissez d'abord un type de filtre (ruban ▸ Filtre) ou un exemple.";
+        return e;
+    }
     e.text = filterText(design.recipe);
     e.fir = design.fir();
     const double radius = design.largestPoleRadius();

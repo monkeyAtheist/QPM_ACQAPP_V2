@@ -3,6 +3,7 @@
 #include "qacq/io/crc.h"
 #include "qacq/model/json.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 

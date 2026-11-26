@@ -5,11 +5,13 @@
 #include "qacq/dsp/filtering.h"
 #include "qacq/dsp/modulation.h"
 #include "qacq/dsp/receiver.h"
+#include "qacq/dsp/rotator.h"
 #include "qacq/dsp/spectrum.h"
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <vector>
 
@@ -224,6 +226,77 @@ TEST_CASE("Error-free links: every modulation, passband and baseband, odd ratios
     }
 }
 
+TEST_CASE("Rotator: a carrier from its angle every 64 samples, as exact as the angle itself in between", "[modulation]")
+{
+    // Against the value written from the fraction of ratio * i at every sample. That fraction is only known to
+    // the rounding of the product (2.2e-16 of ratio * i turns): both stay within it of the true value, and of each
+    // other; a ratio written exactly in binary (1/8) leaves the multiplications alone, 64 of them at most.
+    // At the first sample of each block the value is taken again from its angle: there the two agree to the last
+    // places. Not bit for bit: the compiler may work out one of them itself (the first sample, whose angle it
+    // knows: correctly rounded) and leave the other to the mathematical library, which need not round the same
+    // way (the x87 sincos of MinGW, emulated on an ARM processor, gives another last bit for 0.7).
+    const std::size_t n = 300000;
+    for (const double ratio : {6000.0 / 48000.0, -0.3712345, 0.4999, 1.25e-5, 3.2, 0.0})
+    {
+        Rotator carrier(ratio, 0.7, 2.0);
+        double gap = 0.0, gapAtBlocks = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const std::complex<double> v = carrier.next();
+            const double turns = ratio * static_cast<double>(i);
+            const double angle = kTwoPi * (turns - std::floor(turns)) + 0.7;
+            const std::complex<double> written(2.0 * std::cos(angle), 2.0 * std::sin(angle));
+            gap = std::max(gap, std::abs(v - written));
+            if (i % Rotator::kBlock == 0) gapAtBlocks = std::max({gapAtBlocks, std::abs(v - written), std::abs(v - carrier.at(i))});
+        }
+        CHECK(gapAtBlocks < 4e-15); // a few units of the last place (of 2): nothing carried over from the block before
+        CHECK(gap < 2.0 * 2.0 * kTwoPi * 2.3e-16 * std::abs(ratio) * static_cast<double>(n) + 5e-14);
+        if (ratio == 0.125) CHECK(gap < 5e-14);
+        if (ratio == 0.0) CHECK(gap < 4e-15); // a step of exactly 1: the value of its angle throughout
+    }
+    // Without taking the value again from its angle, the multiplications alone drift: what the blocks are for.
+    {
+        const double angle = kTwoPi * 0.3712345;
+        const std::complex<double> step(std::cos(angle), std::sin(angle));
+        std::complex<double> value(2.0, 0.0);
+        double drift = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            if (i % Rotator::kBlock == 0)
+            {
+                const double turns = 0.3712345 * static_cast<double>(i);
+                const double exact = kTwoPi * (turns - std::floor(turns));
+                drift = std::max(drift, std::abs(value - std::complex<double>(2.0 * std::cos(exact), 2.0 * std::sin(exact))));
+            }
+            value = turned(value, step);
+        }
+        CHECK(drift > 1e-12);
+    }
+    CHECK((turned({1.0, 2.0}, {0.0, 1.0}) == std::complex<double>(-2.0, 1.0)));
+    // The passband of a modulator is the real part of its envelope on that carrier, as written sample by sample;
+    // toPassband makes the same.
+    ModulationSpec spec;
+    spec.type = Modulation::Qpsk;
+    spec.sampleRateHz = 48000.0;
+    spec.symbolRate = 1000.0;
+    spec.carrierFrequencyHz = 6100.0;
+    spec.carrierPhaseDegrees = 25.0;
+    spec.sampleCount = 48000;
+    spec.bits = randomBits(2000, 5);
+    const ModulatedSignal m = modulate(spec);
+    REQUIRE(m.ok());
+    double gap = 0.0;
+    for (std::size_t i = 0; i < m.passband.size(); ++i)
+    {
+        const double turns = 6100.0 / 48000.0 * static_cast<double>(i);
+        const double angle = kTwoPi * (turns - std::floor(turns));
+        gap = std::max(gap, std::abs(m.passband[i] - (m.inPhase[i] * std::cos(angle) - m.quadrature[i] * std::sin(angle))));
+    }
+    CHECK(gap < 1e-10);
+    const std::vector<double> again = toPassband(m.inPhase, m.quadrature, 48000.0, 6100.0);
+    CHECK((again == m.passband));
+}
+
 TEST_CASE("AWGN: requested Eb/N0 and SNR are the measured ones", "[modulation]")
 {
     std::vector<double> x(1'000'000);
@@ -398,6 +471,66 @@ TEST_CASE("8-PSK and QAM: bit error rates match the exact theory", "[ber]")
     }
 }
 
+TEST_CASE("root raised cosine: cut long enough for its roll-off", "[modulation]")
+{
+    // The pair of pulses cut to 12 symbols: as computed with numpy (-17.6 dB at 0.01, -25.0 at 0.1, -57.6 at 0.35,
+    // 48 samples per symbol).
+    CHECK(std::abs(rootRaisedCosineInterferenceDb(0.01, 48, 12) + 17.6) < 0.05);
+    CHECK(std::abs(rootRaisedCosineInterferenceDb(0.1, 48, 12) + 25.0) < 0.05);
+    CHECK(std::abs(rootRaisedCosineInterferenceDb(0.35, 48, 12) + 57.6) < 0.05);
+    // The span chosen: 12 where it does, longer for a small roll-off, at most 96.
+    CHECK(rootRaisedCosineSpan(0.35) == 12);
+    CHECK(rootRaisedCosineSpan(0.5) == 12);
+    CHECK(rootRaisedCosineSpan(1.0) == 12);
+    CHECK(rootRaisedCosineSpan(0.1) == 22);
+    CHECK(rootRaisedCosineSpan(0.05) == 44);
+    CHECK(rootRaisedCosineSpan(0.01) == kMaximumPulseSpanSymbols);
+    CHECK(rootRaisedCosineSpan(0.0) == kMaximumPulseSpanSymbols);
+    CHECK(rootRaisedCosineSpan(-3.0) == rootRaisedCosineSpan(0.0));
+    CHECK(rootRaisedCosineSpan(7.0) == rootRaisedCosineSpan(1.0));
+    CHECK(rootRaisedCosineSpan(std::nan("")) == rootRaisedCosineSpan(0.35));
+    CHECK(pulseSpanSymbolsOf(16, 0.1) == 16);
+    CHECK(pulseSpanSymbolsOf(0, 0.1) == 22);
+    // What it leaves, at the samples per symbol of a record (48), of the synchronized receiver (8) and others: under
+    // -50 dB where it was chosen (16), under -44 dB elsewhere, from 0.025 on.
+    double worst = -1e9;
+    for (int k = 25; k <= 1000; k += 5)
+    {
+        const double alpha = k / 1000.0;
+        const std::size_t span = rootRaisedCosineSpan(alpha);
+        CHECK(span >= kMinimumPulseSpanSymbols);
+        CHECK(span <= kMaximumPulseSpanSymbols);
+        CHECK(span % 2 == 0);
+        CHECK(rootRaisedCosineInterferenceDb(alpha, 16, span) <= kPulseInterferenceTargetDb);
+        for (const std::size_t sps : {4u, 8u, 48u}) worst = std::max(worst, rootRaisedCosineInterferenceDb(alpha, sps, span));
+    }
+    CHECK(worst < -44.0);
+    // A transmission at 0.1 received as the modulator cut it: no symbol disturbed.
+    ModulationSpec tx;
+    tx.type = Modulation::Qam64;
+    tx.representation = Representation::ComplexBaseband;
+    tx.pulse = PulseShape::RootRaisedCosine;
+    tx.rolloff = 0.1;
+    tx.symbolRate = 1000.0;
+    tx.sampleRateHz = 8000.0;
+    tx.sampleCount = 8000;
+    tx.bits = randomBits(6000, 5);
+    tx.repeatBits = false;
+    const ModulatedSignal m = modulate(tx);
+    REQUIRE(m.ok());
+    ReceiverSpec rx = receiverFor(tx);
+    ReceivedInput in;
+    in.inPhase = m.inPhase;
+    in.quadrature = m.quadrature;
+    const DigitalReception d = receiveDigital(in, rx);
+    REQUIRE(d.ok());
+    double error = 0.0;
+    std::size_t counted = 0;
+    for (std::size_t k = 11; k + 11 < m.symbols.size() && k < d.decisionPoints.size(); ++k, ++counted)
+        error += std::norm(d.decisionPoints[k] - m.symbols[k]);
+    CHECK(10.0 * std::log10(error / static_cast<double>(counted)) < -48.0);
+}
+
 TEST_CASE("RRC spectrum stays inside (1 + rolloff) Rs", "[modulation]")
 {
     ModulationSpec spec;
@@ -515,18 +648,77 @@ TEST_CASE("Theoretical BER of 8-PSK and QAM, exact (against SciPy)", "[modulatio
         {Modulation::Qam256, 18.0, 0.0034720959081667047}, {Modulation::Qam256, 22.0, 2.6336099443566805e-05},
     };
     for (const Reference &r : references) CHECK_NEAR(theoreticalBer(r.type, r.ebN0Db), r.ber, 1e-12, 0);
-    // Symbols: 8-PSK at 0 dB (SciPy: 1 - P(right sector)); QPSK 1 - (1 - p)^2; 16-QAM per axis 2 (1 - 1/4) Q(r).
+    // Symbols: 8-PSK at 0 dB (SciPy: 1 - P(right sector)); QPSK 1 - (1 - p)^2 = p (2 - p); 16-QAM per axis
+    // 2 (1 - 1/4) Q(r). (Written p (2 - p): far out on the tail 1 - (1 - p)^2 loses p, 0 under 1e-16.)
     CHECK_NEAR(theoreticalSer(Modulation::Psk8, 0.0), 0.3478008711998929, 1e-12, 0);
     const double p = theoreticalBer(Modulation::Qpsk, 6.0);
-    CHECK_NEAR(theoreticalSer(Modulation::Qpsk, 6.0), 1.0 - (1.0 - p) * (1.0 - p), 1e-14, 0);
+    CHECK_NEAR(theoreticalSer(Modulation::Qpsk, 6.0), p * (2.0 - p), 1e-14, 0);
+    const double far = theoreticalBer(Modulation::Qpsk, 16.0);
+    CHECK(far < 1e-17);
+    CHECK_NEAR(theoreticalSer(Modulation::Qpsk, 16.0), 2.0 * far, 1e-14, 0);
     const double axis = 1.5 * gaussianQ(std::sqrt(3.0 * 4.0 * 10.0 / 15.0));
-    CHECK_NEAR(theoreticalSer(Modulation::Qam16, 10.0), 1.0 - (1.0 - axis) * (1.0 - axis), 1e-14, 0);
+    CHECK_NEAR(theoreticalSer(Modulation::Qam16, 10.0), axis * (2.0 - axis), 1e-14, 0);
     // Far out on the tail, still a number (8-PSK at 30 dB: 1.4e-193), then 0.
     CHECK(theoreticalBer(Modulation::Psk8, 30.0) > 1e-200);
     CHECK(theoreticalBer(Modulation::Psk8, 30.0) < 1e-190);
     // ASK: the low level costs (1 - l)^2 / (1 + l^2) of Eb/N0.
     CHECK_NEAR(theoreticalBer(Modulation::Ask, 10.0, 0.2), gaussianQ(std::sqrt(10.0 * 0.64 / 1.04)), 1e-14, 0);
     CHECK(theoreticalBer(Modulation::Ask, 10.0) == gaussianQ(std::sqrt(10.0)));
+}
+
+TEST_CASE("Theoretical BER through flat fading: Rayleigh and Rice", "[modulation]")
+{
+    // Rayleigh: BPSK and QPSK 0.5 (1 - sqrt(g / (1 + g))), noncoherent FSK 1 / (2 + g), g the mean Eb/N0; worse than
+    // without fading at any Eb/N0, and only as 1 / (4 g) at high Eb/N0: 10 dB more, 10 times fewer errors.
+    for (double db : {-5.0, 0.0, 10.0, 20.0, 30.0, 40.0})
+    {
+        const double g = std::pow(10.0, db / 10.0);
+        CHECK_NEAR(fadingBer(Modulation::Bpsk, db), 0.5 * (1.0 - std::sqrt(g / (1.0 + g))), 1e-9, 0);
+        CHECK(fadingBer(Modulation::Qpsk, db) == fadingBer(Modulation::Bpsk, db));
+        CHECK(fadingSer(Modulation::Bpsk, db) == fadingBer(Modulation::Bpsk, db));
+        CHECK_NEAR(fadingBer(Modulation::Fsk, db), 1.0 / (2.0 + g), 1e-9, 0);
+        for (Modulation m : {Modulation::Bpsk, Modulation::Psk8, Modulation::Qam16, Modulation::Qam64})
+            CHECK(fadingBer(m, db) > theoreticalBer(m, db));
+    }
+    CHECK_NEAR(fadingBer(Modulation::Bpsk, 40.0), 1.0 / (4.0 * 1e4), 1e-3, 0);
+    // Rice: from the moment generating function of the power x of the gain (mean 1), M(s) = (1 + K) / (1 + K - s g)
+    // exp(K s g / (1 + K - s g)): Q(sqrt(2 c x g)) averages to (1 / pi) times the integral over 0 ... pi / 2 of
+    // M(-c / sin^2 t) (Craig); noncoherent FSK is 0.5 M(-1 / 2).
+    const auto craig = [](double c, double g, double k) {
+        constexpr int n = 4000;
+        const double h = 0.5 * kPi / n;
+        double sum = 0.0;
+        for (int i = 1; i <= n; ++i) // (the integrand is 0 at t = 0)
+        {
+            const double st = std::sin(h * i), s = -c / (st * st) * g;
+            const double v = (1.0 + k) / (1.0 + k - s) * std::exp(k * s / (1.0 + k - s));
+            sum += (i == n ? 1.0 : i % 2 ? 4.0 : 2.0) * v;
+        }
+        return sum * h / 3.0 / kPi;
+    };
+    for (double k : {0.0, 1.0, 10.0, 100.0, 1e4})
+        for (double db : {0.0, 10.0, 20.0})
+        {
+            const double g = std::pow(10.0, db / 10.0);
+            CHECK_NEAR(fadingBer(Modulation::Bpsk, db, 0.0, k), craig(1.0, g, k), 1e-8, 0);
+            CHECK_NEAR(fadingBer(Modulation::Ask, db, 0.2, k), craig(0.5 * 0.64 / 1.04, g, k), 1e-8, 0);
+            CHECK_NEAR(fadingBer(Modulation::Fsk, db, 0.0, k), 0.5 * (1.0 + k) / (1.0 + k + 0.5 * g) * std::exp(-k * 0.5 * g / (1.0 + k + 0.5 * g)), 1e-9, 0);
+        }
+    // K = 0 is Rayleigh; as K grows, the rates without fading.
+    CHECK(fadingBer(Modulation::Qam16, 12.0, 0.0, 0.0) == fadingBer(Modulation::Qam16, 12.0));
+    for (Modulation m : {Modulation::Qpsk, Modulation::Psk8, Modulation::Qam16, Modulation::Qam256})
+    {
+        CHECK_NEAR(fadingBer(m, 10.0, 0.0, 1e4), theoreticalBer(m, 10.0), 0.03, 0);
+        CHECK_NEAR(fadingSer(m, 10.0, 0.0, 1e4), theoreticalSer(m, 10.0), 0.03, 0);
+        CHECK(fadingBer(m, 10.0, 0.0, 10.0) < fadingBer(m, 10.0, 0.0, 1.0));
+        CHECK(fadingSer(m, 10.0) >= fadingBer(m, 10.0));
+    }
+    // 8-PSK in closed form under the integral (Craig's, its exponential averaged): as the mean of the rates.
+    CHECK_NEAR(fadingBer(Modulation::Psk8, 20.0), 4.161362549460294e-03, 1e-9, 0);
+    CHECK_NEAR(fadingBer(Modulation::Psk8, 10.0, 0.0, 10.0), 4.642829056737674e-03, 1e-9, 0);
+    // What has no theory.
+    CHECK(std::isnan(fadingBer(Modulation::Am, 10.0)));
+    CHECK(std::isnan(fadingBer(Modulation::Bpsk, std::nan(""))));
 }
 
 TEST_CASE("Theoretical BER and Q function", "[modulation]")

@@ -11,9 +11,11 @@
 //
 // Command line: qacq_tests [--verbose] [filter...]  where a filter is "[tag]" or a substring of a name.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <exception>
 #include <functional>
 #include <sstream>
 #include <stdexcept>

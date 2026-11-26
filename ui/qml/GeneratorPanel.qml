@@ -4,8 +4,9 @@ import QtQuick.Layouts
 import Qacq.App
 
 // Tab "Composition" of the right panel of the module "Générateur": the recipe of the signal. Its name,
-// rate and duration (the seed of its noises), its channels (name, unit, offset), and for the channel
-// chosen its waveforms, which add up; what the generation warns about; presets. Every field writes into
+// rate and duration (the seed of its noises), its channels (name, unit, offset, whether it is among the
+// channels of the signal made), and for the channel chosen its waveforms, which add up; what the generation
+// warns about; presets. Every field writes into
 // the recipe at once, and the preview follows.
 ScrollView {
     id: root
@@ -46,6 +47,49 @@ ScrollView {
     ColumnLayout {
         width: root.availableWidth
         spacing: 10
+
+        // Right click on a chip: what can be done with that channel (a popup: not laid out; inside the column, so
+        // that the scroll view keeps a single child, whose height it reads).
+        FitMenu {
+            id: channelMenu
+            property int target: 0
+            readonly property var info: root.channels[target] ?? ({})
+            readonly property bool hasWaves: (info.components ?? []).length > 0
+            readonly property bool kept: (info.output ?? true) !== false
+            function openFor(index, item) {
+                target = index
+                popup(item, 0, item.height)
+            }
+            MenuItem {
+                text: qsTr("Vider la voie")
+                enabled: channelMenu.hasWaves || (channelMenu.info.offset ?? 0) !== 0
+                onTriggered: root.generator.clearChannel(channelMenu.target)
+                ToolTip.visible: hovered
+                ToolTip.delay: 400
+                ToolTip.text: qsTr("Sans forme d'onde ni décalage : une voie vierge, qui garde son nom et sa place")
+            }
+            MenuItem {
+                text: qsTr("Supprimer la voie")
+                enabled: root.channelCount > 1
+                onTriggered: root.generator.removeChannel(channelMenu.target)
+            }
+            MenuSeparator { }
+            MenuItem {
+                text: channelMenu.kept ? qsTr("Hors du signal (voie de calcul)") : qsTr("Dans le signal")
+                onTriggered: root.generator.setChannel(channelMenu.target, { output: !channelMenu.kept })
+                ToolTip.visible: hovered
+                ToolTip.delay: 400
+                ToolTip.text: qsTr("Une voie de calcul est faite et lue par les autres (v%1), mais ni tracée ni ajoutée à la session").arg(channelMenu.target + 1)
+            }
+            MenuItem {
+                text: qsTr("Moduler une porteuse avec cette voie (AM)")
+                enabled: channelMenu.hasWaves
+                onTriggered: root.generator.modulateChannel(channelMenu.target, "am")
+                ToolTip.visible: hovered
+                ToolTip.delay: 400
+                ToolTip.text: qsTr("Une voie de plus : une porteuse modulée en amplitude dont le message est cette voie, lue telle quelle (v%1) ; sa carte règle aussi FM, PM, DBL, BLU").arg(channelMenu.target + 1)
+            }
+        }
 
         // ---- The signal ----
         SectionTitle { text: qsTr("Signal") }
@@ -96,34 +140,70 @@ ScrollView {
                     id: chip
                     required property int index
                     readonly property bool chosen: index === root.current
-                    width: chipRow.implicitWidth + 18
+                    // Left out of the signal: made, read by the others, not added.
+                    readonly property bool kept: ((root.channels[chip.index] ?? {}).output ?? true) !== false
+                    // Its cross: there is always a channel left.
+                    readonly property bool removable: root.channelCount > 1
+                    width: chipRow.implicitWidth + (removable ? 14 : 18)
                     height: 26
                     radius: 13
                     color: chosen ? Qt.alpha(Theme.accent, 0.18) : chipArea.containsMouse ? Qt.alpha(Theme.text, 0.06) : "transparent"
                     border.color: chosen ? Theme.accent : Theme.border
+                    ToolTip.visible: chipArea.containsMouse && !crossArea.containsMouse
+                    ToolTip.delay: 700
+                    ToolTip.text: (chip.kept ? "" : qsTr("Voie de calcul : lue par les autres, hors du signal ajouté.") + "\n")
+                                  + qsTr("Clic droit : vider la voie, la supprimer, moduler une porteuse avec elle…")
+                    // Under the cross, which takes its own clicks.
+                    MouseArea {
+                        id: chipArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onClicked: (mouse) => {
+                            root.channelSelected(chip.index)
+                            if (mouse.button === Qt.RightButton)
+                                channelMenu.openFor(chip.index, chip)
+                        }
+                    }
                     Row {
                         id: chipRow
-                        anchors.centerIn: parent
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: 9
                         spacing: 6
                         Rectangle {
                             anchors.verticalCenter: parent.verticalCenter
                             width: 8
                             height: 8
                             radius: 4
-                            color: Theme.channelColors[chip.index % Theme.channelColors.length]
+                            color: chip.kept ? Theme.channelColors[chip.index % Theme.channelColors.length] : "transparent"
+                            border.color: chip.kept ? "transparent" : Theme.textMuted
                         }
                         Label {
                             anchors.verticalCenter: parent.verticalCenter
                             text: (root.channels[chip.index] ?? {}).name ?? ""
                             font.pixelSize: Theme.smallText
+                            font.italic: !chip.kept
                             color: chip.chosen ? Theme.text : Theme.textMuted
                         }
-                    }
-                    MouseArea {
-                        id: chipArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        onClicked: root.channelSelected(chip.index)
+                        // The channel taken away, its waveforms with it.
+                        Label {
+                            visible: chip.removable
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "×"
+                            font.pixelSize: Theme.smallText + 3
+                            color: crossArea.containsMouse ? Theme.error : Theme.textMuted
+                            MouseArea {
+                                id: crossArea
+                                anchors.fill: parent
+                                anchors.margins: -4
+                                hoverEnabled: true
+                                onClicked: root.generator.removeChannel(chip.index)
+                                ToolTip.visible: containsMouse
+                                ToolTip.delay: 500
+                                ToolTip.text: qsTr("Supprimer « %1 » et ses formes d'onde").arg((root.channels[chip.index] ?? {}).name ?? "")
+                            }
+                        }
                     }
                 }
             }
@@ -158,26 +238,49 @@ ScrollView {
                 onEdited: (text) => root.generator.setChannel(root.current, { unit: text.trim() })
             }
         }
+        QuantityField {
+            label: qsTr("Décalage")
+            unit: root.currentChannel.unit ?? ""
+            value: root.currentChannel.offset ?? 0
+            tip: qsTr("Ajouté à la somme des formes d'onde (composante continue)")
+            onEdited: (v) => root.generator.setChannel(root.current, { offset: v })
+        }
         RowLayout {
             Layout.fillWidth: true
-            spacing: 8
-            QuantityField {
-                label: qsTr("Décalage")
-                unit: root.currentChannel.unit ?? ""
-                value: root.currentChannel.offset ?? 0
-                tip: qsTr("Ajouté à la somme des formes d'onde (composante continue)")
-                onEdited: (v) => root.generator.setChannel(root.current, { offset: v })
+            spacing: 4
+            Button {
+                text: qsTr("Vider la voie")
+                flat: true
+                enabled: root.waves.length > 0 || (root.currentChannel.offset ?? 0) !== 0
+                onClicked: root.generator.clearChannel(root.current)
+                ToolTip.visible: hovered
+                ToolTip.delay: 500
+                ToolTip.text: qsTr("« %1 » sans forme d'onde ni décalage : une voie vierge, qui garde son nom et sa place").arg(root.currentChannel.name ?? "")
             }
             Button {
-                Layout.alignment: Qt.AlignBottom
-                text: qsTr("Retirer la voie")
+                text: qsTr("Supprimer la voie")
                 flat: true
                 enabled: root.channelCount > 1
                 onClicked: root.generator.removeChannel(root.current)
                 ToolTip.visible: hovered
                 ToolTip.delay: 500
-                ToolTip.text: qsTr("Retirer « %1 » et ses formes d'onde (il reste toujours une voie ; une voie lue par l'opération d'une autre reste)").arg(root.currentChannel.name ?? "")
+                ToolTip.text: root.channelCount > 1
+                              ? qsTr("Supprimer « %1 » et ses formes d'onde (aussi : la croix de sa pastille, ou clic droit dessus). Une voie lue par l'opération ou le message d'une autre reste : changez d'abord sa formule, ou décochez « Dans le signal » pour qu'elle n'y soit pas").arg(root.currentChannel.name ?? "")
+                              : qsTr("Il reste toujours une voie : « Vider la voie » la remet à zéro")
             }
+            Item { Layout.fillWidth: true }
+        }
+        CheckBox {
+            text: qsTr("Dans le signal")
+            checked: (root.currentChannel.output ?? true) !== false
+            onToggled: root.generator.setChannel(root.current, { output: checked })
+            ToolTip.visible: hovered
+            ToolTip.delay: 500
+            ToolTip.text: qsTr("Décochée, la voie est une voie de calcul : toujours faite et lue par les opérations des autres (v%1), mais ni tracée ni ajoutée à la session. Une porteuse, un message, une étape…").arg(root.current + 1)
+        }
+        Hint {
+            visible: (root.currentChannel.output ?? true) === false
+            text: qsTr("Voie de calcul : les autres la lisent (v%1), le signal ajouté ne la contient pas.").arg(root.current + 1)
         }
 
         // ---- The waveforms of the channel chosen ----

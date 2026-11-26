@@ -1,6 +1,7 @@
 #include "qacq/dsp/receiver.h"
 
 #include "qacq/dsp/constants.h"
+#include "qacq/dsp/rotator.h"
 #include "qacq/dsp/filter_design.h"
 #include "qacq/dsp/filtering.h"
 
@@ -18,41 +19,80 @@ double gaussianQ(double x) noexcept
 
 namespace
 {
+// exp(-c); through flat fading (fading: true), its mean over the power x = |g|^2 of the gain (mean 1), E[exp(-c x)]:
+// the moment generating function of x, (1 + K) / (1 + K + c) exp(-K c / (1 + K + c)) (Rice; K = 0: Rayleigh).
+double attenuation(double c, double riceK, bool fading) noexcept
+{
+    if (!fading) return std::exp(-c);
+    return (1.0 + riceK) / (1.0 + riceK + c) * std::exp(-riceK * c / (1.0 + riceK + c));
+}
+
 // Probability that the angle of a point of energy es (over N0) with noise passes alpha (0 < alpha < pi) on one
 // side, by Craig's form: (1 / 2 pi) integral from 0 to pi - alpha of exp(-es sin^2 alpha / sin^2 t) dt. The
 // integrand rises from 0 to its peak at pi/2 (or at the end of the range): Gauss-Legendre of 16 points on 64
-// pieces, exact to the last digits from 0 to 40 dB.
-double beyondAngle(double es, double alpha) noexcept
+// pieces, exact to the last digits from 0 to 40 dB. Through flat fading the exponential becomes its mean over the
+// gain (attenuation): the same integral, smoother.
+// Gauss-Legendre of 16 points: its nodes (+-x) and weights on [-1, 1].
+constexpr double kGaussX[8] = {0.0950125098376374, 0.2816035507792589, 0.4580167776572274, 0.6178762444026438,
+                               0.7554044083550030, 0.8656312023878318, 0.9445750230732326, 0.9894009349916499};
+constexpr double kGaussW[8] = {0.1894506104550685, 0.1826034150449236, 0.1691565193950025, 0.1495959888165767,
+                               0.1246289712555339, 0.0951585116824928, 0.0622535239386479, 0.0271524594117541};
+
+// The integral of f over [0, upper]: Gauss-Legendre of 16 points on `pieces` equal pieces. graded: the first one
+// cut in halves towards 0, 24 times (through fading, Craig's integrands rise sharply near 0 when the argument is
+// small against the line of sight: there, every halving its 16 points).
+template <typename Integrand>
+double craigIntegral(double upper, int pieces, bool graded, const Integrand &f) noexcept
 {
-    static constexpr double x[8] = {0.0950125098376374, 0.2816035507792589, 0.4580167776572274, 0.6178762444026438,
-                                    0.7554044083550030, 0.8656312023878318, 0.9445750230732326, 0.9894009349916499};
-    static constexpr double w[8] = {0.1894506104550685, 0.1826034150449236, 0.1691565193950025, 0.1495959888165767,
-                                    0.1246289712555339, 0.0951585116824928, 0.0622535239386479, 0.0271524594117541};
-    const double upper = kPi - alpha;
-    const double s2 = std::sin(alpha) * std::sin(alpha);
-    constexpr int pieces = 64;
-    const double width = upper / pieces;
-    double sum = 0.0;
-    for (int piece = 0; piece < pieces; ++piece)
-    {
-        const double mid = (piece + 0.5) * width;
+    const auto panel = [&f](double mid, double half) {
         double part = 0.0;
         for (int k = 0; k < 8; ++k)
-            for (double sign : {-1.0, 1.0})
-            {
-                const double t = mid + sign * 0.5 * width * x[k];
-                const double st = std::sin(t);
-                part += w[k] * std::exp(-es * s2 / (st * st));
-            }
-        sum += 0.5 * width * part;
+            for (double sign : {-1.0, 1.0}) part += kGaussW[k] * f(mid + sign * half * kGaussX[k]);
+        return half * part;
+    };
+    const double width = upper / pieces;
+    double sum = 0.0;
+    for (int piece = graded ? 1 : 0; piece < pieces; ++piece) sum += panel((piece + 0.5) * width, 0.5 * width);
+    if (graded)
+    {
+        double to = width;
+        for (int halving = 0; halving < 24; ++halving, to *= 0.5) sum += panel(0.75 * to, 0.25 * to);
     }
+    return sum;
+}
+
+double beyondAngle(double es, double alpha, double riceK = 0.0, bool fading = false) noexcept
+{
+    const double s2 = std::sin(alpha) * std::sin(alpha);
+    const double sum = craigIntegral(kPi - alpha, 64, fading, [&](double t) {
+        const double st = std::sin(t);
+        return attenuation(es * s2 / (st * st), riceK, fading);
+    });
     return sum / (2.0 * kPi);
 }
 
-// Of the levels of a Gray-coded L-PAM, at r = half the distance between levels over the noise deviation: the
-// bit errors per symbol (averaged over the levels sent) and the probability that a level is wrong.
-void pamErrors(std::size_t levels, double r, double &bitErrors, double &symbolError) noexcept
+// The mean over flat fading (power x of the gain, mean 1) of Q(a sqrt(x)) and of Q(a sqrt(x))^2: Craig's forms, (1 / pi)
+// times the integral over 0 ... pi / 2 (or pi / 4 for the square) of exp(-a^2 / (2 sin^2 t)), the exponential
+// averaged in closed form (attenuation).
+double fadedQ(double a, double riceK, bool squared) noexcept
 {
+    if (!(a > 0.0)) return squared ? 0.25 : 0.5;
+    const double c = 0.5 * a * a;
+    return craigIntegral(squared ? 0.25 * kPi : 0.5 * kPi, 32, true, [&](double t) {
+               const double st = std::sin(t);
+               return attenuation(c / (st * st), riceK, true);
+           }) /
+           kPi;
+}
+
+// Of the levels of a Gray-coded L-PAM, at r = half the distance between levels over the noise deviation: the
+// bit errors per symbol (averaged over the levels sent) and the probability that a level is wrong. q: the Gaussian
+// tail, or its mean over a fading (each of its arguments, the odd multiples of r up to 2 L - 1, taken once).
+template <typename Tail>
+void pamErrors(std::size_t levels, double r, double &bitErrors, double &symbolError, const Tail &q) noexcept
+{
+    std::vector<double> tail(levels + 1); // tail[m] = q((2 m - 1) r)
+    for (std::size_t m = 1; m <= levels; ++m) tail[m] = q((2.0 * static_cast<double>(m) - 1.0) * r);
     bitErrors = 0.0;
     for (std::size_t i = 0; i < levels; ++i)
         for (std::size_t j = 0; j < levels; ++j)
@@ -61,21 +101,20 @@ void pamErrors(std::size_t levels, double r, double &bitErrors, double &symbolEr
             const std::size_t d = i < j ? j - i : i - j;
             // Between its two edges, 2d - 1 and 2d + 1 half-distances away (the outer levels have one edge).
             const bool outer = j == 0 || j + 1 == levels;
-            const double p = gaussianQ((2.0 * static_cast<double>(d) - 1.0) * r) -
-                             (outer ? 0.0 : gaussianQ((2.0 * static_cast<double>(d) + 1.0) * r));
+            const double p = tail[d] - (outer ? 0.0 : tail[d + 1]);
             bitErrors += p * static_cast<double>(std::popcount(grayCode(i) ^ grayCode(j)));
         }
     bitErrors /= static_cast<double>(levels);
-    symbolError = 2.0 * (1.0 - 1.0 / static_cast<double>(levels)) * gaussianQ(r);
+    symbolError = 2.0 * (1.0 - 1.0 / static_cast<double>(levels)) * tail[1];
 }
 
 // 8-PSK: the probability of each sector away from the one sent (by symmetry of the circle), from the
-// half-planes beyond its edges.
-void psk8Errors(double ebN0, double &ber, double &ser) noexcept
+// half-planes beyond its edges (fading: their means over the gain).
+void psk8Errors(double ebN0, double &ber, double &ser, double riceK = 0.0, bool fading = false) noexcept
 {
     const double es = 3.0 * ebN0;
     double beyond[5]; // beyond (2j - 1) pi / 8, j = 1 to 4
-    for (int j = 1; j <= 4; ++j) beyond[j] = beyondAngle(es, (2.0 * j - 1.0) * kPi / 8.0);
+    for (int j = 1; j <= 4; ++j) beyond[j] = beyondAngle(es, (2.0 * j - 1.0) * kPi / 8.0, riceK, fading);
     // Sector j (centred on j pi / 4), j = 1, 2, 3 on each side, and 4 opposite.
     double sector[5] = {0.0, beyond[1] - beyond[2], beyond[2] - beyond[3], beyond[3] - beyond[4], 2.0 * beyond[4]};
     ser = 2.0 * beyond[1];
@@ -103,7 +142,7 @@ void errorRates(Modulation modulation, double ebN0Db, double askLowLevel, double
         case Modulation::Qpsk:
         {
             ber = gaussianQ(std::sqrt(2.0 * g));
-            ser = 1.0 - (1.0 - ber) * (1.0 - ber);
+            ser = ber * (2.0 - ber); // (1 - (1 - p)^2, without losing a small p)
             return;
         }
         case Modulation::Ask:
@@ -127,9 +166,9 @@ void errorRates(Modulation modulation, double ebN0Db, double askLowLevel, double
             const double m = static_cast<double>(levels * levels);
             const double r = std::sqrt(3.0 * k * g / (m - 1.0));
             double perAxisBits = 0.0, perAxisSymbol = 0.0;
-            pamErrors(levels, r, perAxisBits, perAxisSymbol);
+            pamErrors(levels, r, perAxisBits, perAxisSymbol, [](double a) { return gaussianQ(a); });
             ber = perAxisBits / (0.5 * k); // each axis carries half the bits, and errs alike
-            ser = 1.0 - (1.0 - perAxisSymbol) * (1.0 - perAxisSymbol);
+            ser = perAxisSymbol * (2.0 - perAxisSymbol);
             return;
         }
         default:
@@ -153,6 +192,108 @@ double theoreticalSer(Modulation modulation, double ebN0Db, double askLowLevel) 
     return ser;
 }
 
+namespace
+{
+// I0(z) e^-z (the Rice density at any K without overflow).
+double scaledBesselI0(double z) noexcept
+{
+    // Its series (all terms positive: nothing cancels) up to 50; beyond, the asymptotic one, its terms
+    // ((2k - 1)!!)^2 / (k! 8^k z^k), to the eighth (the next under 2e-13 there).
+    if (z < 50.0)
+    {
+        const double q = 0.25 * z * z;
+        double term = 1.0, sum = 1.0;
+        for (int k = 1; k < 400; ++k)
+        {
+            term *= q / (static_cast<double>(k) * static_cast<double>(k));
+            sum += term;
+            if (term < 1e-17 * sum) break;
+        }
+        return sum * std::exp(-z);
+    }
+    const double r = 1.0 / z;
+    double term = 1.0, sum = 1.0;
+    for (int k = 1; k <= 8; ++k)
+    {
+        const double odd = 2.0 * k - 1.0;
+        term *= odd * odd * r / (8.0 * k);
+        sum += term;
+    }
+    return sum / std::sqrt(kTwoPi * z);
+}
+
+// The mean over flat fading of the bit or symbol rate (bits: true) at Eb/N0 times x, x = |g|^2 of mean 1.
+double overFading(Modulation modulation, double ebN0Db, double askLowLevel, double riceK, bool bits) noexcept
+{
+    if (!std::isfinite(ebN0Db) || !std::isfinite(riceK)) return std::numeric_limits<double>::quiet_NaN();
+    const double k = std::max(0.0, riceK);
+    if (modulation == Modulation::Psk8)
+    {
+        // Craig's integrals with the exponential averaged in closed form: one integral, not one per gain.
+        double ber = 0.0, ser = 0.0;
+        psk8Errors(std::pow(10.0, ebN0Db / 10.0), ber, ser, k, true);
+        return std::clamp(bits ? ber : ser, 0.0, 1.0);
+    }
+    if (modulation == Modulation::Qam16 || modulation == Modulation::Qam64 || modulation == Modulation::Qam256)
+    {
+        // The same for each tail of the levels; a symbol wrong on either axis, 2 p - p^2 with p = c Q: its mean
+        // 2 c E[Q] - c^2 E[Q^2].
+        const int bps = bitsPerSymbol(modulation);
+        const std::size_t levels = std::size_t{1} << (bps / 2);
+        const double m = static_cast<double>(levels * levels);
+        const double r = std::sqrt(3.0 * bps * std::pow(10.0, ebN0Db / 10.0) / (m - 1.0));
+        if (bits)
+        {
+            double perAxisBits = 0.0, perAxisSymbol = 0.0;
+            pamErrors(levels, r, perAxisBits, perAxisSymbol, [k](double a) { return fadedQ(a, k, false); });
+            return std::clamp(perAxisBits / (0.5 * bps), 0.0, 1.0);
+        }
+        const double c = 2.0 * (1.0 - 1.0 / static_cast<double>(levels));
+        return std::clamp(2.0 * c * fadedQ(r, k, false) - c * c * fadedQ(r, k, true), 0.0, 1.0);
+    }
+    const auto density = [k](double x) {
+        if (k == 0.0) return std::exp(-x);
+        const double a = std::sqrt((1.0 + k) * x) - std::sqrt(k);
+        return (1.0 + k) * std::exp(-a * a) * scaledBesselI0(2.0 * std::sqrt(k * (1.0 + k) * x));
+    };
+    const auto rate = [&](double x) {
+        double ber = 0.0, ser = 0.0;
+        errorRates(modulation, ebN0Db + 10.0 * std::log10(x), askLowLevel, ber, ser);
+        return bits ? ber : ser;
+    };
+    // Simpson over s = ln x, from 1e-12 (below: the rate at no signal, over that little probability) to where the
+    // density is under e^-60. A strong line of sight gathers |g|^2 about 1, sqrt(2 / (1 + K)) wide: from where the
+    // density is under e^-120 (nothing below counts, short of rates under 1e-50), the steps an eighth of that.
+    constexpr double kSmallest = 1e-12;
+    const double root = std::sqrt(k), high = std::sqrt(60.0), deep = std::sqrt(120.0);
+    const double largest = (root + high) * (root + high) / (1.0 + k);
+    const double lowest = root > deep ? std::max(kSmallest, (root - deep) * (root - deep) / (1.0 + k)) : kSmallest;
+    const double s0 = std::log(lowest), s1 = std::log(largest);
+    const double spread = std::min(1.0, std::sqrt(2.0 / (1.0 + k)));
+    const int intervals = 2 * std::clamp(static_cast<int>(std::ceil(4.0 * (s1 - s0) / spread)), 384, 10000);
+    const double h = (s1 - s0) / intervals;
+    double sum = 0.0;
+    for (int i = 0; i <= intervals; ++i)
+    {
+        const double x = std::exp(s0 + h * i);
+        const double weight = i == 0 || i == intervals ? 1.0 : i % 2 ? 4.0 : 2.0;
+        sum += weight * rate(x) * density(x) * x;
+    }
+    const double result = sum * h / 3.0 + (lowest <= kSmallest ? rate(kSmallest) * density(0.0) * kSmallest : 0.0);
+    return std::isfinite(result) ? std::clamp(result, 0.0, 1.0) : result; // (NaN: an analog modulation)
+}
+} // namespace
+
+double fadingBer(Modulation modulation, double ebN0Db, double askLowLevel, double riceK) noexcept
+{
+    return overFading(modulation, ebN0Db, askLowLevel, riceK, true);
+}
+
+double fadingSer(Modulation modulation, double ebN0Db, double askLowLevel, double riceK) noexcept
+{
+    return overFading(modulation, ebN0Db, askLowLevel, riceK, false);
+}
+
 BitErrors countBitErrors(std::span<const std::uint8_t> sent, std::span<const std::uint8_t> received, std::size_t skip)
 {
     BitErrors result;
@@ -168,11 +309,6 @@ BitErrors countBitErrors(std::span<const std::uint8_t> sent, std::span<const std
 
 namespace
 {
-double fraction(double x) noexcept
-{
-    return x - std::floor(x);
-}
-
 // Back to complex baseband, carrier phase removed: r = 2 x exp(-j (2 pi fc t + phi)) for a passband record
 // (r = b + conj(b) exp(-j 2 (2 pi fc t + phi)): the wanted signal plus its image around -2 fc), or
 // r = b exp(-j phi) for a complex record.
@@ -212,13 +348,12 @@ bool mixDown(const ReceivedInput &input, const ReceiverSpec &spec, std::vector<d
     }
     ri.resize(n);
     rq.resize(n);
-    const double ratio = spec.carrierFrequencyHz / fs;
+    Rotator carrier(spec.carrierFrequencyHz / fs, 0.0, 2.0);
     for (std::size_t i = 0; i < n; ++i)
     {
-        const std::complex<double> lo = std::polar(2.0, -kTwoPi * fraction(ratio * static_cast<double>(i))) * derotate;
-        const std::complex<double> v = input.passband[i] * lo;
-        ri[i] = v.real();
-        rq[i] = v.imag();
+        const std::complex<double> lo = turned(std::conj(carrier.next()), derotate);
+        ri[i] = input.passband[i] * lo.real();
+        rq[i] = input.passband[i] * lo.imag();
     }
     return true;
 }
@@ -281,9 +416,8 @@ DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &
         return out;
     }
     const bool rrc = spec.pulse == PulseShape::RootRaisedCosine && spec.type != Modulation::Fsk;
-    const double bandEdge = spec.type == Modulation::Fsk ? spec.fskDeviationHz + rs
-                            : rrc                       ? 0.5 * (1.0 + spec.rolloff) * rs
-                                                        : rs;
+    const double bandEdge = receiverBandEdgeHz(spec);
+    out.matchedRateHz = fs;
     std::vector<double> ri, rq;
     if (!mixDown(input, spec, ri, rq, out.error)) return out;
     out.basebandI = ri;
@@ -303,7 +437,7 @@ DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &
             out.error = "Le cosinus surélevé demande un nombre entier d'échantillons par symbole.";
             return out;
         }
-        const std::vector<double> h = rootRaisedCosine(spec.rolloff, spsInteger, spec.pulseSpanSymbols);
+        const std::vector<double> h = rootRaisedCosine(spec.rolloff, spsInteger, pulseSpanSymbolsOf(spec.pulseSpanSymbols, spec.rolloff));
         const double scale = 1.0 / (a * std::sqrt(static_cast<double>(spsInteger)));
         if (spec.matchedOutput)
         {
@@ -342,7 +476,7 @@ DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &
         out.decisionPoints.assign(symbols, {0.0, 0.0});
         std::vector<std::complex<double>> mark(symbols), space(symbols);
         std::vector<std::size_t> counts(symbols, 0);
-        const double ratio = spec.fskDeviationHz / fs;
+        Rotator deviation(spec.fskDeviationHz / fs);
         for (std::size_t i = 0; i < n; ++i)
         {
             const auto k = static_cast<std::size_t>(std::floor(static_cast<double>(i) * rs / fs));
@@ -353,9 +487,9 @@ DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &
             ++counts[k];
             if (spec.type == Modulation::Fsk)
             {
-                const std::complex<double> tone = std::polar(1.0, -kTwoPi * fraction(ratio * static_cast<double>(i)));
-                mark[k] += v * tone;
-                space[k] += v * std::conj(tone);
+                const std::complex<double> tone = std::conj(deviation.next());
+                mark[k] += turned(v, tone);
+                space[k] += turned(v, std::conj(tone));
             }
             else
             {
@@ -406,6 +540,27 @@ DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &
         out.symbols.push_back(symbol);
         for (int b = bps - 1; b >= 0; --b) out.bits.push_back(static_cast<std::uint8_t>((symbol >> b) & 1u));
     }
+    return out;
+}
+
+double receiverBandEdgeHz(const ReceiverSpec &spec) noexcept
+{
+    const double rs = spec.symbolRate;
+    if (spec.type == Modulation::Fsk) return std::abs(spec.fskDeviationHz) + rs;
+    if (spec.pulse == PulseShape::RootRaisedCosine) return 0.5 * (1.0 + spec.rolloff) * rs;
+    return rs;
+}
+
+Baseband toBaseband(const ReceivedInput &input, const ReceiverSpec &spec)
+{
+    Baseband out;
+    if (!(spec.sampleRateHz > 0.0))
+    {
+        out.error = "La fréquence d'échantillonnage doit être positive.";
+        return out;
+    }
+    if (!mixDown(input, spec, out.inPhase, out.quadrature, out.error)) return out;
+    removeImage(spec, receiverBandEdgeHz(spec), out.inPhase, out.quadrature, out.warnings);
     return out;
 }
 

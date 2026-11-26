@@ -3,8 +3,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Qacq.App
 
-// Properties of the selected signal: name, timing, channels (name and unit), notes, and where it comes
-// from. Every edit is one step of the undo history. The sample rate is the time scale of the signal: the
+// Properties of the selected signal: name, timing, channels (name and unit, a cross to take one out of
+// the signal), notes, and where it comes from. Every edit is one step of the undo history. The sample rate is the time scale of the signal: the
 // samples stay, durations and frequencies follow it; a change by ten or more is confirmed first.
 ScrollView {
     id: root
@@ -184,7 +184,26 @@ ScrollView {
                         value: channelRow.modelData.unit
                         onEdited: (text) => root.list.setChannel(root.signalId, channelRow.index, channelRow.modelData.name, text.trim())
                     }
+                    ToolButton {
+                        Layout.alignment: Qt.AlignBottom
+                        visible: (root.info.channels ?? []).length > 1
+                        text: "×"
+                        implicitWidth: 28
+                        onClicked: root.list.removeChannel(root.signalId, channelRow.index)
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 500
+                        ToolTip.text: qsTr("Supprimer la voie « %1 » du signal : les autres restent (Ctrl+Z la rend)").arg(channelRow.modelData.name)
+                    }
                 }
+            }
+            Label {
+                visible: (root.info.channels ?? []).length > 1
+                Layout.fillWidth: true
+                Layout.topMargin: -4
+                wrapMode: Text.WordWrap
+                text: qsTr("La croix supprime une voie du signal. Plusieurs à la fois : clic droit sur le signal dans la liste, « Supprimer des voies… ».")
+                color: Theme.textMuted
+                font.pixelSize: Theme.smallText
             }
 
             SectionTitle { text: qsTr("Notes") }

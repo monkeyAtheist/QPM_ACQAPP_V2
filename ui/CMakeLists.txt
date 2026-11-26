@@ -49,6 +49,7 @@ qt_add_qml_module(QTacquisitionApp
         qml/GeneratorPanel.qml
         qml/WaveCard.qml
         qml/FormulaField.qml
+        qml/FrameFields.qml
         qml/ListenGroup.qml
         qml/FiltersView.qml
         qml/FilterPanel.qml

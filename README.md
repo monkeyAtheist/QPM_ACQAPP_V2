@@ -7,9 +7,9 @@ Ce dépôt est la réécriture de QtAcquisitionApp (« Architecture milestone 57
 **Statut : phase 4 (les modules) en cours.** Le cœur de calcul, le décodage des acquisitions, le modèle de
 session, l'acquisition sur ses threads et leurs tests sont en place. La fenêtre Qt Quick existe, sur la coquille
 de QTsignalApp V2 : modules Signaux (visualiser, mesurer, ajouter des courbes et des spectres),
-Acquisition, Générateur, Filtres et Modulations (sa base : une liaison numérique simulée de bout en bout ; canal
-réaliste et synchronisation, codage, OFDM et démodulation d'un signal réel suivent). L'ancienne application
-reste utilisable d'ici là.
+Acquisition, Générateur, Filtres et Modulations (une liaison numérique simulée de bout en bout, son canal à
+trajets multiples et ses évanouissements, un récepteur qui se synchronise, un égaliseur linéaire ou à retour de
+décision ; codage, OFDM et démodulation d'un signal réel suivent). L'ancienne application reste utilisable d'ici là.
 
 ## Décisions (20/11/2026)
 
@@ -34,14 +34,26 @@ dsp/                         qacq_dsp : cœur de traitement du signal C++20, san
                                     d'un gabarit (comme buttord, cheb1ord, cheb2ord, ellipord)
   include/qacq/dsp/filtering.h     filtrage en sections, aller-retour sans déphasage (bords prédits ou comme
                                     SciPy), prédiction linéaire, FIR par FFT
-  include/qacq/dsp/random.h        aléatoire reproductible (xoshiro256**, même suite sur tout compilateur)
+  include/qacq/dsp/random.h        aléatoire reproductible (xoshiro256**, même suite sur tout compilateur ;
+                                    valeurs normales par la méthode polaire)
   include/qacq/dsp/generator.h     générateur : formes échantillonnées ou limitées en bande (série de Fourier)
   include/qacq/dsp/modulation.h    AM, FM, PM, ASK, FSK, BPSK, QPSK, 8-PSK, 16/64/256-QAM (Gray) ; porteuse réelle
                                     ou bande de base I/Q ; constellations, décision au plus proche ;
                                     AnalogModulator, partagé avec la porteuse modulée du générateur
-  include/qacq/dsp/channel.h       bruit blanc gaussien réglé en SNR ou en Eb/N0
+  include/qacq/dsp/channel.h       bruit blanc gaussien réglé en SNR ou en Eb/N0 ; canal : plusieurs trajets,
+                                    évanouissements (Rayleigh, Rice : modèle de Clarke), retard, horloge,
+                                    décalage de fréquence et de phase de la porteuse
   include/qacq/dsp/receiver.h      récepteurs (corrélation, filtre adapté RRC, FSK non cohérente), sortie du
-                                    filtre adapté (diagramme de l'œil), TEB et TES théoriques exacts
+                                    filtre adapté (diagramme de l'œil), TEB et TES théoriques exacts, avec ou
+                                    sans évanouissements
+  include/qacq/dsp/rotator.h       phaseur d'une porteuse : son angle tous les 64 échantillons, une
+                                    multiplication entre deux
+  include/qacq/dsp/interpolation.h valeurs entre les échantillons (sinc fenêtré de Kaiser, tabulé)
+  include/qacq/dsp/synchronization.h récepteur synchronisé : trame (préambule), porteuse et rythme retrouvés
+  include/qacq/dsp/equalizer.h     égaliseur au rythme des symboles, linéaire ou à retour de décision :
+                                    calculé (erreur quadratique minimale) d'après la réponse du canal, ou appris
+                                    (préambule, puis LMS normalisé sur ses décisions, sa boucle de porteuse
+                                    après lui)
 io/                          qacq_io : décodage des données acquises, sans aucune dépendance Qt
   include/qacq/io/decoder.h        interface commune : octets reçus découpés n'importe où -> trames
   include/qacq/io/text_decoder.h   lignes de nombres (CSV, virgule décimale, « nom:valeur », en-tête)
@@ -88,7 +100,10 @@ analysis/                    qacq_analysis : l'analyse sans Qt (spectre d'une zo
   include/qacq/analysis/curves.h    courbes ajoutées : sortes, noms, unités, liste en JSON, calcul, « Garder »
   include/qacq/analysis/generation.h  recettes du générateur : voies, formes d'onde additionnées, séries de Fourier,
                                     motifs dessinés (points, tracés, série exacte), récurrences, opérations entre
-                                    voies, porteuses modulées, ordre des voies, JSON, exemples
+                                    voies, porteuses modulées, signaux enregistrés, trames numériques (lignes en
+                                    groupe, cadrage), ordre des voies, JSON, exemples
+  include/qacq/analysis/frames.h      trames numériques : données tapées (bits, hexadécimal, décimal, texte), codes
+                                    de ligne, UART, I2C, SPI, USB (CRC5, CRC16, bourrage, NRZI), champs de la trame
   include/qacq/analysis/expression.h  formules tapées (coefficients de Fourier…) : opérateurs, fonctions, variables
   include/qacq/analysis/playback.h    un signal prêt pour la carte son : voies, rééchantillonnage, niveau, format
   include/qacq/analysis/filters.h     module Filtres : recette (RII, RIF fenêtré ou équiondulation, coefficients
@@ -97,26 +112,31 @@ analysis/                    qacq_analysis : l'analyse sans Qt (spectre d'une zo
                                     tient, application à un signal (causale, à phase nulle, alignée), JSON, exemples
   include/qacq/analysis/filter_code.h le filtre pour microcontrôleur : flottant ou virgule fixe (Q15, Q31), mise à
                                     l'échelle, arithmétique simulée au bit près, ce que l'arrondi fait, le C
-  include/qacq/analysis/link.h        module Modulations : la liaison (bits, modulateur, bruit, récepteur), TEB
-                                    mesuré et théorique, EVM, texte reçu, points d'une courbe TEB, JSON, exemples
+  include/qacq/analysis/link.h        module Modulations : la liaison (bits, modulateur, canal et ses trajets,
+                                    bruit, récepteur, égaliseur), TEB mesuré et théorique, EVM, texte reçu, points
+                                    d'une courbe TEB, JSON, exemples
 ui/                          QTacquisitionApp : la fenêtre Qt Quick (coquille de QTsignalApp V2)
   signal_plot.h                    le tracé (QQuickPaintedItem) : signal de la session, défilement, captures
   spectrum_plot.h                  le spectre : fréquences linéaires ou log, niveaux en dB ou linéaires, harmoniques
   motif_editor.h                   l'éditeur d'un motif dessiné du générateur : points, tracés à main levée, grille
   response_plot.h                  les réponses d'un filtre : gain, phase, retard, impulsion, indice, plan z
-  modulation_plot.h                la constellation reçue, le diagramme de l'œil, les courbes TEB
+  modulation_plot.h                la constellation reçue, le diagramme de l'œil, la synchronisation, le canal et
+                                    l'égaliseur, les courbes TEB
   qml/Main.qml                     fenêtre, barre des modules, ruban, liste des signaux, propriétés
   qml/AcquisitionView.qml          module Acquisition : tracé en direct, ruban, état et chiffres de la liaison
   qml/AcquisitionSettings.qml      réglages de la source, du format, de la cadence, des voies ; préréglages
   qml/SignalsView.qml              module Signaux : le signal choisi, les courbes du temps et les spectres ajoutés
   qml/AnalysisPanel.qml            onglet Mesures : mesures de la zone, pics des spectres, réglages des calculs
   qml/GeneratorView.qml            module Générateur : aperçu du signal et de son spectre, ruban, ajout à la session
-  qml/GeneratorPanel.qml           onglet Composition : signal, voies, formes d'onde (WaveCard.qml), préréglages
+  qml/GeneratorPanel.qml           onglet Composition : signal, voies, formes d'onde (WaveCard.qml ; FrameFields.qml
+                                    pour une trame numérique), préréglages
   qml/FiltersView.qml              module Filtres : réponses du filtre (Concevoir), avant et après (Appliquer)
   qml/FilterPanel.qml              onglet Filtre : la recette en détail, ce qu'il fait, ses coefficients
   qml/FilterCodeDialog.qml         le filtre en C pour microcontrôleur : format, mise à l'échelle, nom, .h et .c
-  qml/ModulationsView.qml          module Modulations : la liaison (signaux, spectres, constellation, œil), courbes TEB
-  qml/ModulationPanel.qml          onglet Liaison : l'émetteur, les données, le canal, le résultat, le texte reçu
+  qml/ModulationsView.qml          module Modulations : la liaison (signaux, spectres ou canal, constellation, œil,
+                                    synchronisation), courbes TEB
+  qml/ModulationPanel.qml          onglet Liaison : l'émetteur, les données, le canal et ses trajets, le récepteur et
+                                    son égaliseur, le résultat, le texte reçu
   qml/FitMenu.qml                  un menu aussi large que son plus long article
   qml/ViewGroup.qml                groupe « Vue » du ruban, le même dans chaque module
 tests/                       qacq_tests (cœurs) et qacq_app_tests (couche Qt) : un groupe CTest par étiquette
@@ -139,6 +159,19 @@ scripts\build.cmd        configure, compile et lance tous les tests (journaux da
 ```
 scripts\run.cmd          compile ce qui a changé (l'application seule) puis la lance ; messages dans build\logs\app.txt
 ```
+
+Sur un PC Windows à processeur ARM (Snapdragon X), l'application peut être compilée **en ARM64 natif** : Qt pour MSVC ARM64
+(installateur ARM64 de Qt : Qt 6.12 ▸ MSVC 2022 ARM64, Qt Multimedia, Qt Serial Port ; CMake et Ninja) et le compilateur
+de Visual Studio 2022 ou 2026 ou de leurs Build Tools (« Développement Desktop en C++ » avec les outils de build C++ ARM64/ARM64EC).
+Compilée pour x64, elle y tourne émulée, et ses fonctions mathématiques (sin, cos, log…) y sont lentes.
+
+```
+scripts\build_arm64.cmd    trouve Qt (C:\Qt*\…\msvc*_arm64 : C:\Qt, C:\QT_ARM…) et Visual Studio, configure, compile, teste (journaux dans build\logs\arm64\)
+scripts\run_arm64.cmd      compile ce qui a changé puis lance l'application ARM64 ; messages dans build\logs\arm64\app.txt
+```
+
+Un autre Qt : `set QACQ_QT_DIR=D:\Qt\6.12.1\msvc2022_arm64` (par exemple) avant le script. Ce que le script a trouvé (Qt, Visual
+Studio, compilateur, cmake, ninja) est écrit dans `build\logs\arm64\environment.txt`.
 
 Ou directement, avec les préréglages de `CMakeUserPresets.json` (propres à ce PC) :
 
@@ -195,15 +228,30 @@ Taux d'erreur mesurés sur 200 000 bits (`[ber]`), tous dans 5 écarts-types de 
 
 | Liaison | Eb/N0 | Mesuré | Théorie |
 | --- | --- | --- | --- |
-| BPSK, porteuse réelle | 6 dB | 2,45e-3 | 2,39e-3 |
-| QPSK, porteuse réelle | 6 dB | 2,39e-3 | 2,39e-3 |
-| ASK tout ou rien, porteuse réelle | 9 dB | 2,45e-3 | 2,41e-3 |
-| FSK non cohérente, porteuse réelle | 10 dB | 3,57e-3 | 3,37e-3 |
-| BPSK en cosinus surélevé (0,35), bande de base | 5 dB | 5,87e-3 | 5,95e-3 |
-| 8-PSK, porteuse réelle | 10 dB | 1,04e-3 | 1,01e-3 |
-| 16-QAM en cosinus surélevé, porteuse réelle | 10 dB | 1,78e-3 | 1,75e-3 |
-| 64-QAM, porteuse réelle | 14 dB | 2,23e-3 | 2,15e-3 |
-| 256-QAM en cosinus surélevé, bande de base | 18 dB | 3,55e-3 | 3,47e-3 |
+| BPSK, porteuse réelle | 6 dB | 2,35e-3 | 2,39e-3 |
+| QPSK, porteuse réelle | 6 dB | 2,27e-3 | 2,39e-3 |
+| ASK tout ou rien, porteuse réelle | 9 dB | 2,38e-3 | 2,41e-3 |
+| FSK non cohérente, porteuse réelle | 10 dB | 3,27e-3 | 3,37e-3 |
+| BPSK en cosinus surélevé (0,35), bande de base | 5 dB | 6,16e-3 | 5,95e-3 |
+| 8-PSK, porteuse réelle | 10 dB | 0,88e-3 | 1,01e-3 |
+| 16-QAM en cosinus surélevé, porteuse réelle | 10 dB | 1,80e-3 | 1,75e-3 |
+| 64-QAM, porteuse réelle | 14 dB | 2,01e-3 | 2,15e-3 |
+| 256-QAM en cosinus surélevé, bande de base | 18 dB | 3,74e-3 | 3,47e-3 |
+
+(Tirages du 23/11/2026 : le bruit gaussien vient depuis de la méthode polaire, voir plus bas. Sur 16 millions
+de bits par liaison, l'écart à la théorie est de −0,07 % en 256-QAM, −0,09 % en 64-QAM, −0,8 % en QPSK sur
+porteuse, −0,03 % en 8-PSK.)
+
+**Vitesse là où la bibliothèque mathématique est lente** (un programme x86 émulé sur un processeur ARM : un
+cosinus y coûte environ une microseconde, cent fois plus qu'une multiplication). Les porteuses ne passent plus
+par un cosinus et un sinus à chaque échantillon : `dsp::Rotator` (`rotator.h`) calcule le phaseur d'après son
+angle tous les 64 échantillons et le fait tourner par une multiplication entre deux, aussi près de la vraie
+valeur que l'angle écrit à chaque échantillon (dont la fraction n'est connue qu'à l'arrondi de f/fs × i) ; rien
+ne s'accumule sur un long enregistrement. Le bruit gaussien (`Random::normal`) vient de la méthode polaire de
+Marsaglia (un point tiré dans le disque unité donne deux valeurs normales indépendantes, exactes, pour un
+logarithme et une racine) au lieu de Box-Muller (un logarithme, un cosinus et un sinus) : les valeurs tirées
+d'une graine ne sont plus celles d'avant le 23/11/2026. Une liaison sur porteuse appelle 0,66 fonction
+mathématique par échantillon au lieu de 5,7 ; un point de courbe TEB dix fois moins.
 
 8-PSK et QAM carrées en code de Gray : 8-PSK, le point à l'angle p·π/4 porte les bits p xor (p >> 1) ; QAM, la
 première moitié des bits d'un symbole fixe I, la seconde Q, chacune un niveau de Gray parmi ±1, ±3… ramenés à
@@ -345,6 +393,18 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
   barre du haut (sessions récentes sous « Ouvrir ▾ », chemin de la session en infobulle de son nom) ;
   renommer, exporter, supprimer dans la liste (clic droit, F2, Suppr) ; le bouton « Importer un fichier… » de
   la liste n'apparaît que quand elle est vide, et un fichier déposé sur la fenêtre est importé.
+- **Supprimer des voies d'un signal** : la croix au bout de chaque voie de l'onglet Signal en retire une ;
+  « Supprimer des voies… » (clic droit sur le signal dans la liste) en retire plusieurs d'un coup (on décoche
+  celles qui partent). Les autres restent dans leur ordre, avec leurs échantillons ; un signal garde au moins
+  une voie ; une paire I/Q dépareillée redevient un signal réel ; ce qui est parti est noté à la fin de ses
+  notes (« Voie retirée : sin. »). Une étape de l'historique : Ctrl+Z rend les voies.
+- **Vers le Générateur** (clic droit sur un signal de la liste, dans tous les modules) : « Utiliser dans le
+  Générateur » en fait une voie de la recette (forme d'onde « Signal enregistré ») ; « Moduler une porteuse
+  (AM, FM…) » en fait, ramené à 1 V crête, le message d'une porteuse modulée en amplitude (indice 0,8), dans une
+  voie de plus. Sur une page vierge, cette voie est toute la page, à la fréquence d'échantillonnage et pour la
+  durée du signal ; sinon la page garde les siennes, et le message le dit (« Sa fréquence et sa durée », dans la
+  carte du signal enregistré, la règle sur lui). Le Générateur s'ouvre sur cette voie et dit ce qui a été fait.
+  D'un signal de plusieurs voies, c'est la première ; les autres : Générateur ▸ Moduler ▾.
 - **Graphe du temps** : la voie elle-même (pour superposer), son intégrale, sa dérivée, sa moyenne, sa valeur
   efficace ou sa fréquence par période ; sur tout le signal ou entre A et B. Il suit le zoom et les curseurs
   du signal. Superposées, deux unités ont chacune leur échelle (gauche et droite) ; au-delà, une bande par
@@ -410,6 +470,21 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
 
 ## Le module Générateur
 
+- **Page vierge** : le module s'ouvre sur une voie sans forme d'onde (zéro, 48 kHz, 1 s), et **Par défaut** y
+  revient ; un encadré dit par où commencer. La recette de la dernière fois (la dernière qui n'était pas vierge)
+  se reprend d'un clic : Exemples ▸ « Reprendre la recette de la dernière fois ».
+- **Moduler ▾** (ruban) : une porteuse modulée en amplitude (indice 0,8 ; sa carte règle aussi FM, PM, DBL, BLU),
+  dans une voie de plus, dont le message est **une voie de cette page**, lue telle quelle (« v1 » : l'enveloppe
+  vaut A·(1 + 0,8·v1), et la surmodulation est dite), ou **un signal de la session**, ramené à 1 V crête (sur une
+  page vierge, il prend toute la page, à sa fréquence et pour sa durée). La voie est mise à la place d'une voie
+  vierge que nulle autre ne lit, ou après les autres ; le message de la porteuse reste dans le signal (décocher
+  « Dans le signal » ne garde que la porteuse). Ce qui a été fait est dit (« Voie 2 « Voie 1 modulée » : la voie 1
+  « Voie 1 », lue telle quelle (v1), est le message d'une porteuse de 10 kHz… »).
+- **Les voies** (panneau Composition) : une pastille par voie ; sa **croix** la supprime ; **clic droit** dessus :
+  vider la voie (sans forme d'onde ni décalage, elle garde son nom et sa place), la supprimer, la mettre hors du
+  signal (voie de calcul) ou l'y remettre, moduler une porteuse avec elle. Sous les champs de la voie, « Vider la
+  voie » et « Supprimer la voie ». Il reste toujours une voie ; une voie lue par une autre ne se supprime pas (le
+  message dit laquelle la lit).
 - **Une recette, voie par voie** : un signal de 1 à 16 voies, chacune avec son nom, son unité, son décalage
   et jusqu'à 32 formes d'onde qui s'additionnent : sinus, carré, triangle, dent de scie, impulsions (rapport
   cyclique), continu, échelon et Dirac (à l'instant choisi), bruit blanc (gaussien : écart type ; uniforme :
@@ -470,12 +545,64 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
   produit, quotient, moyenne, module, valeur absolue, carré, redressement. Les voies lues sont nommées sous la
   formule (« v1 : « Tension » »). Une voie lue par une autre ne peut pas être retirée (le message dit
   laquelle) ; retirer une autre voie renumérote les formules (v3 devient v2).
+- **Voie de calcul** (case « Dans le signal » décochée) : la voie est faite comme les autres et lue par leurs
+  opérations (v1…), mais elle n'est ni tracée ni ajoutée à la session : une porteuse, un message, une étape
+  (s = I·cos − Q·sin sans garder sin, cos, I·cos et Q·sin dans le signal). Sa pastille est en italique, à
+  point creux ; la taille annoncée compte les voies du signal (« plus 2 voies de calcul ») ; il en faut au
+  moins une dans le signal. La recette entière reste dans la provenance : reprise, elle rend ses voies de
+  calcul.
+- **Signal enregistré** (forme d'onde) : une voie d'un signal de la session (acquis, importé, filtré, déjà
+  généré) comme une forme d'onde parmi les autres : elle s'additionne (un enregistrement plus un bruit, deux
+  enregistrements mêlés), se lit dans une opération (« v1*v2 ») ou devient le message d'une porteuse (« x »).
+  Niveau **tel quel fois un gain**, ou **crête ramenée à** une valeur (celle de la partie lue : 1 pour un
+  message, l'indice m est alors le taux de modulation) ; lue **à partir de** l'instant choisi de
+  l'enregistrement, placée après un **retard** (arrondi à l'échantillon ; négatif, elle commence plus loin
+  dans l'enregistrement), **une fois** (0 ensuite, et c'est dit) ou **en boucle**. À une autre fréquence
+  d'échantillonnage que la recette, elle est rééchantillonnée (sinc de Kaiser de l'écoute : en descendant, ce
+  qui dépasse 0,45 fs est retiré, et c'est dit) ; « Sa fréquence et sa durée » donne à la recette celles de
+  l'enregistrement. Seule la partie utile de l'enregistrement est lue (une seconde d'un enregistrement de dix
+  minutes ne le rééchantillonne pas en entier). La recette nomme son signal par son identifiant dans la
+  session et garde son nom, celui de la voie et son nombre d'échantillons : renommé, ou une voie en moins,
+  elle le suit, et l'aperçu est refait quand il change ; reprise dans une autre session, elle ne lit pas un
+  étranger du même numéro (« Le signal enregistré « Voix » n'est pas dans la session »).
 - **Porteuse modulée** : A cos(2π fc t + φ) modulée en **amplitude** A(1 + m·message), en **fréquence**
   fc + Δf·message ou en **phase** φ + Δφ·message, par un message tapé comme une opération : un sinus
   (« sin(2*pi*fm*t) », fm en variable), une autre voie (« v1 »), les formes d'onde au-dessus (« x »,
-  remplacées), ou toute formule (**Message ▾**). Les formules de modulation sont celles du module Modulations
-  (`dsp::AnalogModulator`) : les mêmes échantillons. Une surmodulation (m × crête du message > 1), une
-  fréquence instantanée hors de 0…fs/2 ou une porteuse au-delà de fs/2 sont dites.
+  remplacées : un signal enregistré, par exemple), ou toute formule (**Message ▾**, à côté du champ du
+  message : un sinus, un carré, les formes d'onde au-dessus, une autre voie, ou un signal de la session, ramené à
+  1 V crête et placé au-dessus de la porteuse). Les formules de
+  modulation sont celles du module Modulations (`dsp::AnalogModulator`) : les mêmes échantillons. Une
+  surmodulation (m × crête du message > 1), une fréquence instantanée hors de 0…fs/2 ou une porteuse au-delà
+  de fs/2 sont dites. Aussi **DBL** (double bande latérale, porteuse supprimée : A·message·cos(2π fc t + φ))
+  et **BLU** supérieure ou inférieure (bande latérale unique : A·(m·cos ∓ m̂·sin), m̂ la transformée de
+  Hilbert du message, prise par la TFD de tout le signal : exacte pour ce qui y est périodique, avec des
+  rebonds aux deux bouts sinon ; 1 048 576 échantillons au plus).
+- **Trame numérique** (forme d'onde « Trame numérique ») : des données tapées deviennent un signal à deux
+  niveaux. **Données** : des bits (« 0011 0010 100 »), de l'hexadécimal (« 0x2831 », « 28 31 »), des octets en
+  décimal, du texte (« Bonjour », en UTF-8 ; \n, \r, \t, \0, \x41). Le format se devine (0x… : hexadécimal ;
+  rien que des 0 et des 1 : binaire ; entre guillemets, ou tout le reste : texte), se dit devant les données
+  (« hex: », « bin: », « dec: », « ascii: ») ou se choisit. **Ordre des bits** : poids fort (MSB) ou poids faible
+  (LSB) d'abord, octet par octet (ou groupe de bits tapé par groupe). **Protocoles** : les *bits tels quels*
+  sur un code de ligne (NRZ, NRZI, Manchester, RZ), avec leur horloge ; l'*UART* (5 à 8 bits, parité, 1, 1,5 ou
+  2 bits d'arrêt, repos haut) ; l'*I2C* (SDA et SCL : départ, adresse sur 7 bits et sens, acquittements, arrêt ;
+  écriture, lecture, ou écriture puis lecture après un redémarrage ; adresse sans réponse) ; le *SPI* (MOSI,
+  MISO, SCLK, CS ; modes 0 à 3 ; la réponse sur MISO) ; l'*USB* bas et plein débit (D+ et D− : SYNC, PID, adresse,
+  point de terminaison et CRC5, données et CRC16, bits de bourrage, NRZI, fin de paquet ; jetons SETUP, IN,
+  OUT, SOF, paquets DATA0 et DATA1, ACK, NAK, STALL, ou une transaction SETUP entière). **La trame
+  construite** se lit dans la carte, champ par champ (« St 01000010 Sp │ St 11110110 Sp », « S 1001000 W A │
+  00000001 A │ P », « SYNC 00000001 │ PID 10110100 │ ADDR 0000000 │ ENDP 0000 │ CRC5 01000 │ EOP »), avec ce
+  que ses marques veulent dire, son nombre de bits, sa durée et le nombre d'échantillons par bit. Débit,
+  instant de début, niveaux haut et bas (0 et 3,3 V, −1 et +1…), une fois ou en boucle avec un repos entre
+  deux trames (« 10 » en boucle sans repos : un carré). **Ajouter les lignes** : les autres lignes du bus
+  (horloge, SCL, MISO, CS, D−) deviennent des voies à leur nom ; un réglage fait sur l'une vaut pour toutes,
+  et changer de protocole laisse à chaque ligne son rôle (l'horloge reste une horloge). **Cadrer la trame** :
+  le signal prend la durée de la trame, deux bits de repos avant et après, et une fréquence
+  d'échantillonnage d'au moins dix échantillons par bit (un nombre entier) ; **Débit réel** met une trame USB
+  à 1,5 ou 12 Mbit/s. Trop peu d'échantillons par bit, une trame qui dépasse la fin du signal, un octet trop
+  large pour 7 bits, une requête SETUP qui n'a pas 8 octets : dits. Un bruit, un filtre (une récurrence) ou une
+  autre forme d'onde s'ajoutent à la ligne comme à toute voie. Les tests relisent chaque trame avec un
+  récepteur écrit pour eux (I2C sur les fronts de SCL, SPI sur ceux du mode, USB après NRZI et débourrage) et
+  vérifient les CRC de l'USB sur leurs exemples publiés.
 - **Repliement ou pas** : un carré, un triangle, une dent de scie ou des impulsions sont échantillonnés tels
   quels (leurs harmoniques au-delà de fs/2 se replient, comme sur un CAN sans filtre), ou « sans repliement »
   par leur série de Fourier jusqu'à fs/2, éventuellement limitée à quelques harmoniques (Gibbs bien visible).
@@ -506,14 +633,19 @@ Un seul module pour regarder, mesurer et analyser un signal de la session (Signa
   série de Fourier d'un carré (15 harmoniques, Gibbs), redressement double alternance, cardiogramme dessiné
   avec le 50 Hz du secteur, carré filtré par une récurrence (passe-bas RC), puissance instantanée v1 × v2
   (P = U·I·cos φ en moyenne), modulations d'amplitude et de fréquence d'un message de 500 Hz (voie 1) sur une
-  porteuse de 10 kHz, bruit blanc. La recette en cours est retenue d'une fois sur l'autre ; les préréglages en
-  gardent d'autres.
+  porteuse de 10 kHz, trames numériques (« Bonjour » en UART, écriture I2C de deux octets, lecture SPI d'un
+  identifiant, transaction SETUP de l'USB, code Manchester et son horloge), bruit blanc ; et « Reprendre la
+  recette de la dernière fois ». Les préréglages en gardent d'autres.
 - **Bruit reproductible** : une graine pour tout le signal ; chaque bruit en tire une suite à lui (graine +
   1000 × voie + forme d'onde), la même sur tout compilateur.
 
 ## Le module Filtres
 
-Un filtre conçu, regardé, puis essayé sur un signal de la session. Deux onglets au ruban :
+Un filtre conçu, regardé, puis essayé sur un signal de la session. Le module s'ouvre sur une **page vierge**,
+**aucun filtre** (H = 1 : la sortie est l'entrée, réponses plates à 0 dB ; rien à ajouter à la session ni à écrire
+en C), jusqu'au choix d'un type (ruban ▸ Filtre ▸ Aucun ▾ : le premier part d'un passe-bas à 1 kHz) ou d'un
+exemple ; **Par défaut** y revient, et Exemples ▸ « Reprendre le filtre de la dernière fois » rend le dernier
+filtre conçu. Deux onglets au ruban :
 
 - **Concevoir** : le type (**RII**, récursif : Butterworth, Chebyshev I, Chebyshev II, Bessel, elliptique ;
   **RIF**, non récursif, par la méthode de la fenêtre : rectangulaire, Hann, Hamming, Blackman,
@@ -651,16 +783,24 @@ le filtre (sections, stabilité, retards à quelques fréquences, ce qu'il attei
 pour chaque section d'un RII, a0 = 1 ; « h[k] = … » pour un RIF, les 600 premiers ; des coefficients tapés :
 b[k] et a[k] divisés par a[0], puis les sections) ; **Copier les
 coefficients** les copie tous, en pleine précision, avec ce qu'est le filtre en tête. **Mesures** donne celles
-de l'aperçu, avant et après. La recette est retenue d'une fois sur l'autre.
+de l'aperçu, avant et après. Le dernier filtre conçu se reprend (Exemples ▾).
 
 ## Le module Modulations
 
 Une liaison numérique simulée de bout en bout, recalculée sur son propre thread un instant après chaque
-modification (la plus récente l'emporte) :
+modification (la plus récente l'emporte). Le module s'ouvre sur une **page vierge** : rien n'est calculé (vues
+vides, « Page vierge : choisissez une modulation (ruban ▸ Émetteur) ou un exemple ») jusqu'au premier réglage,
+qui part d'une QPSK à 1 kBd, porteuse 6 kHz, Eb/N0 = 7 dB ; **Par défaut** y revient (le calcul en cours est
+abandonné), et Exemples ▸ « Reprendre la liaison de la dernière fois » rend la dernière liaison calculée :
 
 - **Émetteur** : **ASK** (tout ou rien, ou un niveau bas), **FSK** (deux tonalités à fc ± Δf, phase continue),
   **BPSK**, **QPSK**, **8-PSK**, **16-QAM**, **64-QAM**, **256-QAM** (code de Gray) ; impulsions
-  **rectangulaires** ou en **racine de cosinus surélevé** (α ; un nombre entier d'échantillons par symbole) ;
+  **rectangulaires** ou en **racine de cosinus surélevé** (α ; un nombre entier d'échantillons par symbole ;
+  l'impulsion est coupée à la plus courte longueur, de 12 à 96 symboles, où la paire émetteur et filtre adapté ne
+  laisse entre symboles que −50 dB au plus : 12 à α = 0,35, 22 à 0,1, 44 à 0,05, car plus α est petit, plus elle
+  décroît lentement ; coupée à 12 symboles, une impulsion à α = 0,1 laissait −25 dB, de quoi faire 632 erreurs
+  en 256-QAM à 24 dB où la théorie n'en attend aucune. Sous α ≈ 0,02, même 96 symboles ne suffisent plus : la
+  liaison le signale, avec l'interférence qui reste) ;
   **sur une porteuse** (un signal réel, ce que joue une carte son) ou **en I/Q** (l'enveloppe complexe) ; débit
   de symboles, porteuse, amplitude et phase, fs, longueur de l'enregistrement (2^20 échantillons au plus).
 - **Données** : des bits **au hasard** (une graine), **un texte** (ses octets UTF-8 à la suite, ou en trame série
@@ -668,36 +808,135 @@ modification (la plus récente l'emporte) :
   lit pas), ou **des bits tapés**, répétés. Le texte commence là où le compte commence : les premiers symboles
   portent sa fin, comme si l'émission durait déjà.
 - **Canal** : bruit blanc gaussien réglé en **Eb/N0** sur la puissance du signal (Eb = P/débit binaire) ; Eb/N0
-  mesuré sur le bruit tiré.
-- **Récepteur cohérent** (porteuse, phase et rythme connus) : filtre adapté (racine de cosinus surélevé, ou
-  intégration sur le symbole), décision au point le plus proche (FSK : l'énergie de chaque tonalité). Les 6
-  premiers et derniers symboles d'une racine de cosinus surélevé ne comptent pas (l'impulsion y est coupée).
+  mesuré sur le bruit tiré. Et ce qu'un vrai récepteur ne connaît pas : un **décalage de fréquence** de la
+  porteuse (au plus le débit de symboles), sa **phase**, un **retard** de la trame (en symboles, pas forcément
+  entier) et un **écart d'horloge** en ppm (le signal reçu est rééchantillonné : l'enregistrement reçu est plus
+  long que l'émis, l'aperçu complète l'émission par du silence). Et **plusieurs trajets** : le récepteur reçoit
+  la somme de copies du signal, chacune avec son retard (en symboles, entier ou non, 32 au plus), son gain (dB)
+  et sa phase, écrites « 0 : 0 ; 1 : -6 ; 2,5 : -12 @ 90 » (huit au plus ; des canaux tout prêts dans le ruban).
+  Leurs puissances s'ajoutent pour donner celle du signal reçu : Eb/N0 reste celui de ce que reçoit le récepteur.
+  Aux instants de décision, chaque symbole reçoit alors une part de ses voisins (l'interférence entre symboles) :
+  chaque point de la constellation devient plusieurs, l'œil se ferme, et les erreurs viennent sans bruit ou
+  presque. Le récepteur idéal décide sur le trajet le plus fort et ramène le symbole à sa taille (un écho à une
+  fraction de symbole de lui s'ajoute au symbole lui-même : 1,44 fois pour −3 dB un demi-symbole plus tard, à
+  α = 0,35) ; la boucle de rythme du récepteur synchronisé, elle, se pose entre deux trajets voisins, là où l'œil
+  est le plus ouvert, et peut alors faire mieux que lui (18,5 dB contre 11,7 pour ce même écho à α = 1). Le canal
+  affiché et le SINR annoncé sont ceux des instants où le récepteur choisi décide : c'est ce que mesure le MER
+  de la constellation.
+- **Récepteur idéal** (cohérent : il connaît la porteuse, la phase, le retard et l'horloge, et défait le canal
+  exactement) : filtre adapté (racine de cosinus surélevé, ou intégration sur le symbole), décision au point le
+  plus proche (FSK : l'énergie de chaque tonalité). Les premiers et derniers symboles d'une racine de cosinus
+  surélevé (la moitié de la longueur de l'impulsion : 6 à α = 0,35) ne comptent pas (l'impulsion y est coupée par
+  les bords de l'enregistrement). C'est ce que suppose la théorie du TEB.
+- **Récepteur synchronisé** (il cherche) : un **préambule** de symboles connus (64, de 8 à 1 024) lui donne le
+  début de la trame par corrélation, l'écart de fréquence et la phase ; deux boucles suivent ensuite le **rythme**
+  (détecteur de Gardner) et la **porteuse** (dirigée par les décisions), symbole après symbole, à 8 échantillons
+  par symbole ; leurs bandes se règlent (0,001 et 0,003 fois le débit). Le préambule ne compte pas dans le TEB.
+  Le résultat dit ce qu'il a trouvé contre la vérité : début de trame, décalage de fréquence, phase, horloge,
+  erreurs efficaces de rythme et de phase, **glissements** de la boucle de porteuse (elle retombe sur une autre
+  symétrie de la constellation : un quart de tour en QPSK ou en QAM, et tout ce qui suit est faux).
+- **Égaliseur** (linéaire, une prise par symbole, 11 par défaut, de 3 à 129) : après le récepteur, un filtre défait
+  ce que les trajets ont mêlé. Le **récepteur idéal**, qui connaît le canal (sa réponse aux instants de décision
+  est mesurée sur la chaîne sans bruit), se cale sur le trajet le plus fort et **calcule** les prises qui laissent
+  la plus petite erreur quadratique (Wiener, sans biais : les points restent sur la constellation) ; sans bruit,
+  c'est l'inversion du canal. Il annonce ce qui reste : le rapport de chaque symbole aux autres symboles et au
+  bruit (**SINR**) avant et après, l'**Eb/N0 équivalent** et le **TEB que la théorie y donne** (les voisins qui
+  restent comptés comme du bruit) ; le TEB mesuré le suit (0,78 à 1,15 fois sur 480 000 bits par cas). Un creux
+  profond de la bande (deux trajets presque égaux) coûte plusieurs dB : l'égaliseur le comble en amplifiant le
+  bruit qui s'y trouve. Le **récepteur synchronisé**, lui, **apprend** ses prises : celles qui expliquent le mieux
+  le préambule (moindres carrés), puis déplacées symbole après symbole d'après ses propres décisions (LMS
+  normalisé, pas réglable) ; sa boucle de porteuse travaille alors après l'égaliseur, là où les décisions sont
+  bonnes. Les moindres carrés sont régularisés de 2 % de l'énergie (un bruit à −17 dB) ; quand le préambule montre
+  moins de bruit que cela (une 256-QAM à 24 dB), les prises sont reprises avec ce bruit-là, et sans les premiers
+  symboles, dont le début de l'émission coupe les impulsions (le premier y est à moitié) : elles partent alors
+  justes, là où elles mettaient des centaines de symboles à l'être et y laissaient quelques erreurs. Les derniers symboles de la trame, dont l'égaliseur n'a pas les voisins suivants, ne comptent pas. Pas
+  d'égaliseur pour la FSK (décidée par l'énergie de ses tonalités). Limite : un écho en phase un symbole plus
+  tard creuse les bords de la bande, là où la boucle de rythme lit l'horloge ; elle décroche, et le dit (le
+  récepteur idéal montre ce que l'égaliseur ferait d'un rythme connu).
+- **Égaliseur à retour de décision** (Récepteur ▸ Égaliseur ▸ « À retour de décision » ; 4 prises de retour par
+  défaut, de 1 à 32) : les mêmes prises avant, puis des prises sur les symboles **déjà décidés**, qui retirent ce
+  que ceux-ci laissent sur le suivant. Les prises avant n'ont plus à combattre ces échos et laissent passer bien
+  moins de bruit dans un creux : deux trajets presque égaux à 12 dB, 13,0 dB de SINR après lui contre 8,9 pour
+  l'égaliseur linéaire, aucune erreur contre 18. Calculé par le récepteur idéal (erreur quadratique minimale si les
+  décisions sont justes : la réponse restante, au-delà du symbole, n'a plus que des 0 sur ses prises de retour),
+  appris par le récepteur synchronisé (moindres carrés sur le préambule, dont les symboles connus nourrissent le
+  retour, puis LMS normalisé sur ses décisions, après sa boucle de porteuse) : 0,45 % d'erreurs contre 3,6 % pour
+  le linéaire appris sur le même canal. Une décision fausse renvoie un symbole faux, qui peut rendre faux les
+  suivants : les erreurs viennent en salves. Le graphe « Canal » dit le nombre de prises de retour.
+- **Évanouissements** (Canal ▸ Évanouissements) : le gain de chaque trajet change pendant la trame, comme quand
+  des ondes venues de partout arrivent à un récepteur qui bouge (modèle de Clarke : 32 sinusoïdes par trajet,
+  décalées par l'effet Doppler jusqu'à ±**fd**, leurs angles régulièrement répartis à partir d'un tirage, leurs
+  phases au hasard ; la puissance de chaque trajet reste en moyenne celle donnée ; leur autocorrélation suit
+  J0(2π fd τ) à 1 % près). **Rayleigh** : sans visée directe, le gain plonge de 10 dB ou plus 9,5 % du temps.
+  **Rice** : une visée directe K fois plus forte que les ondes dispersées autour d'elle, sur le premier trajet (de
+  −20 à 40 dB ; elle tourne à son propre décalage Doppler, fd fois le cosinus de son angle). fd va de 0 (un gain
+  tiré par trajet, puis figé) au quart du débit de symboles ; une **graine** (panneau) décide du tirage. Le
+  récepteur idéal connaît le gain du trajet le plus fort à chaque instant : il en défait la phase échantillon par
+  échantillon et le module à chaque décision (le bruit d'une décision grandit dans les creux). La **théorie** est
+  alors la moyenne du TEB sur le gain (exacte : Rayleigh 0,5 (1 − √(γ/(1+γ))) en BPSK et QPSK, Rice par sa fonction
+  génératrice des moments ; intégrales de Craig pour la 8-PSK et la QAM) : à 15 dB, la QPSK passe de 9×10⁻¹⁶
+  sans évanouissement à 0,77 %, et 10 dB de plus ne divisent son TEB que par 10. Le TEB mesuré la suit sur la
+  courbe (0,97 à 1,01 fois sur 2 millions de bits) ; quand le gain change pendant une impulsion (fd·T dès 0,02),
+  le filtre adapté moyenne les creux les plus brefs et le TEB passe sous la théorie (0,89 fois à 20 dB et
+  fd·T = 0,02 ; 0,39 fois à fd·T = 0,1), ce que le résultat dit. Plusieurs trajets qui s'évanouissent : pas de
+  théorie, et l'égaliseur calculé l'est pour leurs gains moyens (un égaliseur qui apprend les suit). Le récepteur
+  synchronisé suit la visée directe et l'errance de phase avec sa boucle de porteuse (6° efficaces à K = 10 dB,
+  fd = 1 Hz, bande 0,003 ; moins de 1° à 0,01). Limite : ses deux passes ajustent des droites (une porteuse qui
+  tourne régulièrement) ; quand la phase erre vite sur le préambule (fd = 10 Hz), il finit parfois celui-ci sur une
+  autre symétrie de la constellation, et le dit (une synchronisation robuste aux évanouissements, par pilotes ou
+  codage différentiel, est prévue).
 - **Liaison** (onglet) : les signaux émis et reçu (porteuse : deux voies ; I/Q : quatre) et leurs spectres, la
   **constellation** reçue (les points décidés à tort en rouge, les points de la constellation en anneaux creux
   avec leurs bits quand la place le permet, les frontières de décision en tirets ; FSK : le plan des deux
   énergies, la diagonale décide), le **diagramme de l'œil** (la sortie du filtre adapté sur deux symboles autour
-  de chaque instant de décision, I et Q), le **TEB mesuré** avec son intervalle à 95 % contre la **théorie
-  exacte**, le TES, l'**EVM** et le MER, le débit binaire et la bande occupée. Au-dessus de la constellation et
+  de chaque instant de décision, I et Q), la **synchronisation** quand le récepteur se synchronise (l'erreur de
+  rythme en symboles et l'erreur de phase de la porteuse en degrés, symbole par symbole depuis le début de la
+  trame ; le préambule grisé ; la phase déroulée, un glissement y est une marche jusqu'à une symétrie de la
+  constellation, en tirets ; molette : les symboles, Ctrl + molette : l'erreur de la bande pointée), le **TEB
+  mesuré** avec son intervalle à 95 % contre la **théorie exacte**, le TES, l'**EVM** et le MER, le débit binaire
+  et la bande occupée. « **Avant synchro** » montre en gris, sous la constellation, ce que déciderait un
+  récepteur qui n'aurait trouvé que le début de la trame : la porteuse non redressée (les points tournent ou
+  arrivent tournés), l'horloge non suivie ; avec un égaliseur, le bouton devient « **Avant égaliseur** » : les
+  points tels que le récepteur les déciderait sans lui. À côté des signaux, **Spectres** ou **Canal** (le canal
+  vient de lui-même quand la liaison a des trajets ou un égaliseur) : le canal vu par les décisions, symbole par
+  symbole (le module de ses prises, celles de l'égaliseur et des deux ensemble, qui ne laissent qu'un 1 ; les
+  trajets eux-mêmes en losanges, placés par rapport à l'instant de décision) et en fréquence (leurs gains en dB
+  sur un débit de symboles autour de la
+  porteuse : le creux du canal, la bosse de l'égaliseur, leur produit plat) ; molette : les symboles ou les
+  fréquences de la bande pointée, Ctrl + molette : ses valeurs. Au-dessus de la constellation et
   de l'œil, ce qu'ils montrent (symboles, décidés à tort, EVM et MER ; traces), hors du tracé. Les spectres
   d'une liaison en I/Q s'appellent « I + jQ émis » et « I + jQ reçu ». **Écouter** le signal émis ou reçu sur
   la carte son.
 - **Courbe TEB** (onglet) : le TEB le long d'Eb/N0, mesuré point par point sur la même chaîne (des bits au
   hasard), chaque point avec autant de bits qu'il en faut pour compter environ 200 erreurs d'après la théorie
   (au plus « Bits par point ») : s'arrêter à la 200e erreur fausserait le taux vers le haut (environ +8 % vu
-  ici). Chaque point a son intervalle à 95 % (Wilson) ; un point sans erreur est un triangle sous sa borne
-  haute. Plusieurs courbes (six au plus) se comparent, chacune avec sa théorie ; la liaison en cours y est un
-  losange. QPSK en racine de cosinus surélevé à 48 kHz : 200 000 bits en 0,55 s (l'émission et le filtre adapté
+  ici) ; avec des évanouissements, au moins 1 000 périodes de fd (leurs erreurs viennent en salves, quelques-unes
+  par creux : c'est le nombre de creux qui fait le taux). Chaque point a son intervalle à 95 % (Wilson ; avec des
+  évanouissements, élargi à ce que disent des lots de cinq périodes de fd, par la loi de Student : celui de Wilson
+  ne contenait la théorie qu'une fois sur deux, celui des lots 9 fois sur 10) ; un point sans erreur est un
+  triangle sous sa borne haute. Plusieurs courbes (six au plus) se comparent, chacune avec sa théorie (avec des évanouissements, la
+  leur : une droite de pente −1 par décade à fort Eb/N0 en Rayleigh) ; la liaison en cours y est un losange. QPSK en racine de cosinus surélevé à 48 kHz : 200 000 bits en 0,55 s (l'émission et le filtre adapté
   ne calculent que là où il y a des symboles).
 - **Ajouter** : le signal émis, ou reçu avec son bruit, devient un signal de la session (« QPSK 1 kBd (émis) »,
   une voie sur une porteuse, I et Q sinon), à écouter, filtrer, mesurer ; ses notes et sa provenance gardent la
   recette.
 - **Exemples** : BPSK rectangulaire, QPSK en cosinus surélevé, 8-PSK, 16-QAM, 64-QAM et 256-QAM en I/Q, un texte
   en ASK et trame série, une FSK sur les tonalités du Bell 202 (1 200 Bd, 1 200 et 2 200 Hz : des tonalités
-  non orthogonales, plus d'erreurs que la théorie ; le 1 y est la tonalité haute), un texte en QPSK sans bruit.
+  non orthogonales, plus d'erreurs que la théorie ; le 1 y est la tonalité haute), un texte en QPSK sans bruit ;
+  avec un canal et le récepteur synchronisé : **QPSK** à +40 Hz et +200 ppm, **16-QAM** arrivée 37,4 symboles
+  plus tard et tournée de −120°, **QPSK à 0 dB dont la boucle de porteuse glisse** (bande 0,01 : un quart de tour
+  vers le milieu de la trame, un bit sur deux faux ensuite ; avec 0,003 elle tient, au TEB de la théorie), **ASK**
+  dont la raie de porteuse donne la fréquence ; avec des trajets : **QPSK et un écho** à −6 dB un symbole plus
+  tard (chaque point devient quatre, des erreurs à 12 dB où la théorie n'en attend aucune), **le même écho
+  égalisé** (les points reviennent), **deux trajets presque égaux** (31 prises : ce que coûte un creux, 6 dB
+  ici), **16-QAM synchronisée à travers un écho** (l'égaliseur apprend ; sans lui la boucle de porteuse glisse) ;
+  puis **QPSK en évanouissements de Rayleigh** (fd = 20 Hz, 15 dB : près de 1 % d'erreurs), **16-QAM en
+  évanouissements de Rice** (K = 10 dB), **deux trajets presque égaux et l'égaliseur à retour de décision**,
+  **QPSK synchronisée en Rice** (K = 10 dB, fd = 1 Hz : les boucles suivent).
 
 Le panneau de droite (**Liaison**) reprend la recette champ par champ et donne le résultat en détail (et le texte
-envoyé et reçu) ; **Mesures** celles des signaux émis et reçu. La recette et les réglages de la courbe sont
-retenus d'une fois sur l'autre.
+envoyé et reçu) ; **Mesures** celles des signaux émis et reçu. Les réglages de la courbe sont retenus d'une fois
+sur l'autre, la recette se reprend (Exemples ▾).
 
 ## Outils des tracés
 
@@ -781,13 +1020,15 @@ modèle ; elle fuit très peu dans l'ajustement (quelques 1e-8 en valeur relativ
    Analyse en un module (audit du 21/11), export des courbes, garde-fou de la fréquence d'échantillonnage,
    spectrogramme en courbe ajoutée, générateur (voies, formes d'onde additionnées, aperçu, séries de Fourier
    par leurs coefficients, motif dessiné, récurrence, écoute sur la carte son, opérations entre voies,
-   porteuses AM, FM, PM), filtres (RII Butterworth, Chebyshev I et II, Bessel, elliptique ; RIF fenêtré ou en
+   porteuses AM, FM, PM, DBL, BLU, signal de la session en forme d'onde, voies de calcul), filtres (RII Butterworth, Chebyshev I et II, Bessel, elliptique ; RIF fenêtré ou en
    équiondulation de Parks-McClellan ; coefficients tapés ; gain en sortie ; réponses, plan z, application
    causale, à phase nulle aux bords prédits ou alignée ; code C pour microcontrôleur, flottant ou virgule fixe ;
-   conception par gabarit, l'ordre calculé) : faits ; modulations (la base : une liaison numérique de bout en
-   bout, constellation, œil, TEB mesuré et courbes contre la théorie exacte) : faite ; puis, décidé le 22/11 :
-   canal réaliste et synchronisation, codage de canal, OFDM, démodulation d'un signal réel, puis HARQ et
-   adaptation de lien ; VISA pour les instruments en USB. À étudier : réponse en fréquence
+   conception par gabarit, l'ordre calculé) : faits ; modulations (une liaison numérique de bout en
+   bout, constellation, œil, TEB mesuré et courbes contre la théorie exacte ; canal décalé, retardé, à l'horloge
+   fausse, et récepteur synchronisé avec ses erreurs à l'écran ; trajets multiples et égaliseur linéaire, calculé
+   ou appris) : faites ; puis, décidé le 22/11 : évanouissements (Rayleigh, Rice) et égaliseur à retour de
+   décision, codage de canal, OFDM, démodulation d'un signal réel, puis
+   HARQ et adaptation de lien ; VISA pour les instruments en USB. À étudier : réponse en fréquence
    entre deux voies (gain, phase, marges), distorsion pondérée A ; opérations sur un signal de la session
    (×k, +c, entre voies) dans Signaux.
 5. Ensuite : rééchantillonnage, corrélation, transformée en Z, OFDM et codage, théorie, outils.

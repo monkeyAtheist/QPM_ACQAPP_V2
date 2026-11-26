@@ -2,6 +2,7 @@
 
 #include "qacq/app/qt_convert.h"
 #include "qacq/app/signal_list_model.h"
+#include "qacq/plot/axis.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -71,10 +72,13 @@ QVariantMap pointInfo(const analysis::BerPoint &p)
     return {{QStringLiteral("ebN0"), p.ebN0Db},     {QStringLiteral("bits"), static_cast<qint64>(p.bits)},
             {QStringLiteral("errors"), static_cast<qint64>(p.errors)},
             {QStringLiteral("ber"), p.ber},         {QStringLiteral("lower"), p.lower},
-            {QStringLiteral("upper"), p.upper},     {QStringLiteral("theory"), p.theory}};
+            {QStringLiteral("upper"), p.upper},     {QStringLiteral("theory"), p.theory},
+            {QStringLiteral("batches"), static_cast<qint64>(p.batches)}};
 }
 
-// Before and after the channel, for the preview: on a carrier the real signals (V); as I/Q the two pairs.
+// Before and after the channel, for the preview: on a carrier the real signals (V); as I/Q the two pairs. Through
+// a channel the record received is longer (the delay, the clock, a few symbols after the end): the transmission
+// is silent after its own end.
 model::Signal previewOf(const analysis::LinkResult &r)
 {
     model::Signal s;
@@ -97,8 +101,117 @@ model::Signal previewOf(const analysis::LinkResult &r)
         s.channels = {{"I émis", "V"}, {"Q émis", "V"}, {"I reçu", "V"}, {"Q reçu", "V"}};
         s.representation = model::Representation::IQ;
     }
+    std::size_t longest = 0;
+    for (const std::vector<double> &channel : data->channels) longest = std::max(longest, channel.size());
+    for (std::vector<double> &channel : data->channels) channel.resize(longest, 0.0);
     s.data = std::move(data);
     return s;
+}
+
+// A signed number as read: "+200", "−100", "0".
+QString signedText(double value, int digits)
+{
+    const QString text = toQString(plot::formatCompact(value, "", digits));
+    return value > 0.0 ? QStringLiteral("+") + text : text;
+}
+
+// What the synchronized receiver found, against the truth, as the panel shows it.
+QVariantMap syncInfo(const analysis::LinkResult &res)
+{
+    const analysis::LinkSync &y = res.sync;
+    const bool fsk = res.recipe.modulation == dsp::Modulation::Fsk;
+    QVariantMap info;
+    info.insert(QStringLiteral("used"), y.used);
+    if (!y.used) return info;
+    info.insert(QStringLiteral("frameFound"), y.frameFound);
+    info.insert(QStringLiteral("frameQuality"), y.frameQuality);
+    info.insert(QStringLiteral("delay"), y.delaySymbols);
+    info.insert(QStringLiteral("trueDelay"), y.trueDelaySymbols);
+    info.insert(QStringLiteral("frequencyOffset"), y.frequencyOffsetHz);
+    info.insert(QStringLiteral("trueFrequencyOffset"), y.trueFrequencyOffsetHz);
+    info.insert(QStringLiteral("phase"), y.phaseDegrees);
+    info.insert(QStringLiteral("truePhase"), y.truePhaseDegrees);
+    info.insert(QStringLiteral("clock"), y.clockOffsetPpm);
+    info.insert(QStringLiteral("trueClock"), y.trueClockOffsetPpm);
+    info.insert(QStringLiteral("timingRms"), y.timingErrorRms);
+    info.insert(QStringLiteral("phaseRms"), y.phaseErrorRms);
+    info.insert(QStringLiteral("slips"), static_cast<qint64>(y.phaseSlips));
+    info.insert(QStringLiteral("symbols"), static_cast<qint64>(y.timingError.size()));
+    info.insert(QStringLiteral("preamble"), static_cast<qint64>(res.recipe.preambleSymbols));
+    info.insert(QStringLiteral("carrier"), !fsk); // a carrier to find (not for the FSK, decided without phase)
+    // Slips are counted where the constellation has a symmetry to slip to (not the ASK).
+    info.insert(QStringLiteral("slipsCounted"), dsp::rotationalSymmetryDegrees(res.recipe.modulation) > 0.0);
+    // As read: found, then the truth.
+    info.insert(QStringLiteral("frameText"),
+                QStringLiteral("%1 %2 symb. (vrai %3) · corrélation %4 %")
+                    .arg(y.frameFound ? QStringLiteral("trouvée à") : QStringLiteral("mal trouvée, à"), toQString(plot::formatFixed(y.delaySymbols, 2)),
+                         toQString(plot::formatCompact(y.trueDelaySymbols, "", 5)))
+                    .arg(static_cast<int>(std::lround(100.0 * y.frameQuality))));
+    info.insert(QStringLiteral("frequencyText"), QStringLiteral("%1 Hz (vrai %2 Hz)")
+                                                     .arg(toQString(plot::formatFixed(y.frequencyOffsetHz, 2)),
+                                                          toQString(plot::formatCompact(y.trueFrequencyOffsetHz, "", 5))));
+    info.insert(QStringLiteral("phaseText"), QStringLiteral("%1° (vraie %2°)")
+                                                 .arg(toQString(plot::formatFixed(y.phaseDegrees, 1)), toQString(plot::formatFixed(y.truePhaseDegrees, 1))));
+    info.insert(QStringLiteral("clockText"),
+                QStringLiteral("%1 ppm (vraie %2)").arg(signedText(std::round(10.0 * y.clockOffsetPpm) / 10.0, 5), signedText(y.trueClockOffsetPpm, 5)));
+    info.insert(QStringLiteral("timingLost"), y.timingLost);
+    info.insert(QStringLiteral("timingText"), QStringLiteral("%1 symbole efficace%2")
+                                                  .arg(toQString(plot::formatFixed(y.timingErrorRms, 3)),
+                                                       y.timingLost ? QStringLiteral(" (boucle décrochée)") : QString()));
+    info.insert(QStringLiteral("phaseErrorText"),
+                fsk ? QString() : QStringLiteral("%1° efficace").arg(toQString(plot::formatFixed(y.phaseErrorRms, 2))));
+    return info;
+}
+
+// "4,62 dB", or nothing when unknown.
+QString decibelText(double value)
+{
+    if (!std::isfinite(value)) return {};
+    return toQString(plot::formatFixed(value, std::abs(value) < 10.0 ? 2 : 1)) + QStringLiteral(" dB");
+}
+
+// Several paths and the equalizer, as the panel shows them.
+QVariantMap equalizationInfo(const analysis::LinkResult &res)
+{
+    const analysis::LinkEqualization &q = res.equalization;
+    QVariantMap info;
+    info.insert(QStringLiteral("paths"), q.paths);
+    info.insert(QStringLiteral("pathCount"), static_cast<int>(q.typed.size()));
+    info.insert(QStringLiteral("used"), q.used);
+    info.insert(QStringLiteral("adaptive"), q.adaptive);
+    info.insert(QStringLiteral("halfSymbolEarly"), q.halfSymbolEarly);
+    info.insert(QStringLiteral("taps"), static_cast<int>(q.taps.size()));
+    info.insert(QStringLiteral("feedback"), static_cast<int>(q.feedback.size()));
+    // Each path: when it arrives, how strong once their powers add up to that of the transmission, turned by how much.
+    QStringList paths;
+    for (std::size_t k = 0; k < q.typed.size() && k < q.amplitude.size(); ++k)
+    {
+        QString path = QStringLiteral("%1 symb. : %2")
+                           .arg(toQString(plot::formatCompact(q.typed[k].delaySymbols, "", 4)),
+                                decibelText(20.0 * std::log10(std::max(1e-12, q.amplitude[k]))));
+        if (q.typed[k].phaseDegrees != 0.0) path += QStringLiteral(" à %1°").arg(toQString(plot::formatCompact(q.typed[k].phaseDegrees, "", 4)));
+        paths << path;
+    }
+    info.insert(QStringLiteral("pathsText"), paths.join(QStringLiteral(" · ")));
+    // A symbol against the other symbols and the noise at the decisions: without equalizer, after it; what that is
+    // worth per bit, and the bit error rate of the theory there (computed equalizer); the error a learnt one ends at.
+    info.insert(QStringLiteral("beforeText"), decibelText(q.sinrBeforeDb));
+    info.insert(QStringLiteral("afterText"), decibelText(q.sinrAfterDb));
+    const bool predicted = q.used && !q.adaptive && res.recipe.noise && std::isfinite(q.equivalentEbN0Db);
+    info.insert(QStringLiteral("equivalentText"), predicted ? decibelText(q.equivalentEbN0Db) : QString());
+    info.insert(QStringLiteral("predictedText"), predicted ? toQString(analysis::rateText(q.predictedBer)) : QString());
+    info.insert(QStringLiteral("errorText"), decibelText(q.settledErrorDb));
+    // Where the decisions are taken against the strongest path (a timing loop settles between two paths a fraction
+    // of a symbol apart), when it is not on it; and what the symbol itself is worth there against that path alone.
+    info.insert(QStringLiteral("instant"), q.instantSymbols);
+    info.insert(QStringLiteral("instantText"),
+                q.paths && std::abs(q.instantSymbols) >= analysis::kShownDecisionOffsetSymbols
+                    ? QStringLiteral("%1 symb. %2 le trajet le plus fort")
+                          .arg(toQString(plot::formatFixed(std::abs(q.instantSymbols), 2)),
+                               q.instantSymbols > 0.0 ? QStringLiteral("après") : QStringLiteral("avant"))
+                    : QString());
+    info.insert(QStringLiteral("symbolGain"), q.symbolGain);
+    return info;
 }
 } // namespace
 
@@ -126,7 +239,7 @@ ModulationController::ModulationController(Session *session, QObject *parent)
     });
     m_analysis.setSignalId(kPreviewId);
     refreshResultInfo();
-    schedule();
+    // A blank page: nothing computed until the recipe is first changed.
 }
 
 ModulationController::~ModulationController()
@@ -146,7 +259,7 @@ QVariantMap ModulationController::recipe() const
 
 bool ModulationController::ready() const
 {
-    return !m_running && !m_delay.isActive() && m_resultVersion == m_version;
+    return !m_blank && !m_running && !m_delay.isActive() && m_resultVersion == m_version;
 }
 
 void ModulationController::setActive(bool active)
@@ -168,19 +281,51 @@ QVariantList ModulationController::examples() const
 void ModulationController::setRecipe(const QVariantMap &changes)
 {
     const model::Json json = variantToJson(changes);
-    replace(analysis::linkRecipeFromJson(merged(analysis::toJson(m_recipe), json)));
+    const bool wasBlank = std::exchange(m_blank, false);
+    const bool changed = replace(analysis::linkRecipeFromJson(merged(analysis::toJson(m_recipe), json)));
+    if (wasBlank) leaveBlank(changed);
+}
+
+void ModulationController::leaveBlank(bool changed)
+{
+    // The recipe chosen as it was (the first choice of the blank page may be what it already has): computed all the same.
+    if (!changed)
+    {
+        ++m_version;
+        schedule();
+    }
+    emit stateChanged();
 }
 
 void ModulationController::reset()
 {
-    replace(analysis::defaultLinkRecipe());
+    // What was under way is dropped: its result would come after the page is blank.
+    if (m_run) m_run->cancelled.store(true);
+    m_again = false;
+    m_delay.stop();
+    const bool changed = analysis::toJson(m_recipe) != analysis::toJson(analysis::defaultLinkRecipe());
+    m_recipe = analysis::defaultLinkRecipe();
+    m_blank = true;
+    ++m_version;
+    m_result.reset();
+    refreshResultInfo();
+    if (m_previewSignal)
+    {
+        m_previewSignal.reset();
+        m_preview.signalList()->resetSignals({});
+    }
+    if (changed) emit recipeChanged();
+    emit resultChanged();
+    emit stateChanged();
 }
 
 void ModulationController::useExample(int index)
 {
     const auto &list = analysis::linkExamples();
     if (index < 0 || static_cast<std::size_t>(index) >= list.size()) return;
-    replace(list[static_cast<std::size_t>(index)].recipe);
+    const bool wasBlank = std::exchange(m_blank, false);
+    const bool changed = replace(list[static_cast<std::size_t>(index)].recipe);
+    if (wasBlank) leaveBlank(changed);
 }
 
 QString ModulationController::recipeText() const
@@ -192,16 +337,19 @@ void ModulationController::restoreRecipe(const QString &text)
 {
     const auto json = model::Json::parse(toUtf8(text));
     if (!json || !json->isObject()) return;
-    replace(analysis::linkRecipeFromJson(*json));
+    const bool wasBlank = std::exchange(m_blank, false);
+    const bool changed = replace(analysis::linkRecipeFromJson(*json));
+    if (wasBlank) leaveBlank(changed);
 }
 
-void ModulationController::replace(analysis::LinkRecipe recipe)
+bool ModulationController::replace(analysis::LinkRecipe recipe)
 {
-    if (analysis::toJson(recipe) == analysis::toJson(m_recipe)) return;
+    if (analysis::toJson(recipe) == analysis::toJson(m_recipe)) return false;
     m_recipe = std::move(recipe);
     ++m_version;
     emit recipeChanged();
     schedule();
+    return true;
 }
 
 void ModulationController::schedule()
@@ -212,7 +360,7 @@ void ModulationController::schedule()
 
 void ModulationController::start()
 {
-    if (!m_active) return;
+    if (!m_active || m_blank) return;
     if (m_running)
     {
         if (m_run) m_run->cancelled.store(true);
@@ -278,6 +426,12 @@ void ModulationController::refreshResultInfo()
     info.insert(QStringLiteral("fsk"), r.modulation == dsp::Modulation::Fsk);
     info.insert(QStringLiteral("iq"), r.representation == dsp::Representation::ComplexBaseband);
     info.insert(QStringLiteral("rrc"), r.pulse == dsp::PulseShape::RootRaisedCosine && r.modulation != dsp::Modulation::Fsk);
+    info.insert(QStringLiteral("channel"), analysis::linkHasChannel(r));
+    info.insert(QStringLiteral("synchronizes"), r.receiver == analysis::LinkReceiver::Synchronized);
+    info.insert(QStringLiteral("hasPaths"), analysis::linkHasPaths(r));
+    // An equalizer asked, for a modulation that has one (not the FSK).
+    info.insert(QStringLiteral("equalizes"), r.equalizer != analysis::LinkEqualizer::None && dsp::hasConstellation(r.modulation));
+    info.insert(QStringLiteral("fades"), r.fading != analysis::LinkFading::None);
     if (!m_result)
     {
         info.insert(QStringLiteral("ok"), false);
@@ -292,20 +446,30 @@ void ModulationController::refreshResultInfo()
     info.insert(QStringLiteral("summary"), toQStringList(analysis::linkSummary(res)));
     if (res.ok())
     {
-        double lower = 0.0, upper = 0.0;
-        analysis::binomialInterval(res.bitErrors, res.comparedBits, lower, upper);
+        // (Wilson's; through fading, widened by blocks of symbols.)
+        const double lower = res.berLower, upper = res.berUpper;
+        info.insert(QStringLiteral("berBatches"), static_cast<int>(res.berBatches));
         info.insert(QStringLiteral("constellationSize"), static_cast<int>(res.constellation.size()));
         info.insert(QStringLiteral("bitRate"), res.bitRate);
         info.insert(QStringLiteral("bandwidth"), res.occupiedBandwidthHz);
         info.insert(QStringLiteral("samplesPerSymbol"), res.samplesPerSymbol);
         info.insert(QStringLiteral("symbols"), static_cast<qint64>(res.sentSymbols.size()));
         info.insert(QStringLiteral("skipSymbols"), static_cast<qint64>(res.skipSymbols));
+        info.insert(QStringLiteral("skipEndSymbols"), static_cast<qint64>(res.skipEndSymbols));
+        // The records: the transmission, and what the receiver got (longer through a channel).
+        const bool passband = r.representation == dsp::Representation::RealPassband;
+        info.insert(QStringLiteral("sentSamples"), static_cast<qint64>(passband ? res.sentPassband.size() : res.sentI.size()));
+        info.insert(QStringLiteral("receivedSamples"), static_cast<qint64>(passband ? res.receivedPassband.size() : res.receivedI.size()));
+        info.insert(QStringLiteral("sync"), syncInfo(res));
+        info.insert(QStringLiteral("equalization"), equalizationInfo(res));
         info.insert(QStringLiteral("comparedBits"), static_cast<qint64>(res.comparedBits));
         info.insert(QStringLiteral("bitErrors"), static_cast<qint64>(res.bitErrors));
         info.insert(QStringLiteral("ber"), res.ber);
         info.insert(QStringLiteral("berLower"), lower);
         info.insert(QStringLiteral("berUpper"), upper);
         info.insert(QStringLiteral("theoryBer"), res.theoryBer);
+        info.insert(QStringLiteral("awgnTheoryBer"), res.awgnTheoryBer);
+        info.insert(QStringLiteral("awgnTheoryText"), toQString(analysis::rateText(res.awgnTheoryBer)));
         info.insert(QStringLiteral("comparedSymbols"), static_cast<qint64>(res.comparedSymbols));
         info.insert(QStringLiteral("symbolErrors"), static_cast<qint64>(res.symbolErrors));
         info.insert(QStringLiteral("ser"), res.ser);
@@ -391,9 +555,10 @@ void ModulationController::startCurve()
     analysis::LinkRecipe r = m_recipe;
     r.data = analysis::LinkData::Random;
     r.noise = true;
-    // What the recipe has wrong, said at once (a link of a few symbols).
+    // What the recipe has wrong, said at once (a link of a few symbols: as few as its preamble and its equalizer
+    // allow).
     analysis::LinkRecipe tiny = r;
-    tiny.symbols = analysis::kMinimumLinkSymbols;
+    tiny.symbols = analysis::minimumLinkSymbols(r);
     const analysis::LinkResult check = analysis::simulateLink(tiny);
     if (!check.ok())
     {

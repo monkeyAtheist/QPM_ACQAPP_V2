@@ -5,13 +5,16 @@
 #include "qacq/app/signal_list_model.h"
 #include "qacq/analysis/expression.h"
 #include "qacq/dsp/constants.h"
+#include "qacq/plot/axis.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
 
 #include <algorithm>
 #include <cmath>
+#include <span>
 #include <utility>
+#include <vector>
 
 namespace qacq::app
 {
@@ -42,7 +45,7 @@ model::Json merged(model::Json base, const model::Json &changes)
 
 GeneratorController::GeneratorController(Session *session, QObject *parent)
     : QObject(parent), m_session(session), m_preview(nullptr, this), m_analysis(&m_preview, this),
-      m_recipe(analysis::defaultGeneratorRecipe())
+      m_recipe(analysis::blankGeneratorRecipe())
 {
     m_pool.setMaxThreadCount(1);
     m_delay.setSingleShot(true);
@@ -51,6 +54,16 @@ GeneratorController::GeneratorController(Session *session, QObject *parent)
     m_progressTimer.setInterval(100);
     connect(&m_progressTimer, &QTimer::timeout, this, &GeneratorController::pollProgress);
     m_analysis.setSignalId(kPreviewId);
+    if (session)
+    {
+        // The signals a recorded-signal waveform reads: the preview follows them.
+        SignalListModel *list = session->signalList();
+        connect(list, &QAbstractItemModel::rowsInserted, this, &GeneratorController::sessionChanged);
+        connect(list, &QAbstractItemModel::rowsRemoved, this, &GeneratorController::sessionChanged);
+        connect(list, &QAbstractItemModel::rowsMoved, this, &GeneratorController::sessionChanged);
+        connect(list, &QAbstractItemModel::dataChanged, this, &GeneratorController::sessionChanged);
+        connect(list, &QAbstractItemModel::modelReset, this, &GeneratorController::sessionChanged);
+    }
     m_delay.start();
 }
 
@@ -76,10 +89,16 @@ QString GeneratorController::sizeText() const
 {
     if (!analysis::checkGeneratorRecipe(m_recipe).empty()) return QString();
     const qint64 n = sampleCount();
-    const auto channels = static_cast<qint64>(m_recipe.channels.size());
+    // The channels of the signal made; those of computation are said apart.
+    qint64 channels = 0;
+    for (const analysis::GeneratorChannel &c : m_recipe.channels) channels += c.output ? 1 : 0;
+    const qint64 apart = static_cast<qint64>(m_recipe.channels.size()) - channels;
     const QString bytes = formatBytes(n * channels * static_cast<qint64>(sizeof(double)));
-    if (channels == 1) return QStringLiteral("%1 échantillons · %2").arg(formatCount(n), bytes);
-    return QStringLiteral("%1 échantillons par voie · %2 voies · %3").arg(formatCount(n)).arg(channels).arg(bytes);
+    QString text = channels == 1 ? QStringLiteral("%1 échantillons · %2").arg(formatCount(n), bytes)
+                                 : QStringLiteral("%1 échantillons par voie · %2 voies · %3").arg(formatCount(n)).arg(channels).arg(bytes);
+    if (apart == 1) text += QStringLiteral(" (plus 1 voie de calcul)");
+    if (apart > 1) text += QStringLiteral(" (plus %1 voies de calcul)").arg(apart);
+    return text;
 }
 
 QString GeneratorController::problem() const
@@ -98,6 +117,53 @@ QVariantList GeneratorController::examples() const
     for (const analysis::GeneratorExample &e : analysis::generatorExamples())
         list.append(QVariantMap{{QStringLiteral("name"), toQString(e.name)}, {QStringLiteral("tip"), toQString(e.tip)}});
     return list;
+}
+
+QVariantList GeneratorController::messageSources() const
+{
+    QVariantList out;
+    for (const model::SignalPtr &s : sessionSignals())
+    {
+        if (!s) continue;
+        const QString summary = signalSummary(*s);
+        for (std::size_t k = 0; k < s->channels.size(); ++k)
+        {
+            QVariantMap m;
+            m.insert(QStringLiteral("id"), static_cast<qint64>(s->id));
+            m.insert(QStringLiteral("channel"), static_cast<int>(k));
+            m.insert(QStringLiteral("text"), s->channels.size() > 1
+                                                 ? QStringLiteral("%1 — %2").arg(toQString(s->name), toQString(s->channels[k].name))
+                                                 : toQString(s->name));
+            m.insert(QStringLiteral("tip"), summary);
+            out.append(m);
+        }
+    }
+    return out;
+}
+
+bool GeneratorController::blank() const
+{
+    return analysis::isBlankRecipe(m_recipe);
+}
+
+QVariantList GeneratorController::sources() const
+{
+    QVariantList out;
+    for (const model::SignalPtr &s : sessionSignals())
+    {
+        if (!s) continue;
+        QVariantMap m;
+        m.insert(QStringLiteral("id"), static_cast<qint64>(s->id));
+        m.insert(QStringLiteral("name"), toQString(s->name));
+        QStringList channels;
+        for (const model::ChannelInfo &c : s->channels) channels << toQString(c.name);
+        m.insert(QStringLiteral("channels"), channels);
+        m.insert(QStringLiteral("sampleRate"), s->sampleRateHz);
+        m.insert(QStringLiteral("duration"), s->durationSeconds());
+        m.insert(QStringLiteral("summary"), signalSummary(*s));
+        out.append(m);
+    }
+    return out;
 }
 
 void GeneratorController::setActive(bool active)
@@ -128,7 +194,7 @@ int GeneratorController::addChannel()
         setLastError(QStringLiteral("Au plus %1 voies.").arg(static_cast<int>(analysis::kMaximumGeneratorChannels)));
         return -1;
     }
-    m_recipe.channels.push_back(analysis::defaultGeneratorChannel(m_recipe.channels.size(), m_recipe.sampleRateHz));
+    m_recipe.channels.push_back(analysis::blankGeneratorChannel(m_recipe.channels.size()));
     changed();
     return static_cast<int>(m_recipe.channels.size()) - 1;
 }
@@ -143,6 +209,16 @@ void GeneratorController::removeChannel(int channel)
         return;
     }
     changed();
+}
+
+void GeneratorController::clearChannel(int channel)
+{
+    if (!validChannel(channel)) return;
+    analysis::GeneratorRecipe r = m_recipe;
+    analysis::GeneratorChannel &c = r.channels[static_cast<std::size_t>(channel)];
+    c.components.clear();
+    c.offset = 0.0;
+    replace(std::move(r));
 }
 
 void GeneratorController::setChannel(int channel, const QVariantMap &values)
@@ -170,6 +246,12 @@ int GeneratorController::addComponent(int channel, const QString &waveform)
     list.push_back(analysis::defaultGeneratorComponent(w, m_recipe.sampleRateHz, m_recipe.durationSeconds));
     if (w == analysis::WaveKind::Formula)
         list.back().expression = analysis::defaultOperation(static_cast<std::size_t>(channel), m_recipe.channels.size());
+    if (w == analysis::WaveKind::Recorded)
+    {
+        // The last signal of the session, until another is chosen.
+        const std::vector<model::SignalPtr> signalList = sessionSignals();
+        if (!signalList.empty() && signalList.back()) analysis::setRecordedSource(list.back(), *signalList.back(), 0);
+    }
     changed();
     return static_cast<int>(list.size()) - 1;
 }
@@ -207,8 +289,51 @@ void GeneratorController::setComponent(int channel, int component, const QVarian
             c = analysis::withWaveform(c, w, r.sampleRateHz, r.durationSeconds);
             if (w == analysis::WaveKind::Formula)
                 c.expression = analysis::defaultOperation(static_cast<std::size_t>(channel), r.channels.size());
+            if (w == analysis::WaveKind::Recorded)
+            {
+                const std::vector<model::SignalPtr> signalList = sessionSignals();
+                if (!signalList.empty() && signalList.back()) analysis::setRecordedSource(c, *signalList.back(), 0);
+            }
         }
         changes.erase("waveform");
+    }
+    if (c.waveform == analysis::WaveKind::Recorded && (changes.contains("source") || changes.contains("sourceChannel")))
+    {
+        // Another record, or another of its channels: by its id in the session, its names kept with it.
+        const std::vector<model::SignalPtr> signalList = sessionSignals();
+        model::SignalPtr chosen;
+        if (changes.contains("source"))
+        {
+            const auto id = static_cast<std::uint64_t>(std::max(0.0, changes["source"].toNumber(0.0)));
+            for (const model::SignalPtr &s : signalList)
+                if (s && s->id == id) chosen = s;
+        }
+        else
+        {
+            chosen = analysis::findRecordedSource(c, signalList).signal;
+        }
+        if (chosen)
+        {
+            const double asked = changes.contains("sourceChannel") ? changes["sourceChannel"].toNumber(0.0) : 0.0;
+            const auto index = static_cast<std::size_t>(std::clamp(asked, 0.0, static_cast<double>(chosen->channels.size() - 1)));
+            analysis::setRecordedSource(c, *chosen, chosen->channels.empty() ? 0 : index);
+        }
+        for (const char *key : {"source", "sourceName", "sourceFrames", "sourceChannel", "sourceChannelName"}) changes.erase(key);
+    }
+    // A digital frame: another protocol keeps its data, and its line the part it played; what is set here goes
+    // to the other lines of its frame.
+    const analysis::FrameProtocol protocolBefore = c.frame.protocol;
+    if (c.waveform == analysis::WaveKind::Frame)
+    {
+        analysis::FrameProtocol protocol = protocolBefore;
+        if (changes.contains("protocol") && analysis::frameProtocolFromKey(changes["protocol"].toString(), protocol) &&
+            protocol != protocolBefore)
+        {
+            c.frame = analysis::withFrameProtocol(c.frame, protocol);
+            c.frameLine = std::string(analysis::frameLineFor(protocolBefore, c.frameLine, protocol));
+        }
+        changes.erase("protocol");
+        changes.erase("group");
     }
     if (changes.contains("form") && c.waveform == analysis::WaveKind::FourierSeries)
     {
@@ -222,12 +347,14 @@ void GeneratorController::setComponent(int channel, int component, const QVarian
         changes.erase("form");
     }
     c = analysis::generatorComponentFromJson(merged(analysis::toJson(c), changes));
+    if (c.waveform == analysis::WaveKind::Frame)
+        analysis::spreadFrame(r, static_cast<std::size_t>(channel), static_cast<std::size_t>(component), protocolBefore);
     replace(std::move(r));
 }
 
 void GeneratorController::reset()
 {
-    replace(analysis::defaultGeneratorRecipe());
+    replace(analysis::blankGeneratorRecipe());
 }
 
 void GeneratorController::useExample(int index)
@@ -410,10 +537,23 @@ QVariantMap GeneratorController::operationInfo(int channel, int component) const
                                          [](const analysis::GeneratorComponent &k) { return k.enabled; });
             if (!any)
                 caution = QStringLiteral("Aucune forme d'onde comptée au-dessus de celle-ci : x vaut 0.");
+            else if (c.waveform == analysis::WaveKind::Modulation)
+            {
+                // The message named: the waveforms above it, which the carrier replaces in the channel.
+                QStringList above;
+                for (int k = 0; k < component; ++k)
+                {
+                    const analysis::GeneratorComponent &a = list[static_cast<std::size_t>(k)];
+                    if (a.enabled) above << toQString(analysis::componentText(a, m_recipe.channels[ch].unit));
+                }
+                notes << (above.size() == 1
+                              ? QStringLiteral("x : la forme d'onde au-dessus (%1). Elle module la porteuse, qui la remplace dans la voie.").arg(above.front())
+                              : QStringLiteral("x : la somme des %1 formes d'onde au-dessus (%2). Elle module la porteuse, qui la remplace dans la voie.")
+                                    .arg(above.size())
+                                    .arg(above.join(QStringLiteral(" + "))));
+            }
             else
-                notes << (c.waveform == analysis::WaveKind::Modulation
-                              ? QStringLiteral("x : les formes d'onde au-dessus, que la porteuse modulée remplace.")
-                              : QStringLiteral("x : les formes d'onde au-dessus, que le résultat remplace."));
+                notes << QStringLiteral("x : les formes d'onde au-dessus, que le résultat remplace.");
         }
     }
     info.insert(QStringLiteral("caution"), caution);
@@ -453,17 +593,258 @@ void GeneratorController::applyOperationModel(int channel, int component, const 
 QVariantList GeneratorController::messageModels(int channel) const
 {
     if (!validChannel(channel)) return {};
-    return modelList(analysis::messageModels(static_cast<std::size_t>(channel), m_recipe.channels.size()));
+    QVariantList list = modelList(analysis::messageModels(static_cast<std::size_t>(channel), m_recipe.channels.size()));
+    // Each channel of each signal of the session: the record as the message, placed above the carrier (x).
+    for (const model::SignalPtr &s : sessionSignals())
+    {
+        if (!s) continue;
+        for (std::size_t k = 0; k < s->channels.size(); ++k)
+        {
+            const QString name = s->channels.size() > 1
+                                     ? QStringLiteral("Le signal « %1 », voie %2").arg(toQString(s->name), toQString(s->channels[k].name))
+                                     : QStringLiteral("Le signal « %1 »").arg(toQString(s->name));
+            list.append(QVariantMap{{QStringLiteral("key"), QStringLiteral("signal:%1:%2").arg(static_cast<qint64>(s->id)).arg(static_cast<int>(k))},
+                                    {QStringLiteral("name"), name},
+                                    {QStringLiteral("formula"), QStringLiteral("x, ramené à 1 V crête")}});
+        }
+    }
+    return list;
 }
 
 void GeneratorController::applyMessageModel(int channel, int component, const QString &model)
 {
     if (!validComponent(channel, component)) return;
     analysis::GeneratorRecipe r = m_recipe;
+    if (model.startsWith(QStringLiteral("signal:")))
+    {
+        // A signal of the session as the message: "signal:<id>:<channel>".
+        const QStringList parts = model.split(QLatin1Char(':'));
+        bool idRead = false, channelRead = false;
+        const qint64 id = parts.size() == 3 ? parts[1].toLongLong(&idRead) : 0;
+        const int source = parts.size() == 3 ? parts[2].toInt(&channelRead) : -1;
+        Session *session = m_session.data();
+        const model::SignalPtr signal = idRead && session ? session->signalList()->signalById(id) : model::SignalPtr();
+        if (!signal || !channelRead || source < 0)
+        {
+            setLastError(QStringLiteral("Ce signal n'existe plus."));
+            return;
+        }
+        std::string why;
+        if (!analysis::useSignalAsMessage(r, static_cast<std::size_t>(channel), static_cast<std::size_t>(component), *signal,
+                                          static_cast<std::size_t>(source), &why))
+        {
+            setLastError(toQString(why));
+            return;
+        }
+        replace(std::move(r));
+        return;
+    }
     analysis::GeneratorComponent &c =
         r.channels[static_cast<std::size_t>(channel)].components[static_cast<std::size_t>(component)];
     if (!analysis::applyMessageModel(c, toUtf8(model), static_cast<std::size_t>(channel), r.channels.size())) return;
     replace(std::move(r));
+}
+
+QVariantMap GeneratorController::sourceInfo(int channel, int component) const
+{
+    QVariantMap out;
+    if (!validComponent(channel, component)) return out;
+    const analysis::GeneratorComponent &c =
+        m_recipe.channels[static_cast<std::size_t>(channel)].components[static_cast<std::size_t>(component)];
+    if (c.waveform != analysis::WaveKind::Recorded) return out;
+    const std::vector<model::SignalPtr> signalList = sessionSignals();
+    if (signalList.empty())
+    {
+        out.insert(QStringLiteral("error"),
+                   QStringLiteral("Aucun signal dans la session : importez un fichier, lancez une acquisition, ou ajoutez-y un signal "
+                                  "fait ici (Ajouter)."));
+        return out;
+    }
+    const analysis::RecordedSource source = analysis::findRecordedSource(c, signalList);
+    if (!source.ok())
+    {
+        out.insert(QStringLiteral("error"), toQString(source.error));
+        return out;
+    }
+    const model::Signal &s = *source.signal;
+    out.insert(QStringLiteral("id"), static_cast<qint64>(s.id));
+    out.insert(QStringLiteral("channel"), static_cast<int>(source.channel));
+    out.insert(QStringLiteral("name"), toQString(s.name));
+    out.insert(QStringLiteral("channelName"), toQString(s.channels[source.channel].name));
+    out.insert(QStringLiteral("unit"), toQString(s.channels[source.channel].unit));
+    QStringList channels;
+    for (const model::ChannelInfo &info : s.channels)
+        channels << (info.unit.empty() ? toQString(info.name) : toQString(info.name) + QStringLiteral(" (") + toQString(info.unit) + QLatin1Char(')'));
+    out.insert(QStringLiteral("channels"), channels);
+    out.insert(QStringLiteral("sampleRate"), s.sampleRateHz);
+    out.insert(QStringLiteral("duration"), s.durationSeconds());
+    out.insert(QStringLiteral("summary"), signalSummary(s));
+    const bool resampled = std::abs(s.sampleRateHz - m_recipe.sampleRateHz) > 1e-9 * m_recipe.sampleRateHz;
+    analysis::GeneratorRecipe adopted = m_recipe;
+    const bool can = analysis::adoptRecordedTiming(adopted, static_cast<std::size_t>(channel), static_cast<std::size_t>(component), signalList);
+    out.insert(QStringLiteral("resampled"), resampled);
+    out.insert(QStringLiteral("differs"),
+               can && (resampled || std::abs(adopted.durationSeconds - m_recipe.durationSeconds) > 0.5 / m_recipe.sampleRateHz));
+    return out;
+}
+
+void GeneratorController::adoptSourceTiming(int channel, int component)
+{
+    if (!validComponent(channel, component)) return;
+    analysis::GeneratorRecipe r = m_recipe;
+    if (!analysis::adoptRecordedTiming(r, static_cast<std::size_t>(channel), static_cast<std::size_t>(component), sessionSignals())) return;
+    const std::string problem = analysis::checkGeneratorRecipe(r);
+    if (!problem.empty())
+    {
+        setLastError(toQString(problem));
+        return;
+    }
+    replace(std::move(r));
+}
+
+QVariantMap GeneratorController::frameInfo(int channel, int component) const
+{
+    QVariantMap out;
+    if (!validComponent(channel, component)) return out;
+    const auto ch = static_cast<std::size_t>(channel), k = static_cast<std::size_t>(component);
+    const analysis::GeneratorComponent &c = m_recipe.channels[ch].components[k];
+    if (c.waveform != analysis::WaveKind::Frame) return out;
+    const std::span<const analysis::FrameLineInfo> lines = analysis::frameLines(c.frame.protocol);
+    QStringList names, keys;
+    for (const analysis::FrameLineInfo &line : lines)
+    {
+        names << toQString(std::string(line.name));
+        keys << toQString(std::string(line.key));
+    }
+    out.insert(QStringLiteral("lines"), names);
+    out.insert(QStringLiteral("lineKeys"), keys);
+    out.insert(QStringLiteral("line"), static_cast<int>(analysis::frameLineIndex(c.frame.protocol, c.frameLine)));
+    out.insert(QStringLiteral("title"), toQString(analysis::frameTitle(c.frame)));
+    // The lines of its frame in the recipe, and those the recipe has not.
+    const std::vector<analysis::FrameMember> members = analysis::frameMembers(m_recipe, ch, k);
+    std::vector<bool> present(lines.size(), false);
+    QStringList where, missing;
+    for (const analysis::FrameMember &m : members)
+    {
+        present[m.line] = true;
+        where << QStringLiteral("%1 (voie %2)").arg(names.at(static_cast<qsizetype>(m.line))).arg(static_cast<int>(m.channel) + 1);
+    }
+    for (std::size_t i = 0; i < lines.size(); ++i)
+        if (!present[i]) missing << names.at(static_cast<qsizetype>(i));
+    out.insert(QStringLiteral("members"), members.size() > 1 ? where.join(QStringLiteral(" · ")) : QString());
+    out.insert(QStringLiteral("missing"), missing);
+
+    const analysis::FrameTiming t = analysis::frameTiming(c, m_recipe.sampleRateHz);
+    if (!t.ok())
+    {
+        out.insert(QStringLiteral("error"), toQString(t.frame.error));
+        return out;
+    }
+    out.insert(QStringLiteral("construction"), toQString(analysis::frameConstruction(t.frame)));
+    out.insert(QStringLiteral("legend"), toQString(t.frame.legend));
+    out.insert(QStringLiteral("summary"), toQString(t.frame.summary));
+    const double bits = t.frame.bitCount();
+    out.insert(QStringLiteral("bits"), bits);
+    out.insert(QStringLiteral("duration"), t.durationSeconds);
+    out.insert(QStringLiteral("samplesPerBit"), t.samplesPerBit);
+    const bool whole = bits == std::floor(bits);
+    out.insert(QStringLiteral("timing"),
+               (whole ? formatCount(static_cast<qint64>(bits)) : toQString(plot::formatCompact(bits, "", 6))) +
+                   (bits >= 2.0 ? QStringLiteral(" bits · ") : QStringLiteral(" bit · ")) + toQString(plot::formatCompact(t.durationSeconds, "s", 4)) +
+                   QStringLiteral(" · ") + toQString(plot::formatCompact(t.samplesPerBit, "", 4)) +
+                   (t.samplesPerBit >= 2.0 ? QStringLiteral(" échantillons par bit") : QStringLiteral(" échantillon par bit")));
+    const double duration = m_recipe.durationSeconds;
+    out.insert(QStringLiteral("sampled"), t.samplesPerTick >= 1.0 - 1e-9);
+    out.insert(QStringLiteral("fits"),
+               c.frameRepeat || (c.eventSeconds < duration && t.endSeconds <= duration * (1.0 + 1e-9) + 0.5 / m_recipe.sampleRateHz));
+    out.insert(QStringLiteral("warnings"), toQStringList(t.frame.warnings));
+    const double real = analysis::fixedFrameRate(c.frame);
+    out.insert(QStringLiteral("realRate"), real > 0.0 && std::abs(real - c.frequencyHz) > 1e-6 * real ? real : 0.0);
+    // Whether framing the signal on it would change something.
+    analysis::GeneratorRecipe framed = m_recipe;
+    bool differs = false;
+    if (analysis::adoptFrameTiming(framed, ch, k))
+    {
+        const auto apart = [](double a, double b) { return std::abs(a - b) > 1e-9 * std::max(std::abs(a), std::abs(b)); };
+        differs = apart(framed.sampleRateHz, m_recipe.sampleRateHz) || apart(framed.durationSeconds, m_recipe.durationSeconds) ||
+                  apart(framed.channels[ch].components[k].eventSeconds, c.eventSeconds);
+    }
+    out.insert(QStringLiteral("differs"), differs);
+    return out;
+}
+
+void GeneratorController::addFrameLines(int channel, int component)
+{
+    if (!validComponent(channel, component)) return;
+    analysis::GeneratorRecipe r = m_recipe;
+    std::string why;
+    if (!analysis::addFrameLines(r, static_cast<std::size_t>(channel), static_cast<std::size_t>(component), nullptr, &why))
+    {
+        if (!why.empty()) setLastError(toQString(why));
+        return;
+    }
+    replace(std::move(r));
+}
+
+void GeneratorController::adoptFrameTiming(int channel, int component, bool realRate)
+{
+    if (!validComponent(channel, component)) return;
+    analysis::GeneratorRecipe r = m_recipe;
+    if (!analysis::adoptFrameTiming(r, static_cast<std::size_t>(channel), static_cast<std::size_t>(component), realRate)) return;
+    const std::string problem = analysis::checkGeneratorRecipe(r);
+    if (!problem.empty())
+    {
+        setLastError(toQString(problem));
+        return;
+    }
+    replace(std::move(r));
+}
+
+int GeneratorController::useSignal(qint64 signalId, const QString &use, int channel)
+{
+    Session *session = m_session.data();
+    const model::SignalPtr s = session ? session->signalList()->signalById(signalId) : model::SignalPtr();
+    if (!s || s->channels.empty())
+    {
+        setLastError(QStringLiteral("Ce signal n'existe plus."));
+        return -1;
+    }
+    if (channel < 0 || static_cast<std::size_t>(channel) >= s->channels.size())
+    {
+        setLastError(QStringLiteral("Ce signal n'a pas cette voie."));
+        return -1;
+    }
+    analysis::GeneratorRecipe r = m_recipe;
+    const analysis::SignalUse done = analysis::useSignalInRecipe(r, *s, static_cast<std::size_t>(channel), toUtf8(use));
+    if (!done.ok())
+    {
+        setLastError(toQString(done.error));
+        return -1;
+    }
+    replace(std::move(r));
+    const int index = static_cast<int>(done.channel);
+    emit signalUsed(index, toQString(done.text));
+    return index;
+}
+
+int GeneratorController::modulateChannel(int channel, const QString &use)
+{
+    if (!validChannel(channel))
+    {
+        setLastError(QStringLiteral("Cette voie n'existe plus."));
+        return -1;
+    }
+    analysis::GeneratorRecipe r = m_recipe;
+    const analysis::SignalUse done = analysis::modulateChannelInRecipe(r, static_cast<std::size_t>(channel), toUtf8(use));
+    if (!done.ok())
+    {
+        setLastError(toQString(done.error));
+        return -1;
+    }
+    replace(std::move(r));
+    const int index = static_cast<int>(done.channel);
+    emit signalUsed(index, toQString(done.text));
+    return index;
 }
 
 QString GeneratorController::recipeText() const
@@ -575,9 +956,12 @@ void GeneratorController::start()
     emit stateChanged();
     const quint64 version = m_version;
     const analysis::GeneratorRecipe recipe = m_recipe;
-    m_pool.start([this, run, recipe, version] {
+    // The signals of the session its recorded waveforms read (shared, never changed: a signal edited is another).
+    const std::vector<model::SignalPtr> signalList = analysis::readsRecordedSignals(recipe) ? sessionSignals() : std::vector<model::SignalPtr>();
+    m_sourceStamp = sourceStamp(signalList);
+    m_pool.start([this, run, recipe, version, signalList] {
         const model::Progress progress{&run->cancelled, &run->permille};
-        auto result = std::make_shared<analysis::GeneratorResult>(analysis::generateSignal(recipe, progress));
+        auto result = std::make_shared<analysis::GeneratorResult>(analysis::generateSignal(recipe, progress, signalList));
         QMetaObject::invokeMethod(this, [this, run, result, version] { finished(run, result, version); }, Qt::QueuedConnection);
     });
 }
@@ -660,5 +1044,42 @@ void GeneratorController::setLastError(const QString &message)
 {
     m_lastError = message;
     emit lastErrorChanged();
+}
+
+std::vector<model::SignalPtr> GeneratorController::sessionSignals() const
+{
+    Session *session = m_session.data();
+    return session ? session->signalList()->document().signalList() : std::vector<model::SignalPtr>();
+}
+
+std::vector<const model::Signal *> GeneratorController::sourceStamp(const std::vector<model::SignalPtr> &sources) const
+{
+    std::vector<const model::Signal *> stamp;
+    for (const analysis::GeneratorChannel &channel : m_recipe.channels)
+        for (const analysis::GeneratorComponent &c : channel.components)
+            if (c.waveform == analysis::WaveKind::Recorded) stamp.push_back(analysis::findRecordedSource(c, sources).signal.get());
+    return stamp;
+}
+
+void GeneratorController::sessionChanged()
+{
+    emit sourcesChanged();
+    if (!analysis::readsRecordedSignals(m_recipe)) return;
+    // The recipe follows the names of the records it reads (renamed, a channel taken out); the preview is made
+    // again if they are no longer the ones it was made from.
+    const std::vector<model::SignalPtr> signalList = sessionSignals();
+    analysis::GeneratorRecipe r = m_recipe;
+    for (analysis::GeneratorChannel &channel : r.channels)
+    {
+        for (analysis::GeneratorComponent &c : channel.components)
+        {
+            if (c.waveform != analysis::WaveKind::Recorded) continue;
+            const analysis::RecordedSource source = analysis::findRecordedSource(c, signalList);
+            if (source.ok()) analysis::setRecordedSource(c, *source.signal, source.channel);
+        }
+    }
+    const bool renamed = !(analysis::toJson(r) == analysis::toJson(m_recipe));
+    if (renamed) m_recipe = std::move(r);
+    if (renamed || sourceStamp(signalList) != m_sourceStamp) changed();
 }
 } // namespace qacq::app

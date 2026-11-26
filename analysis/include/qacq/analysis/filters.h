@@ -27,10 +27,17 @@ namespace qacq::analysis
 {
 enum class FilterKind
 {
-    Iir,  // poles and zeros of a family (Butterworth, Chebyshev I and II, Bessel, elliptic), as sections
-    Fir,  // window method (scipy.signal.firwin) or equiripple (scipy.signal.remez)
-    Typed // coefficients typed: H(z) = Σ b[k] z^−k / Σ a[k] z^−k, as scipy.signal.lfilter(b, a); a FIR if a = 1
+    Iir,   // poles and zeros of a family (Butterworth, Chebyshev I and II, Bessel, elliptic), as sections
+    Fir,   // window method (scipy.signal.firwin) or equiripple (scipy.signal.remez)
+    Typed, // coefficients typed: H(z) = Σ b[k] z^−k / Σ a[k] z^−k, as scipy.signal.lfilter(b, a); a FIR if a = 1
+    None   // no filter yet (the blank page): H(z) = 1, the output is the input (times the gain at the output)
 };
+
+// Designed from a response and edges (an IIR of a family, a FIR): its frequencies mean something.
+constexpr bool designedKind(FilterKind kind) noexcept
+{
+    return kind == FilterKind::Iir || kind == FilterKind::Fir;
+}
 
 // How a FIR is designed.
 enum class FirMethod
@@ -295,7 +302,7 @@ FilteredSignal applyFilter(const FilterDesign &design, const model::Signal &sour
 // One channel, as applyFilter runs it.
 std::vector<double> runFilter(const FilterDesign &design, std::span<const double> x);
 
-// Keys: "iir"/"fir"/"typed"; "butterworth", "chebyshev1", "chebyshev2", "bessel"; "lowpass", "highpass",
+// Keys: "iir"/"fir"/"typed"/"none"; "butterworth", "chebyshev1", "chebyshev2", "bessel"; "lowpass", "highpass",
 // "bandpass", "bandstop"; windows as the spectra ("hamming", "kaiser"…); "causal", "zerophase", "aligned".
 std::string_view filterKindKey(FilterKind kind) noexcept;
 std::string_view firMethodKey(FirMethod method) noexcept; // "window", "equiripple"
@@ -311,6 +318,9 @@ FilterRecipe filterRecipeFromJson(const model::Json &json);
 
 // A usual first filter at that rate: Butterworth low-pass of order 4 at 1 kHz (at most fs/10).
 FilterRecipe defaultFilterRecipe(double sampleRateHz = 48000.0);
+// The blank page of the module: no filter (FilterKind::None), the rest that of defaultFilterRecipe, so that choosing
+// a kind starts from that usual filter (an IIR: the Butterworth low-pass; a FIR: 101 taps at the same cut-off).
+FilterRecipe blankFilterRecipe(double sampleRateHz = 48000.0);
 
 struct FilterExample
 {

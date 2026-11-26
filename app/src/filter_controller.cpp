@@ -58,7 +58,7 @@ struct FilterController::Outcome
 
 FilterController::FilterController(Session *session, QObject *parent)
     : QObject(parent), m_session(session), m_preview(nullptr, this), m_analysis(&m_preview, this),
-      m_recipe(analysis::defaultFilterRecipe())
+      m_recipe(analysis::blankFilterRecipe())
 {
     m_pool.setMaxThreadCount(1);
     m_delay.setSingleShot(true);
@@ -108,7 +108,7 @@ void FilterController::refreshDesignInfo()
     info.insert(QStringLiteral("applicationError"), toQString(d.applicationError));
     // The recipe as designed: from a template, the order, the taps, the frequencies and β it computed.
     info.insert(QStringLiteral("recipe"), jsonToVariant(analysis::toJson(d.recipe)).toMap());
-    if (d.recipe.fromTemplate && d.recipe.kind != analysis::FilterKind::Typed)
+    if (d.recipe.fromTemplate && analysis::designedKind(d.recipe.kind))
     {
         info.insert(QStringLiteral("templateHeld"), d.templateHeld);
         info.insert(QStringLiteral("templateLoss"), d.templateLossDb);
@@ -331,7 +331,7 @@ void FilterController::setRecipe(const QVariantMap &changes)
     const bool computed = designed && designed->ok() && designed->recipe.fromTemplate;
     // A template switched on: the one it had if the filter as it is holds it (back from a template, nothing changed),
     // else one the filter holds, read on its gain (its least order is then at most the order chosen).
-    const bool switchedOn = r.fromTemplate && !m_recipe.fromTemplate && r.kind != analysis::FilterKind::Typed;
+    const bool switchedOn = r.fromTemplate && !m_recipe.fromTemplate && analysis::designedKind(r.kind);
     const bool edgesGiven = changes.contains(QStringLiteral("pass1")) || changes.contains(QStringLiteral("pass2")) ||
                             changes.contains(QStringLiteral("stop1")) || changes.contains(QStringLiteral("stop2"));
     bool templateSet = edgesGiven;
@@ -378,7 +378,8 @@ void FilterController::setRecipe(const QVariantMap &changes)
 
 void FilterController::reset()
 {
-    analysis::FilterRecipe r = analysis::defaultFilterRecipe(m_inputRate > 0.0 ? m_inputRate : m_recipe.sampleRateHz);
+    // The blank page: no filter (its rate, that of the signal chosen).
+    analysis::FilterRecipe r = analysis::blankFilterRecipe(m_inputRate > 0.0 ? m_inputRate : m_recipe.sampleRateHz);
     replace(std::move(r));
 }
 
@@ -550,6 +551,11 @@ void FilterController::addToSession()
     if (!m_design->ok())
     {
         setLastError(toQString(m_design->error));
+        return;
+    }
+    if (m_design->recipe.kind == analysis::FilterKind::None)
+    {
+        setLastError(QStringLiteral("Aucun filtre : le signal resterait le même. Choisissez d'abord un type de filtre (ruban ▸ Filtre) ou un exemple."));
         return;
     }
     m_adding = true;

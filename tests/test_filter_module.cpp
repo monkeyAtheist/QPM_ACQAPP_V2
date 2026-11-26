@@ -61,6 +61,64 @@ std::complex<double> component(const std::vector<double> &x, double fs, double f
 }
 } // namespace
 
+TEST_CASE("filters: the blank page, no filter: the output is the input", "[analysis]")
+{
+    // The rest of the recipe is the usual first filter, which a kind chosen starts from.
+    const FilterRecipe blank = blankFilterRecipe(20000.0);
+    CHECK(blank.kind == FilterKind::None);
+    CHECK(blank.sampleRateHz == 20000.0);
+    CHECK(blank.frequency1Hz == defaultFilterRecipe(20000.0).frequency1Hz);
+    FilterRecipe chosen = blank;
+    chosen.kind = FilterKind::Iir;
+    CHECK(toJson(chosen) == toJson(defaultFilterRecipe(20000.0)));
+    CHECK(!designedKind(FilterKind::None));
+    CHECK(!designedKind(FilterKind::Typed));
+    CHECK(designedKind(FilterKind::Iir));
+    CHECK(designedKind(FilterKind::Fir));
+
+    // Designed: one coefficient, 1; flat, no delay; said so.
+    FilterRecipe r = blank;
+    r.fromTemplate = true;                         // means nothing without a filter
+    r.application = FilterApplication::ZeroPhase; // nor does this
+    const FilterDesign d = designFilter(r);
+    REQUIRE(d.ok());
+    CHECK(d.fir());
+    REQUIRE(d.taps.size() == 1);
+    CHECK(d.taps[0] == 1.0);
+    CHECK(d.rootsKnown);
+    CHECK(d.zeros.empty());
+    CHECK(!d.recipe.fromTemplate);
+    CHECK(d.recipe.application == FilterApplication::Causal);
+    CHECK(std::abs(d.unitResponse(1234.0) - std::complex<double>(1.0, 0.0)) < 1e-15);
+    CHECK(filterText(d.recipe) == "Aucun filtre");
+    CHECK(filterShortText(d.recipe) == "sans filtre");
+    const std::vector<std::string> lines = designSummary(d);
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0] == "Aucun filtre : la sortie est l'entrée (H(z) = 1), sans retard ni déphasage.");
+    CHECK(contains(lines[1], "Le premier choisi part d'un passe-bas à 1 kHz."));
+    FilterRecipe louder = blank;
+    louder.gainDb = 6.0;
+    CHECK(filterText(louder) == "Aucun filtre, gain +6 dB");
+    CHECK(contains(designSummary(designFilter(louder))[0], "multipliée par le gain en sortie (+6 dB)."));
+    CHECK(!applicationAllowed(FilterKind::None, FilterApplication::ZeroPhase));
+    CHECK(applicationAllowed(FilterKind::None, FilterApplication::Causal));
+
+    // Its key, and back.
+    CHECK(filterKindKey(FilterKind::None) == "none");
+    CHECK(toJson(blank)["kind"].toString() == "none");
+    CHECK(filterRecipeFromJson(toJson(blank)).kind == FilterKind::None);
+
+    // Run over a signal: the same samples.
+    const model::Signal s = tones(20000.0, 2000, {{50.0, 1.0}, {3000.0, 0.5}});
+    const FilteredSignal out = applyFilter(d, s);
+    REQUIRE(out.error.empty());
+    CHECK(out.signal.channel(0)[0] == s.channel(0)[0]);
+    CHECK(std::equal(s.channel(0).begin(), s.channel(0).end(), out.signal.channel(0).begin()));
+    // No template from it.
+    FilterRecipe t = defaultFilterRecipe(20000.0);
+    CHECK(!templateFromDesign(d, t));
+}
+
 TEST_CASE("filters: an IIR designed as sections, its gain, phase, delay, poles and zeros", "[analysis]")
 {
     FilterRecipe r = defaultFilterRecipe(48000.0);

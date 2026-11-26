@@ -95,6 +95,13 @@ std::string validateSignal(const Signal &signal);
 std::shared_ptr<SampleData> deinterleave(const io::SampleBlock &block);
 std::shared_ptr<SampleData> deinterleave(std::span<const double> interleaved, std::size_t channels);
 
+// The signal with only those of its channels, in the order given (each named once): the others, and their
+// samples, are left out (the samples kept are copied; id, name, timing, provenance stay). An I/Q signal that no
+// longer is made of whole pairs (I then Q, as they were) becomes a real one. What goes is said at the end of
+// its notes ("Voie retirée : sin."). False, the signal unchanged, with why (in French): no channel named, one
+// that does not exist or named twice.
+bool keepChannels(Signal &signal, std::span<const std::size_t> channels, std::string *error = nullptr);
+
 // Default names "Voie 1", "Voie 2"... ("I", "Q" for an I/Q pair).
 std::vector<ChannelInfo> defaultChannels(std::size_t count, std::string_view unit = {},
                                          Representation representation = Representation::Real);

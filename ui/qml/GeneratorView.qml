@@ -7,7 +7,8 @@ import Qacq.App
 // square, triangle, sawtooth, pulses, constant, step, Dirac, noise, sweep) and of an offset. The recipe
 // is edited in the right panel (Composition) and from the tool header; the signal it gives is computed a
 // moment after each change and shown here with its spectrum (its measurements: panel Mesures), then added
-// to the session in one click (undoable). The recipe is remembered from one run to the next.
+// to the session in one click (undoable). The page opens blank; the recipe of the last run can be taken up again
+// (Exemples ▸ Reprendre…). A signal of the session may become a channel, or the message of a carrier (Moduler).
 Item {
     id: root
     required property var generator
@@ -76,16 +77,17 @@ Item {
         value: root.visible ? root.generator.previewId : 0
     }
 
-    // The recipe of the last run comes back; each change is remembered a moment after.
+    // The page opens blank; the recipe of the last run is kept, to be taken up again (Exemples ▸ Reprendre…), and
+    // each change is remembered a moment after (not a blank page: what is taken up again is the last recipe made).
+    property string previousRecipe: ""
     Component.onCompleted: {
         const saved = appSettings.value("generator/recipe", "")
-        if (saved && saved.length > 0)
-            generator.restoreRecipe(saved)
+        root.previousRecipe = saved && saved.length > 0 ? saved : ""
     }
     Timer {
         id: rememberTimer
         interval: 800
-        onTriggered: root.appSettings.setValue("generator/recipe", root.generator.recipeText())
+        onTriggered: if (!root.generator.blank) root.appSettings.setValue("generator/recipe", root.generator.recipeText())
     }
 
     // Another rate or duration: the plots show all of the new preview (its spectrum once computed).
@@ -112,6 +114,18 @@ Item {
                 root.fitSpectrum = false
                 spectrum.showAll()
             }
+        }
+    }
+    // A signal of the session made a channel (Moduler, or from the list of signals): that channel in the panel, what
+    // was done said, and the whole of the new preview shown (an envelope is seen on the whole signal, not on a few
+    // periods of its carrier).
+    Connections {
+        target: root.generator
+        function onSignalUsed(index, message) {
+            root.channelSelected(index)
+            root.compositionRequested()
+            root.infoMessage(message)
+            root.shownSpan = ""
         }
     }
     Connections {
@@ -170,7 +184,8 @@ Item {
             player: root.player
             session: root.generator.preview
             signalId: root.generator.hasPreview ? root.generator.previewId : 0
-            channels: root.channels
+            // Those of the signal made: the channels of computation are not in it.
+            channels: root.channels.filter((c) => c.output !== false)
             onInfoMessage: (text) => root.infoMessage(text)
             onErrorMessage: (text) => root.errorMessage(text)
         }
@@ -202,12 +217,24 @@ Item {
                         onObjectAdded: (index, object) => examplesMenu.insertItem(index, object)
                         onObjectRemoved: (index, object) => examplesMenu.removeItem(object)
                     }
+                    MenuSeparator { }
+                    MenuItem {
+                        text: qsTr("Reprendre la recette de la dernière fois")
+                        enabled: root.previousRecipe.length > 0
+                        onTriggered: {
+                            root.generator.restoreRecipe(root.previousRecipe)
+                            root.channelSelected(0)
+                        }
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 400
+                        ToolTip.text: qsTr("La recette où le Générateur en était quand l'application a été fermée (il s'ouvre sur une page vierge)")
+                    }
                 }
             }
             RibbonButton {
                 glyph: "rotate"
                 text: qsTr("Par défaut")
-                tip: qsTr("Repartir d'une seule voie : un sinus de 1 kHz, 1 V crête, échantillonné à 48 kHz pendant 1 s")
+                tip: qsTr("Repartir d'une page vierge : une voie sans forme d'onde, échantillonnée à 48 kHz pendant 1 s")
                 onClicked: {
                     root.generator.reset()
                     root.channelSelected(0)
@@ -271,12 +298,75 @@ Item {
                 glyph: "addchannel"
                 text: qsTr("Voie")
                 enabled: root.channels.length < 16
-                tip: qsTr("Ajouter une voie (16 au plus), un sinus de 1 kHz pour commencer : chaque voie a ses formes d'onde, son nom et son unité")
+                tip: qsTr("Ajouter une voie vierge (16 au plus) : chaque voie a ses formes d'onde, son nom et son unité (panneau Composition : la croix d'une pastille supprime sa voie ; clic droit dessus : la vider, moduler une porteuse avec elle…)")
                 onClicked: {
                     const index = root.generator.addChannel()
                     if (index >= 0) {
                         root.channelSelected(index)
                         root.compositionRequested()
+                    }
+                }
+            }
+            RibbonButton {
+                id: modulateButton
+                // What can be the message of a carrier: a channel of this page that has waveforms (read as it is), a
+                // channel of a signal of the session (scaled to a peak of 1 V); each group under its title.
+                readonly property var choices: {
+                    const out = []
+                    const own = []
+                    for (let k = 0; k < root.channels.length; ++k) {
+                        const c = root.channels[k]
+                        if ((c.components ?? []).length > 0)
+                            own.push({ title: false, id: 0, channel: k, text: qsTr("Voie %1 « %2 »").arg(k + 1).arg(c.name ?? ""),
+                                       tip: qsTr("Lue telle quelle (v%1) : une voie de plus, la porteuse qu'elle module ; la page garde sa fréquence et sa durée").arg(k + 1) })
+                    }
+                    if (own.length > 0) {
+                        out.push({ title: true, text: qsTr("Une voie de cette page") })
+                        for (const o of own)
+                            out.push(o)
+                    }
+                    const sources = root.generator.messageSources
+                    if (sources.length > 0) {
+                        out.push({ title: true, text: qsTr("Un signal de la session (ramené à 1 V crête)") })
+                        for (const s of sources)
+                            out.push({ title: false, id: s.id, channel: s.channel, text: s.text, tip: s.tip })
+                    }
+                    return out
+                }
+                readonly property bool nothing: choices.length === 0
+                glyph: "modulate"
+                text: qsTr("Moduler")
+                dropDown: true
+                soon: nothing
+                tip: nothing ? qsTr("Rien à moduler : composez une voie (Forme d'onde ▾), ou mettez un signal dans la session (Signaux ▸ Importer, Acquisition, ou « Ajouter » ici)")
+                             : qsTr("Une porteuse modulée en amplitude (sa carte règle aussi FM, PM, DBL, BLU), dans une voie de plus : son message est une voie de cette page, ou un signal de la session — sur une page vierge, il prend toute la page, à sa fréquence et pour sa durée")
+                onClicked: {
+                    if (nothing)
+                        root.infoMessage(tip)
+                    else
+                        modulateMenu.popup(modulateButton, 0, modulateButton.height)
+                }
+                FitMenu {
+                    id: modulateMenu
+                    Instantiator {
+                        model: modulateButton.choices
+                        delegate: MenuItem {
+                            required property var modelData
+                            text: modelData.text
+                            enabled: !modelData.title
+                            font.bold: modelData.title
+                            onTriggered: {
+                                if (modelData.id > 0)
+                                    root.generator.useSignal(modelData.id, "am", modelData.channel)
+                                else
+                                    root.generator.modulateChannel(modelData.channel, "am")
+                            }
+                            ToolTip.visible: hovered && !modelData.title
+                            ToolTip.delay: 400
+                            ToolTip.text: modelData.tip ?? ""
+                        }
+                        onObjectAdded: (index, object) => modulateMenu.insertItem(index, object)
+                        onObjectRemoved: (index, object) => modulateMenu.removeItem(object)
                     }
                 }
             }
@@ -423,6 +513,32 @@ Item {
             CursorReadout {
                 view: timePlot
             }
+            // A blank page: how to fill it.
+            Rectangle {
+                visible: root.generator.blank
+                anchors.centerIn: parent
+                width: Math.min(parent.width - 140, 560)
+                height: blankHint.implicitHeight + 24
+                radius: 8
+                color: Qt.alpha(Theme.panel, 0.94)
+                border.color: Theme.border
+                Label {
+                    id: blankHint
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: 12
+                    wrapMode: Text.WordWrap
+                    color: Theme.text
+                    font.pixelSize: Theme.smallText
+                    lineHeight: 1.15
+                    text: qsTr("Page vierge : le signal se compose voie par voie.")
+                          + "\n• " + qsTr("Forme d'onde ▾ : un sinus, un carré, un bruit, une trame numérique… dans la voie choisie ;")
+                          + "\n• " + qsTr("Exemples ▾ : une recette toute prête ;")
+                          + "\n• " + qsTr("Moduler ▾ : un signal de la session devient le message d'une porteuse (AM, FM…) ;")
+                          + "\n• " + qsTr("dans la liste des signaux, clic droit sur un signal ▸ Utiliser dans le Générateur.")
+                }
+            }
             // Top left: what it is, and whether it is up to date.
             Rectangle {
                 id: previewChip
@@ -491,7 +607,8 @@ Item {
                                 }
                                 if ((ch.offset ?? 0) !== 0)
                                     parts.push(qsTr("décalage %1").arg(Units.compact(ch.offset, ch.unit ?? "", 4)))
-                                lines.push(ch.name + " : " + (parts.length > 0 ? parts.join(" + ") : qsTr("nulle")))
+                                lines.push(ch.name + (ch.output === false ? qsTr(" (voie de calcul)") : "") + " : "
+                                           + (parts.length > 0 ? parts.join(" + ") : qsTr("nulle")))
                             }
                             lines.push(qsTr("Le détail de la recette : panneau Composition ; ses mesures : panneau Mesures."))
                             return lines.join("\n")

@@ -91,6 +91,51 @@ TEST_CASE("Random: uniform and normal statistics", "[generator]")
     CHECK_NEAR(sn4 / dn, 3.0, 0, 0.08); // kurtosis of a normal law
 }
 
+TEST_CASE("Random: normal values two at a time, their tails and their independence", "[generator]")
+{
+    // The polar method draws two values from one point of the unit disc: each normal, the two independent, and
+    // the tails those of the normal law (what a bit error rate is made of): 2 000 000 values.
+    Random random(2026);
+    const std::size_t pairs = 1000000;
+    double product = 0.0, squares = 0.0, third = 0.0;
+    std::size_t beyond2 = 0, beyond3 = 0, beyond4 = 0;
+    double previous = 0.0, lagged = 0.0;
+    for (std::size_t i = 0; i < pairs; ++i)
+    {
+        const double a = random.normal(), b = random.normal();
+        product += a * b;
+        squares += (a * a - 1.0) * (b * b - 1.0);
+        third += a * a * a + b * b * b;
+        lagged += previous * a;
+        previous = b;
+        for (const double v : {a, b})
+        {
+            const double m = std::abs(v);
+            beyond2 += m > 2.0 ? 1 : 0;
+            beyond3 += m > 3.0 ? 1 : 0;
+            beyond4 += m > 4.0 ? 1 : 0;
+        }
+    }
+    const double dp = static_cast<double>(pairs), dn = 2.0 * dp;
+    CHECK(std::abs(product / dp) < 5.0 / std::sqrt(dp));               // uncorrelated
+    CHECK(std::abs(squares / dp) < 5.0 * 2.0 / std::sqrt(dp));          // nor their squares
+    CHECK(std::abs(lagged / dp) < 5.0 / std::sqrt(dp));                 // nor one pair with the next
+    CHECK(std::abs(third / dn) < 5.0 * std::sqrt(15.0 / dn));           // symmetric
+    // P(|x| > 2) = 0.0455003, P(|x| > 3) = 0.00269980, P(|x| > 4) = 6.33425e-5 (erfc(x / sqrt 2)): within 5 sigma.
+    const auto tail = [dn](std::size_t count, double p) { return std::abs(static_cast<double>(count) - dn * p) < 5.0 * std::sqrt(dn * p); };
+    CHECK(tail(beyond2, 0.0455002638963584));
+    CHECK(tail(beyond3, 0.0026997960632602));
+    CHECK(tail(beyond4, 6.33424836662398e-5));
+    // The same seed gives the same values; a value is never beyond what a double can come from (finite).
+    Random again(2026), same(2026);
+    for (int i = 0; i < 1000; ++i)
+    {
+        const double v = again.normal();
+        CHECK(v == same.normal());
+        CHECK(std::isfinite(v));
+    }
+}
+
 TEST_CASE("Sine: amplitude, frequency, phase and offset", "[generator]")
 {
     WaveformSpec spec;

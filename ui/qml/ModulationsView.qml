@@ -5,11 +5,13 @@ import Qacq.App
 
 // Module "Modulations": a digital link simulated end to end. Bits (at random, a text, bits typed) → a modulator (ASK,
 // FSK, BPSK, QPSK, 8-PSK, 16-, 64- or 256-QAM; rectangular or root-raised-cosine pulses; on a carrier or as I/Q) →
-// white noise at Eb/N0 → a coherent receiver (matched filter, nearest point) → the bits again. Tab "Liaison": the
-// signals sent and received and their spectra, the constellation received (the points decided wrong in red), the
-// eye diagram, the bit error rate measured against the exact theory; heard on the sound card; sent or received into
-// the session. Tab "Courbe TEB": the bit error rate along Eb/N0, measured point by point on the same chain, several
-// curves to compare. The recipe is remembered from one run to the next; its detail is in the right panel (Liaison).
+// a channel (several paths, the carrier and the clock off, a delay, white noise at Eb/N0) → a receiver (ideal or
+// synchronized; matched filter, an equalizer if asked, nearest point) → the bits again. Tab "Liaison": the signals
+// sent and received and, beside them, their spectra or the channel and its equalizer; the constellation received
+// (the points decided wrong in red), the eye diagram, the errors of the synchronization, the bit error rate
+// measured against the exact theory; heard on the sound card; sent or received into the session. Tab "Courbe
+// TEB": the bit error rate along Eb/N0, measured point by point on the same chain, several curves to compare. The
+// recipe is remembered from one run to the next; its detail is in the right panel (Liaison).
 Item {
     id: root
     required property var modulations
@@ -35,6 +37,23 @@ Item {
     readonly property bool fsk: recipe.modulation === "fsk"
     readonly property bool iq: recipe.representation === "iq"
     readonly property bool rrc: !fsk && recipe.pulse === "rrc"
+    // The receiver has to find the frame, the carrier and the clock itself: its errors get a plot of their own.
+    readonly property bool synchronizes: recipe.receiver === "sync"
+    // An equalizer after the receiver (not for the FSK, which has no constellation to repair).
+    readonly property bool equalizes: !fsk && (recipe.equalizer === "linear" || recipe.equalizer === "dfe")
+    readonly property bool fades: (recipe.fading ?? "none") !== "none"
+    // The channel of the link computed has several paths (or one late or turned).
+    readonly property bool hasPaths: result.hasPaths === true
+    // Under the points received: those before the equalizer when there is one, else those a receiver that only
+    // found the frame would decide.
+    property bool showRaw: false
+    // Beside the signals: their spectra ("spectra"), or the channel at the decision instants and its equalizer
+    // ("channel"). The channel comes forward when a link computed gets paths or an equalizer, the spectra when it
+    // has neither any more (channelMatters: which it was last); in between, as chosen.
+    property string besideSignals: "spectra"
+    property bool channelMatters: false
+    // The strip over the two plots of the top: what the first shows and its channels; which plot the second is.
+    readonly property int stripHeight: 36
     readonly property var sweep: modulations.sweep
     readonly property var analysis: modulations.previewAnalysis
     readonly property var settings: analysis.settings
@@ -65,14 +84,15 @@ Item {
     Binding {
         target: root.analysis
         property: "signalId"
-        value: root.visible && root.ribbonTab === 0 ? root.modulations.previewId : 0
+        value: root.visible && root.ribbonTab === 0 && root.besideSignals === "spectra" ? root.modulations.previewId : 0
     }
 
-    // The recipe and the sweep of the last run come back; each change is remembered a moment after.
+    // The page opens blank (nothing computed); the recipe of the last run is kept, to be taken up again (Exemples ▸
+    // Reprendre…), and the sweep of the last run comes back; each change is remembered a moment after.
+    property string previousRecipe: ""
     Component.onCompleted: {
         const saved = appSettings.value("modulations/recipe", "")
-        if (saved && saved.length > 0)
-            modulations.restoreRecipe(saved)
+        root.previousRecipe = saved && saved.length > 0 ? saved : ""
         const sweepSaved = appSettings.value("modulations/sweep", "")
         if (sweepSaved && sweepSaved.length > 0)
             modulations.restoreSweep(sweepSaved)
@@ -80,7 +100,7 @@ Item {
     Timer {
         id: rememberTimer
         interval: 800
-        onTriggered: root.appSettings.setValue("modulations/recipe", root.modulations.recipeText())
+        onTriggered: if (!root.modulations.blank) root.appSettings.setValue("modulations/recipe", root.modulations.recipeText()) // not a blank page
     }
     Timer {
         id: rememberSweepTimer
@@ -101,8 +121,14 @@ Item {
         function onRecipeChanged() { rememberTimer.restart() }
         function onSweepChanged() { rememberSweepTimer.restart() }
         function onResultChanged() {
-            if (!root.linkOk)
+            const now = root.modulations.result
+            if (now.ok !== true)
                 return
+            const matters = now.hasPaths === true || now.equalizes === true
+            if (matters !== root.channelMatters) {
+                root.channelMatters = matters
+                root.besideSignals = matters ? "channel" : "spectra"
+            }
             const shown = [root.recipe.modulation, root.recipe.representation, root.recipe.symbolRate, root.fs].join("|")
             if (shown === root.shownLink)
                 return
@@ -141,6 +167,14 @@ Item {
     Connections {
         target: eyePlot
         function onViewChanged() { if (eyePlot.canGoBack) root.lastZoomed = eyePlot }
+    }
+    Connections {
+        target: syncPlot
+        function onViewChanged() { if (syncPlot.canGoBack) root.lastZoomed = syncPlot }
+    }
+    Connections {
+        target: channelPlot
+        function onViewChanged() { if (channelPlot.canGoBack) root.lastZoomed = channelPlot }
     }
     // The wheel while computing: shown only if it lasts.
     property bool showBusy: false
@@ -196,7 +230,7 @@ Item {
         visible: root.visible
         tabs: [qsTr("Liaison"), qsTr("Courbe TEB")]
         tabIcons: ["modulation", "ber"]
-        tabTips: [qsTr("La liaison : l'émetteur, le bruit, le récepteur ; les signaux et leurs spectres, la constellation reçue, le diagramme de l'œil, le TEB mesuré"),
+        tabTips: [qsTr("La liaison : l'émetteur, le canal (ses trajets, son bruit), le récepteur (idéal ou synchronisé) et son égaliseur ; les signaux et leurs spectres, la constellation reçue, le diagramme de l'œil, la synchronisation, le TEB mesuré"),
                   qsTr("Le taux d'erreur binaire le long d'Eb/N0, mesuré point par point sur la même chaîne, contre la théorie ; plusieurs courbes se comparent")]
         currentTab: root.ribbonTab
         onTabClicked: (index) => root.ribbonTab = index
@@ -256,12 +290,21 @@ Item {
                         onObjectAdded: (index, object) => examplesMenu.insertItem(index, object)
                         onObjectRemoved: (index, object) => examplesMenu.removeItem(object)
                     }
+                    MenuSeparator { }
+                    MenuItem {
+                        text: qsTr("Reprendre la liaison de la dernière fois")
+                        enabled: root.previousRecipe.length > 0
+                        onTriggered: root.modulations.restoreRecipe(root.previousRecipe)
+                        ToolTip.visible: hovered
+                        ToolTip.delay: 400
+                        ToolTip.text: qsTr("La liaison où le module en était quand l'application a été fermée (il s'ouvre sur une page vierge)")
+                    }
                 }
             }
             RibbonButton {
                 glyph: "rotate"
                 text: qsTr("Par défaut")
-                tip: qsTr("Repartir d'une QPSK à 1 kBd en racine de cosinus surélevé, porteuse 6 kHz, Eb/N0 = 7 dB")
+                tip: qsTr("Repartir d'une page vierge : rien de calculé jusqu'au premier réglage, qui part d'une QPSK à 1 kBd en racine de cosinus surélevé, porteuse 6 kHz, Eb/N0 = 7 dB")
                 onClicked: root.modulations.reset()
             }
             RibbonButton {
@@ -385,6 +428,142 @@ Item {
                 tip: qsTr("Énergie d'un bit sur la densité du bruit ; mesuré : %1").arg(Units.compact(root.result.measuredEbN0 ?? 0, "dB", 4))
                 onEdited: (v) => root.set({ ebN0: v })
             }
+            RibbonField {
+                anchors.verticalCenter: parent.verticalCenter
+                label: qsTr("Décalage")
+                fieldWidth: 62
+                unit: "Hz"
+                minimum: -(root.recipe.symbolRate ?? 1000)
+                maximum: root.recipe.symbolRate ?? 1000
+                value: root.recipe.frequencyOffset ?? 0
+                tip: qsTr("Décalage de fréquence de la porteuse reçue : l'oscillateur du récepteur n'est jamais tout à fait celui de l'émetteur (au plus le débit de symboles ; la phase du canal : panneau Liaison)")
+                onEdited: (v) => root.set({ frequencyOffset: v })
+            }
+            RibbonField {
+                anchors.verticalCenter: parent.verticalCenter
+                label: qsTr("Retard")
+                fieldWidth: 74
+                unit: "symb."
+                minimum: 0
+                maximum: 1000
+                value: root.recipe.delay ?? 0
+                tip: qsTr("Retard de la trame, en durées de symbole (pas forcément un nombre entier) : le récepteur ne sait pas quand elle commence")
+                onEdited: (v) => root.set({ delay: v })
+            }
+            RibbonField {
+                anchors.verticalCenter: parent.verticalCenter
+                label: qsTr("Horloge")
+                fieldWidth: 70
+                unit: "ppm"
+                minimum: -10000
+                maximum: 10000
+                value: root.recipe.clockPpm ?? 0
+                tip: qsTr("Écart de l'horloge d'échantillonnage du récepteur, en millionièmes : à 200 ppm, l'instant de décision glisse d'un symbole tous les 5 000")
+                onEdited: (v) => root.set({ clockPpm: v })
+            }
+            ChoiceButton {
+                glyph: "paths"
+                text: qsTr("Trajets")
+                checked: root.hasPaths
+                options: Choices.linkPaths
+                current: root.recipe.paths ?? ""
+                tip: root.hasPaths ? qsTr("Plusieurs trajets : %1 (d'autres canaux tout prêts ici ; les écrire soi-même : panneau Liaison)").arg(root.recipe.paths ?? "")
+                                   : qsTr("Un seul trajet. Avec des échos, chaque symbole reçoit une part de ses voisins : des canaux tout prêts ici (les écrire soi-même : panneau Liaison)")
+                onChosen: (key) => root.set({ paths: key })
+            }
+            ChoiceButton {
+                glyph: "fading"
+                text: (Choices.linkFadings.find((x) => x.key === (root.recipe.fading ?? "none")) ?? {}).short ?? qsTr("Fixe")
+                checked: root.fades
+                options: Choices.linkFadings
+                current: root.recipe.fading ?? "none"
+                tip: ((Choices.linkFadings.find((x) => x.key === (root.recipe.fading ?? "none")) ?? {}).tip ?? "")
+                     + qsTr(" (évanouissements)")
+                onChosen: (key) => root.set({ fading: key })
+            }
+            RibbonField {
+                visible: root.fades
+                anchors.verticalCenter: parent.verticalCenter
+                label: qsTr("fd")
+                fieldWidth: 58
+                unit: "Hz"
+                minimum: 0
+                maximum: 0.25 * (root.recipe.symbolRate ?? 1000)
+                value: root.recipe.doppler ?? 10
+                tip: qsTr("Décalage Doppler maximal (vitesse sur longueur d'onde) : le gain change en 1 / fd environ ; au plus le quart du débit de symboles. 0 : un gain tiré une fois, puis fixe")
+                onEdited: (v) => root.set({ doppler: v })
+            }
+            RibbonField {
+                visible: (root.recipe.fading ?? "none") === "rice"
+                anchors.verticalCenter: parent.verticalCenter
+                label: qsTr("K")
+                fieldWidth: 52
+                unit: "dB"
+                minimum: -20
+                maximum: 40
+                value: root.recipe.riceK ?? 6
+                tip: qsTr("Puissance de l'onde directe sur celle des ondes dispersées (premier trajet) : 0 dB, des creux encore fréquents ; 20 dB, presque plus d'évanouissement")
+                onEdited: (v) => root.set({ riceK: v })
+            }
+        }
+        RibbonGroup {
+            visible: root.ribbonTab === 0
+            title: qsTr("Récepteur")
+            ChoiceButton {
+                glyph: "receiver"
+                text: root.synchronizes ? qsTr("Synchronisé") : qsTr("Idéal")
+                options: Choices.linkReceivers
+                current: root.recipe.receiver ?? "ideal"
+                tip: (Choices.linkReceivers.find((x) => x.key === (root.recipe.receiver ?? "ideal")) ?? {}).tip ?? ""
+                onChosen: (key) => root.set({ receiver: key })
+            }
+            RibbonField {
+                visible: root.synchronizes
+                anchors.verticalCenter: parent.verticalCenter
+                label: qsTr("Préambule")
+                fieldWidth: 74
+                unit: "symb."
+                minimum: 8
+                maximum: 1024
+                value: root.recipe.preamble ?? 64
+                tip: qsTr("Symboles connus du récepteur, en tête de trame : il y trouve le début, l'écart de fréquence et la phase (ils ne comptent pas dans le TEB ; les bandes des boucles : panneau Liaison)")
+                onEdited: (v) => root.set({ preamble: Math.round(v) })
+            }
+            ChoiceButton {
+                visible: !root.fsk
+                glyph: "equalizer"
+                text: root.equalizes ? qsTr("Égalisé") : qsTr("Égaliseur")
+                checked: root.equalizes
+                options: Choices.linkEqualizers
+                current: root.recipe.equalizer ?? "none"
+                tip: ((Choices.linkEqualizers.find((x) => x.key === (root.recipe.equalizer ?? "none")) ?? {}).tip ?? "")
+                     + qsTr(" (le nombre de prises : panneau Liaison)")
+                onChosen: (key) => root.set({ equalizer: key })
+            }
+            RibbonField {
+                visible: !root.fsk && root.recipe.equalizer === "dfe"
+                anchors.verticalCenter: parent.verticalCenter
+                label: qsTr("Retour")
+                fieldWidth: 46
+                unit: ""
+                minimum: 1
+                maximum: 32
+                value: root.recipe.feedbackTaps ?? 4
+                tip: qsTr("Prises de retour : sur combien de symboles déjà décidés l'égaliseur retire leur écho (au moins le retard du dernier trajet, en symboles)")
+                onEdited: (v) => root.set({ feedbackTaps: Math.round(v) })
+            }
+            RibbonButton {
+                visible: !root.fsk && (root.synchronizes || root.equalizes)
+                glyph: "rawpoints"
+                text: root.equalizes ? qsTr("Avant égaliseur") : qsTr("Avant synchro")
+                checked: root.showRaw
+                tip: root.equalizes
+                     ? (root.showRaw ? qsTr("En gris sous la constellation : les points tels que le récepteur les déciderait sans égaliseur (cliquer : les cacher)")
+                                     : qsTr("Montrer sous la constellation, en gris, les points d'avant l'égaliseur : ce que les trajets ont fait de chaque symbole"))
+                     : (root.showRaw ? qsTr("En gris sous la constellation : ce que déciderait un récepteur qui n'aurait trouvé que le début de la trame, sans redresser la porteuse ni suivre l'horloge (cliquer : les cacher)")
+                                     : qsTr("Montrer sous la constellation, en gris, les points d'avant la synchronisation : la porteuse non redressée (ils tournent), l'horloge non suivie"))
+                onClicked: root.showRaw = !root.showRaw
+            }
         }
         ListenGroup {
             id: listenGroup
@@ -399,7 +578,7 @@ Item {
         ViewGroup {
             visible: root.ribbonTab === 0
             target: root.linkPlot
-            plots: [timePlot, spectrum, constellationPlot, eyePlot]
+            plots: [timePlot, spectrum, channelPlot, constellationPlot, eyePlot, syncPlot]
             backTarget: root.lastZoomed && root.lastZoomed.canGoBack ? root.lastZoomed : timePlot
             fitTip: qsTr("Tous les tracés en entier, échelles automatiques (double clic sur un tracé : ce tracé seulement)")
         }
@@ -527,14 +706,20 @@ Item {
                 color: Theme.border
             }
             RowLayout {
+                id: linkRow
                 anchors.fill: parent
                 anchors.leftMargin: 12
                 anchors.rightMargin: 12
                 spacing: 8
                 Label {
-                    readonly property real room: Math.max(120, root.width * 0.5)
-                    text: root.linkOk || (root.result.error ?? "").length === 0 ? (root.result.text ?? "") : (root.result.error ?? "")
-                    color: root.linkOk || (root.result.error ?? "").length === 0 ? Theme.text : Theme.error
+                    // All of it when what follows leaves the room (the figures of the link, the "?"), half the
+                    // width at least.
+                    readonly property real room: Math.max(120, linkRow.width * 0.5,
+                                                          linkRow.width - (linkFacts.visible ? linkFacts.implicitWidth : 0) - 40)
+                    text: root.modulations.blank ? qsTr("Page vierge : choisissez une modulation (ruban ▸ Émetteur) ou un exemple")
+                          : root.linkOk || (root.result.error ?? "").length === 0 ? (root.result.text ?? "") : (root.result.error ?? "")
+                    color: root.modulations.blank ? Theme.textMuted
+                           : root.linkOk || (root.result.error ?? "").length === 0 ? Theme.text : Theme.error
                     font.pixelSize: Theme.bodyText
                     font.bold: root.linkOk
                     elide: Text.ElideRight
@@ -542,6 +727,7 @@ Item {
                     Layout.minimumWidth: Math.min(implicitWidth, room)
                 }
                 Label {
+                    id: linkFacts
                     visible: root.linkOk
                     // French puts 0 and 1 in the singular: "aucune erreur", "1 erreur", "274 erreurs".
                     readonly property int errors: root.result.bitErrors ?? 0
@@ -549,7 +735,8 @@ Item {
                                                          : errors === 1 ? qsTr("1 erreur")
                                                                         : qsTr("%1 erreurs").arg(Units.count(errors))
                     text: root.recipe.noise === true
-                          ? qsTr("TEB %1 (%2) · théorie %3 · Eb/N0 = %4 dB").arg(root.result.berText ?? "")
+                          ? (root.fades ? qsTr("TEB %1 (%2) · théorie avec évanouissements %3 · Eb/N0 moyen = %4 dB")
+                                        : qsTr("TEB %1 (%2) · théorie %3 · Eb/N0 = %4 dB")).arg(root.result.berText ?? "")
                                 .arg(errorsText).arg(root.result.theoryText ?? "")
                                 .arg(Units.compact(root.recipe.ebN0 ?? 0, "", 3))
                           : qsTr("Sans bruit · %1").arg(errorsText)
@@ -596,7 +783,8 @@ Item {
             }
         }
 
-        // ---- Liaison: the signals and their spectra above; the constellation and the eye below ----
+        // ---- Liaison: the signals and, beside them, their spectra or the channel and its equalizer above; the
+        // constellation, the eye and (receiver synchronized) the errors of the synchronization below ----
         SplitView {
             id: linkArea
             visible: root.ribbonTab === 0
@@ -622,6 +810,7 @@ Item {
                     SignalPlot {
                         id: timePlot
                         anchors.fill: parent
+                        anchors.topMargin: root.stripHeight
                         anchors.bottomMargin: timeBar.height
                         session: root.modulations.preview
                         signalId: root.modulations.previewId
@@ -633,7 +822,7 @@ Item {
                         accentColor: Theme.accent
                         panelColor: Theme.panel
                         channelColors: Theme.channelColors
-                        emptyText: (root.result.error ?? "").length > 0 ? root.result.error : qsTr("Calcul de la liaison…")
+                        emptyText: root.modulations.blank ? "" : (root.result.error ?? "").length > 0 ? root.result.error : qsTr("Calcul de la liaison…")
                         onContextMenuRequested: (x, y) => signalMenu.openAt(timePlot, x, y)
                         onScaleMenuRequested: (x, y, scale) => scaleMenu.openFor(timePlot, x, y, scale)
                         HoverHandler {
@@ -654,20 +843,117 @@ Item {
                     CursorReadout {
                         view: timePlot
                     }
+                    // (Above the plot, in the strip: over it, it hid the first of four channels.)
                     PlotToolbar {
                         anchors.top: parent.top
                         anchors.right: parent.right
-                        anchors.topMargin: 8
-                        anchors.rightMargin: 18
+                        anchors.topMargin: 4
+                        anchors.rightMargin: 14
                         view: timePlot
+                    }
+                    // The blank page: how to start.
+                    Rectangle {
+                        visible: root.modulations.blank
+                        anchors.centerIn: parent
+                        width: Math.min(parent.width - 40, 560)
+                        height: blankHint.implicitHeight + 24
+                        radius: 8
+                        color: Qt.alpha(Theme.panel, 0.94)
+                        border.color: Theme.border
+                        Label {
+                            id: blankHint
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 12
+                            wrapMode: Text.WordWrap
+                            color: Theme.text
+                            font.pixelSize: Theme.smallText
+                            lineHeight: 1.15
+                            text: qsTr("Page vierge : rien n'est calculé.")
+                                  + "\n• " + qsTr("Émetteur (ruban) : choisissez une modulation ; ce réglage, comme tout autre, lance le calcul à partir d'une QPSK à 1 kBd, porteuse 6 kHz, Eb/N0 = 7 dB ;")
+                                  + "\n• " + qsTr("Exemples ▾ : une liaison toute prête, ou celle de la dernière fois.")
+                        }
                     }
                 }
                 Item {
                     SplitView.preferredWidth: Math.round(linkArea.width * 0.4)
                     SplitView.minimumWidth: 180
+                    // Which plot this is: the spectra of the signals, or the channel and its equalizer.
+                    Rectangle {
+                        id: besideChoice
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.topMargin: 4
+                        anchors.leftMargin: 8
+                        implicitWidth: besideRow.implicitWidth + 8
+                        implicitHeight: 28
+                        radius: 6
+                        color: Qt.alpha(Theme.panel, 0.92)
+                        border.color: Theme.border
+                        Row {
+                            id: besideRow
+                            anchors.centerIn: parent
+                            spacing: 4
+                            Repeater {
+                                model: [{ key: "spectra", name: qsTr("Spectres"),
+                                          tip: qsTr("Les spectres du signal émis et du signal reçu") },
+                                        { key: "channel", name: qsTr("Canal"),
+                                          tip: qsTr("Le canal vu par les décisions (ce que chaque symbole reçoit de ses voisins, quand il a plusieurs trajets) et l'égaliseur, symbole par symbole et en fréquence") }]
+                                delegate: Rectangle {
+                                    id: besideChip
+                                    required property var modelData
+                                    readonly property bool current: root.besideSignals === modelData.key
+                                    implicitWidth: besideName.implicitWidth + 18
+                                    implicitHeight: 20
+                                    radius: 10
+                                    color: current ? Qt.alpha(Theme.accent, 0.18) : besideArea.containsMouse ? Qt.alpha(Theme.text, 0.10) : "transparent"
+                                    border.color: current ? Qt.alpha(Theme.accent, 0.7) : "transparent"
+                                    Label {
+                                        id: besideName
+                                        anchors.centerIn: parent
+                                        text: besideChip.modelData.name
+                                        font.pixelSize: Theme.smallText
+                                        color: besideChip.current ? Theme.text : Theme.textMuted
+                                    }
+                                    MouseArea {
+                                        id: besideArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        onClicked: root.besideSignals = besideChip.modelData.key
+                                    }
+                                    ToolTip.visible: besideArea.containsMouse
+                                    ToolTip.delay: 600
+                                    ToolTip.text: besideChip.modelData.tip
+                                }
+                            }
+                        }
+                    }
+                    ModulationPlot {
+                        id: channelPlot
+                        visible: root.besideSignals === "channel"
+                        anchors.fill: parent
+                        anchors.topMargin: root.stripHeight
+                        modulation: root.modulations
+                        view: "channel"
+                        backgroundColor: Theme.canvas
+                        gridColor: Theme.grid
+                        textColor: Theme.text
+                        mutedColor: Theme.textMuted
+                        accentColor: Theme.accent
+                        warningColor: Theme.error
+                        panelColor: Theme.panel
+                        curveColors: Theme.channelColors
+                        emptyText: root.modulations.blank ? qsTr("Rien de calculé") : qsTr("Calcul de la liaison…")
+                        HoverHandler {
+                            onHoveredChanged: if (hovered) root.lastZoomed = channelPlot
+                        }
+                    }
                     SpectrumPlot {
                         id: spectrum
+                        visible: root.besideSignals === "spectra"
                         anchors.fill: parent
+                        anchors.topMargin: root.stripHeight
                         anchors.bottomMargin: spectrumBar.height
                         analysis: root.analysis
                         logFrequency: false
@@ -680,7 +966,8 @@ Item {
                         panelColor: Theme.panel
                         channelColors: Theme.channelColors
                         emptyText: root.analysis.error.length > 0 ? root.analysis.error
-                                   : root.modulations.hasPreview ? qsTr("Calcul des spectres…") : ""
+                                   : root.modulations.hasPreview ? qsTr("Calcul des spectres…")
+                                   : root.modulations.blank ? qsTr("Rien de calculé") : ""
                         onContextMenuRequested: (x, y) => spectrumMenu.openAt(spectrum, x, y)
                         onScaleMenuRequested: (x, y, scale) => scaleMenu.openFor(spectrum, x, y, scale)
                         HoverHandler {
@@ -689,6 +976,7 @@ Item {
                     }
                     ViewScrollBar {
                         id: spectrumBar
+                        visible: spectrum.visible && spectrumBar.active
                         view: spectrum
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -698,33 +986,17 @@ Item {
                         anchors.bottomMargin: 2
                         height: implicitHeight
                     }
-                    Rectangle {
-                        visible: spectrum.hasData || root.analysis.busy
+                    // (No title here: the legend of the plot names the two spectra, and a title over its corner hid
+                    // the second name. Only the wheel, while they are computed.)
+                    BusyIndicator {
+                        visible: spectrum.visible && root.analysis.busy
+                        running: visible
                         anchors.top: parent.top
                         anchors.right: parent.right
-                        anchors.topMargin: 8
-                        anchors.rightMargin: 18
-                        implicitWidth: spectrumRow.implicitWidth + 12
-                        implicitHeight: 28
-                        radius: 6
-                        color: Qt.alpha(Theme.panel, 0.92)
-                        border.color: Theme.border
-                        RowLayout {
-                            id: spectrumRow
-                            anchors.centerIn: parent
-                            spacing: 6
-                            Label {
-                                text: qsTr("Spectres émis et reçu")
-                                color: Theme.textMuted
-                                font.pixelSize: Theme.smallText
-                            }
-                            BusyIndicator {
-                                visible: root.analysis.busy
-                                running: visible
-                                Layout.preferredWidth: 16
-                                Layout.preferredHeight: 16
-                            }
-                        }
+                        anchors.topMargin: 9
+                        anchors.rightMargin: 20
+                        width: 18
+                        height: 18
                     }
                 }
             }
@@ -738,13 +1010,14 @@ Item {
                     color: SplitHandle.hovered || SplitHandle.pressed ? Qt.alpha(Theme.accent, 0.5) : Theme.border
                 }
                 Item {
-                    SplitView.preferredWidth: Math.round(linkArea.width * 0.45)
+                    SplitView.preferredWidth: Math.round(linkArea.width * (root.synchronizes ? 0.3 : 0.45))
                     SplitView.minimumWidth: 180
                     ModulationPlot {
                         id: constellationPlot
                         anchors.fill: parent
                         modulation: root.modulations
                         view: "constellation"
+                        showRaw: root.showRaw
                         backgroundColor: Theme.canvas
                         gridColor: Theme.grid
                         textColor: Theme.text
@@ -753,7 +1026,7 @@ Item {
                         warningColor: Theme.error
                         panelColor: Theme.panel
                         curveColors: Theme.channelColors
-                        emptyText: qsTr("Calcul de la liaison…")
+                        emptyText: root.modulations.blank ? qsTr("Rien de calculé") : qsTr("Calcul de la liaison…")
                         HoverHandler {
                             onHoveredChanged: if (hovered) root.lastZoomed = constellationPlot
                         }
@@ -775,9 +1048,32 @@ Item {
                         warningColor: Theme.error
                         panelColor: Theme.panel
                         curveColors: Theme.channelColors
-                        emptyText: qsTr("Calcul de la liaison…")
+                        emptyText: root.modulations.blank ? qsTr("Rien de calculé") : qsTr("Calcul de la liaison…")
                         HoverHandler {
                             onHoveredChanged: if (hovered) root.lastZoomed = eyePlot
+                        }
+                    }
+                }
+                Item {
+                    visible: root.synchronizes
+                    SplitView.preferredWidth: Math.round(linkArea.width * 0.34)
+                    SplitView.minimumWidth: 180
+                    ModulationPlot {
+                        id: syncPlot
+                        anchors.fill: parent
+                        modulation: root.modulations
+                        view: "sync"
+                        backgroundColor: Theme.canvas
+                        gridColor: Theme.grid
+                        textColor: Theme.text
+                        mutedColor: Theme.textMuted
+                        accentColor: Theme.accent
+                        warningColor: Theme.error
+                        panelColor: Theme.panel
+                        curveColors: Theme.channelColors
+                        emptyText: root.modulations.blank ? qsTr("Rien de calculé") : qsTr("Calcul de la liaison…")
+                        HoverHandler {
+                            onHoveredChanged: if (hovered) root.lastZoomed = syncPlot
                         }
                     }
                 }

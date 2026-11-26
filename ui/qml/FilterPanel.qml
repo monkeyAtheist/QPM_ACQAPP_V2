@@ -22,7 +22,9 @@ ScrollView {
     readonly property bool typed: recipe.kind === "typed"
     readonly property bool iir: recipe.kind === "iir"
     readonly property bool fir: recipe.kind === "fir"
-    readonly property bool band: !typed && (recipe.response === "bandpass" || recipe.response === "bandstop")
+    // No filter yet (the blank page): H = 1.
+    readonly property bool none: recipe.kind === "none"
+    readonly property bool band: !typed && !none && (recipe.response === "bandpass" || recipe.response === "bandstop")
     // A FIR: by a window (its key), or equiripple (Parks-McClellan).
     readonly property bool equiripple: fir && recipe.firDesign === "equiripple"
     readonly property string firDesign: equiripple ? "equiripple" : (recipe.window ?? "hamming")
@@ -31,7 +33,7 @@ ScrollView {
     readonly property bool hasRipple: (iir && (recipe.family === "chebyshev1" || recipe.family === "elliptic")) || equiripple
     readonly property bool hasAttenuation: (iir && (recipe.family === "chebyshev2" || recipe.family === "elliptic")) || equiripple
     // The least order (taps) that holds a template, computed; the recipe as designed has it.
-    readonly property bool fromTemplate: !typed && recipe.fromTemplate === true
+    readonly property bool fromTemplate: !typed && !none && recipe.fromTemplate === true
     readonly property var designedRecipe: design.recipe ?? recipe
     // The edges of the template in their order along the frequencies, as its response has them.
     readonly property var templateEdges: {
@@ -166,8 +168,13 @@ ScrollView {
                 text: qsTr("Les formules connaissent k (le rang, de 0), fs, Te = 1/fs, pi, e, les variables, et sin, cos, exp, sqrt, abs, if(…; …; …)… Une seule formule de k donne « Nombre de » coefficients : b = 1/N avec N coefficients, une moyenne glissante.")
             }
         }
+        Hint {
+            visible: root.none
+            text: qsTr("Aucun filtre : la sortie est l'entrée (H = 1). Choisissez un type ci-dessus (RII, RIF, coefficients) ou un exemple (ruban ▸ Exemples) : le premier part d'un passe-bas à %1.")
+                  .arg(Units.compact(root.recipe.frequency1 ?? 1000, "Hz", 4))
+        }
         ChoiceField {
-            visible: !root.typed
+            visible: !root.typed && !root.none
             label: qsTr("Réponse")
             choices: Choices.names(Choices.filterResponses)
             value: Choices.indexOf(Choices.filterResponses, root.recipe.response ?? "lowpass")
@@ -204,7 +211,7 @@ ScrollView {
         }
         // ---- The order chosen, or the least that holds a template ----
         CheckBox {
-            visible: !root.typed
+            visible: !root.typed && !root.none
             text: qsTr("Ordre calculé d'après un gabarit")
             checked: root.fromTemplate
             onToggled: root.set({ fromTemplate: checked })
@@ -272,7 +279,7 @@ ScrollView {
             }
         }
         RowLayout {
-            visible: !root.typed && !root.fromTemplate
+            visible: !root.typed && !root.none && !root.fromTemplate
             Layout.fillWidth: true
             spacing: 8
             QuantityField {
@@ -294,7 +301,7 @@ ScrollView {
             }
         }
         RowLayout {
-            visible: !root.typed && !root.fromTemplate
+            visible: !root.typed && !root.none && !root.fromTemplate
             Layout.fillWidth: true
             spacing: 8
             QuantityField {
@@ -409,26 +416,31 @@ ScrollView {
         }
 
         // ---- How it is applied ----
-        SectionTitle { text: qsTr("Application") }
+        SectionTitle {
+            visible: !root.none
+            text: qsTr("Application")
+        }
         ChoiceField {
+            visible: !root.none
             choices: Choices.names(root.applications)
             value: Choices.indexOf(root.applications, root.recipe.application ?? "causal")
             onEdited: (index) => root.set({ application: root.applications[index].key })
         }
         Hint {
+            visible: !root.none
             text: ((root.applications.find((a) => a.key === root.recipe.application) ?? {}).tip ?? "")
                   + (!root.canAlign ? qsTr(" (« Alignée » : pour un RIF seulement.)") : "")
         }
         // At zero phase: how the record is prolonged beyond its ends, for the filter to start there as if it went on.
         ChoiceField {
-            visible: root.recipe.application === "zerophase"
+            visible: !root.none && root.recipe.application === "zerophase"
             label: qsTr("Bords prolongés")
             choices: Choices.names(Choices.edgeExtensions)
             value: Choices.indexOf(Choices.edgeExtensions, root.recipe.edges ?? "predicted")
             onEdited: (index) => root.set({ edges: Choices.edgeExtensions[index].key })
         }
         Hint {
-            visible: root.recipe.application === "zerophase"
+            visible: !root.none && root.recipe.application === "zerophase"
             text: ((Choices.edgeExtensions.find((e) => e.key === (root.recipe.edges ?? "predicted")) ?? {}).tip ?? "")
                   + qsTr(". Prolongés le temps que le filtre sonne : au-delà de ses bords, l'enregistrement ne dit pas ce que faisait le signal, le prolongement le suppose.")
         }

@@ -60,6 +60,10 @@ int bitsPerSymbol(Modulation modulation) noexcept; // 0 for analog modulations
 // The digital modulations whose symbols are points of a constellation, decided by the nearest one (ASK, BPSK,
 // QPSK, 8-PSK, QAM; not FSK, detected by the energies of its two tones).
 bool hasConstellation(Modulation modulation) noexcept;
+// The angle after which its constellation falls back on itself, in degrees: 180 (BPSK), 90 (QPSK, QAM), 45
+// (8-PSK); 0 for the others (ASK, FSK, analog). What a carrier recovered from the data alone cannot tell apart:
+// a carrier loop that loses its lock comes back on one of these symmetries (a slip).
+double rotationalSymmetryDegrees(Modulation modulation) noexcept;
 // Its points, at a unit amplitude: index = the value of the bits of the symbol read most significant first
 // (ASK: {askLowLevel, 1}; the PSK and QAM at a mean energy of 1). Empty for the others.
 std::vector<std::complex<double>> constellation(Modulation modulation, double askLowLevel = 0.0);
@@ -80,6 +84,23 @@ std::vector<std::uint8_t> randomBits(std::size_t count, std::uint64_t seed);
 // Root-raised-cosine impulse response, span symbols long (span * sps + 1 taps, one more if that is even),
 // sum of squares = 1.
 std::vector<double> rootRaisedCosine(double rolloff, std::size_t samplesPerSymbol, std::size_t spanSymbols);
+// What the pair of them (the transmitter's pulse and the matched filter, both cut to spanSymbols) leaves of the
+// other symbols at the decision instants, against the symbol itself, in dB (-infinity when nothing). Cut short, a
+// slowly decaying pulse (a small roll-off) no longer makes quite a Nyquist pair: -17.6 dB at 0.01 and -25 dB at
+// 0.1 when cut to 12 symbols, against -56 dB at 0.35.
+double rootRaisedCosineInterferenceDb(double rolloff, std::size_t samplesPerSymbol, std::size_t spanSymbols);
+// The span (symbols) the root raised cosine of a roll-off is cut to when none is given: the shortest even one from
+// kMinimumPulseSpanSymbols on whose pair leaves at most kPulseInterferenceTargetDb (reckoned at 16 samples per
+// symbol), within kMaximumPulseSpanSymbols, where the smallest roll-offs (under about 0.02) stop short of it: 12 at
+// 0.35, 22 at 0.1, 44 at 0.05. The same whatever the samples per symbol: the transmitter and the receivers (8 samples
+// per symbol for the synchronized one) cut their pulses alike. Not monotonic: 26 at 0.15, but 12 at 0.18 (a span
+// that ends near a zero of the tails leaves less).
+std::size_t rootRaisedCosineSpan(double rolloff);
+// The span of a pulse: the one given, or rootRaisedCosineSpan(rolloff) for 0.
+std::size_t pulseSpanSymbolsOf(std::size_t given, double rolloff);
+inline constexpr std::size_t kMinimumPulseSpanSymbols = 12;
+inline constexpr std::size_t kMaximumPulseSpanSymbols = 96;
+inline constexpr double kPulseInterferenceTargetDb = -50.0;
 
 struct ModulationSpec
 {
@@ -107,7 +128,7 @@ struct ModulationSpec
     double fskDeviationHz = 1000.0;
     PulseShape pulse = PulseShape::Rectangular;
     double rolloff = 0.35;
-    std::size_t pulseSpanSymbols = 12; // ISI of the truncated pair below -50 dB
+    std::size_t pulseSpanSymbols = 0; // symbols the root raised cosine is cut to; 0: rootRaisedCosineSpan(rolloff)
 };
 
 struct ModulatedSignal

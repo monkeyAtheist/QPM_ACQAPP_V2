@@ -259,7 +259,7 @@ ResponsePlot::Range ResponsePlot::frequencyLimits() const
     double low = std::pow(10.0, std::floor(std::log10(nyquist)) - 3.0);
     // (Coefficients typed: no edge. A template: its lowest edge.)
     double f1 = 0.0;
-    if (m_design && m_design->recipe.kind != analysis::FilterKind::Typed)
+    if (m_design && analysis::designedKind(m_design->recipe.kind))
     {
         const analysis::FilterRecipe &r = m_design->recipe;
         f1 = r.fromTemplate ? std::min(r.passEdge1Hz, r.stopEdge1Hz) : r.frequency1Hz;
@@ -961,9 +961,9 @@ void ResponsePlot::paintFrequencies(QPainter &p, const QRectF &area)
             return;
         }
     };
-    if (r.kind == analysis::FilterKind::Typed)
+    if (!analysis::designedKind(r.kind))
     {
-        // Coefficients typed: no edge was given.
+        // Coefficients typed, or no filter: no edge was given.
     }
     else if (r.fromTemplate)
     {
@@ -1062,7 +1062,7 @@ void ResponsePlot::paintFrequencies(QPainter &p, const QRectF &area)
 bool ResponsePlot::templateShown() const
 {
     return m_kind == Kind::Gain && m_design && m_design->ok() && m_design->recipe.fromTemplate &&
-           m_design->recipe.kind != analysis::FilterKind::Typed;
+           analysis::designedKind(m_design->recipe.kind);
 }
 
 // The template on the gain: where it must not go, shaded (above its pass band, below it, above its stop band),
@@ -1310,7 +1310,7 @@ void ResponsePlot::paintPlane(QPainter &p, const QRectF &area)
         }
     };
     p.setPen(QPen(faded(m_text, 0.45), 1.0));
-    if (r.kind != analysis::FilterKind::Typed)
+    if (analysis::designedKind(r.kind))
     {
         mark(r.frequency1Hz);
         if (r.response == qacq::dsp::FilterResponse::BandPass || r.response == qacq::dsp::FilterResponse::BandStop)

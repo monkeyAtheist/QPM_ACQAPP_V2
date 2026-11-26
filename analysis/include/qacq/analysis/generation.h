@@ -29,8 +29,25 @@
 //
 // Modulated carrier: A cos(2π fc t + φ) modulated in amplitude, frequency or phase by a message typed as an
 // operation ("sin(2*pi*fm*t)", "v1", "x"), through qacq::dsp::AnalogModulator (the module Modulations uses
-// the same).
+// the same); or in amplitude without its carrier (double sideband: A m cos(2π fc t + φ)), or keeping one
+// sideband only (single sideband: A (m cos(θ) ∓ m̂ sin(θ)), m̂ the Hilbert transform of the message, taken by
+// the DFT of the whole message).
+//
+// Recorded signal: a channel of a signal of the session (generateSignal is given them), brought to the rate
+// of the recipe (analysis::resample) from an instant of the record, placed after a delay, once (0 after its
+// end) or in a loop, times a gain or scaled to a peak. The component names its signal by its id in the
+// session, and keeps its name, the name of the channel and its number of samples to find it again (a recipe
+// taken up in another session must not read a stranger of the same id).
+//
+// Digital frame: data typed (bits, hexadecimal, text) as two levels, as they are or framed by a protocol (UART,
+// I2C, SPI, USB: qacq/analysis/frames.h), at a bit rate, from an instant, once or again and again. A component is
+// one line of the frame (the data, the clock, SDA, SCL…); the other lines are other components, in other
+// channels, of the same group: they share everything but their line (spreadFrame, addFrameLines).
+//
+// A channel may be left out of the signal (GeneratorChannel::output false): made as the others, read by their
+// operations, but not among the channels of the result (a carrier, a message, a step of a computation).
 
+#include "qacq/analysis/frames.h"
 #include "qacq/dsp/generator.h"
 #include "qacq/model/json.h"
 #include "qacq/model/progress.h"
@@ -61,16 +78,22 @@ enum class WaveKind
     FourierSeries,
     Drawn,
     Recurrence,
-    Formula,   // operation between channels
-    Modulation // modulated carrier
+    Formula,    // operation between channels
+    Modulation, // modulated carrier
+    Recorded,   // a channel of a signal of the session
+    Frame       // a line of a digital frame
 };
 
-// How a carrier is modulated by its message m: amplitude A (1 + index m), frequency fc + Δf m, phase φ + Δφ m.
+// How a carrier is modulated by its message m: amplitude A (1 + index m), frequency fc + Δf m, phase φ + Δφ m;
+// amplitude without the carrier (A m: double sideband), one sideband only (upper, lower).
 enum class CarrierModulation
 {
     Am,
     Fm,
-    Pm
+    Pm,
+    Dsb,
+    Usb,
+    Lsb
 };
 
 enum class SeriesForm
@@ -161,6 +184,28 @@ struct GeneratorComponent
     double amIndex = 0.5;
     double deviationHz = 1000.0;
     double phaseDeviationDegrees = 90.0;
+    // A recorded signal: which one (setRecordedSource fills these five), from which instant of the record,
+    // once or in a loop; `amplitude` is a gain (times), or the peak it is scaled to (sourceNormalize: the
+    // peak of the part read); `eventSeconds` is where it starts in the signal made (a delay; rounded to a
+    // sample).
+    std::uint64_t sourceId = 0;      // of the signal, in its session
+    std::string sourceName;          // of the signal
+    std::size_t sourceFrames = 0;    // its samples per channel
+    std::size_t sourceChannel = 0;
+    std::string sourceChannelName;
+    double sourceStartSeconds = 0.0;
+    bool sourceLoop = false;
+    bool sourceNormalize = false;
+    // A digital frame: what it carries and how; which of its lines this component is (a key of frameLines; empty
+    // or unknown: the first); `amplitude` is the level of a 1 and `frameLow` that of a 0, `frequencyHz` its bit
+    // rate (bit/s), `eventSeconds` the instant it starts at; once, or again and again with `frameGapBits` bits of
+    // rest between two frames. Components of the same group (frameGroup, not 0) are the lines of one frame.
+    FrameSpec frame;
+    std::string frameLine;
+    double frameLow = 0.0;
+    bool frameRepeat = false;
+    double frameGapBits = 10.0;
+    std::uint64_t frameGroup = 0;
 };
 
 struct GeneratorChannel
@@ -168,6 +213,7 @@ struct GeneratorChannel
     std::string name = "Voie 1";
     std::string unit = "V";
     double offset = 0.0; // added to the sum
+    bool output = true;  // among the channels of the signal made (false: made, read by the others, left out)
     std::vector<GeneratorComponent> components;
 };
 
@@ -183,14 +229,24 @@ struct GeneratorRecipe
 inline constexpr std::size_t kMaximumGeneratorSamples = 50'000'000; // every channel together (400 Mo)
 inline constexpr std::size_t kMaximumGeneratorChannels = 16;
 inline constexpr std::size_t kMaximumGeneratorComponents = 32; // per channel
+// A single sideband: samples at most (the Hilbert transform of its message is taken over the whole signal).
+inline constexpr std::size_t kMaximumSidebandSamples = std::size_t{1} << 20;
 // Fourier series: harmonics × samples of a component at most (about a second of computation); beyond, the
 // series is shortened and a warning says so.
 inline constexpr double kGeneratorFourierBudget = 4e8;
 
-// One channel "Voie 1" (V) holding a sine of 1 kHz and 1 V, at 48 kHz for 1 s.
-GeneratorRecipe defaultGeneratorRecipe();
-// A new channel: named after its place (index 0: "Voie 1"), a sine suited to the rate.
-GeneratorChannel defaultGeneratorChannel(std::size_t index, double sampleRateHz = 48000.0);
+// A blank page: one channel "Voie 1" (V) without any waveform (worth its offset, 0), at 48 kHz for 1 s. What the
+// module opens on, and what "Par défaut" brings back.
+GeneratorRecipe blankGeneratorRecipe();
+// A new channel: named after its place (index 0: "Voie 1"), without any waveform.
+GeneratorChannel blankGeneratorChannel(std::size_t index);
+// A channel without waveform nor offset (it is 0); a recipe whose channels all are (nothing in it yet).
+bool isBlankChannel(const GeneratorChannel &channel) noexcept;
+bool isBlankRecipe(const GeneratorRecipe &recipe) noexcept;
+// One channel "Voie 1" (V) holding a sine of 1 kHz and 1 V, at 48 kHz for 1 s (the example "Sinus 1 kHz").
+GeneratorRecipe sineGeneratorRecipe();
+// A channel named after its place (index 0: "Voie 1"), a sine suited to the rate.
+GeneratorChannel sineGeneratorChannel(std::size_t index, double sampleRateHz = 48000.0);
 // A new component of that waveform with usual values for a signal of that rate and duration: 1 kHz (at
 // most fs/20), noise of 0.1, events at a tenth of the duration, a sweep of 20 Hz to 20 kHz (at most 0.45 fs);
 // a Fourier series: the square wave ±E (E = 1), 15 harmonics, none at or above fs/2; a drawn motif: a
@@ -316,7 +372,91 @@ std::vector<std::size_t> channelReaders(const GeneratorRecipe &recipe, std::size
 // The recipe without that channel; the formulas that name channels after it name them by their new number
 // (v3 becomes v2). False, the recipe unchanged, with why (in French): it is the last one, or others read it.
 bool removeGeneratorChannel(GeneratorRecipe &recipe, std::size_t channel, std::string *error = nullptr);
-std::string_view carrierModulationKey(CarrierModulation modulation) noexcept; // "am", "fm", "pm"
+std::string_view carrierModulationKey(CarrierModulation modulation) noexcept; // "am", "fm", "pm", "dsb", "usb", "lsb"
+
+// The record a component (WaveKind::Recorded) reads among the signals of the session: the one of its id if it
+// still has the name or the number of samples it had when chosen, else the one of that name; its channel where
+// it was if it still has its name, else the one of that name, else where it was.
+struct RecordedSource
+{
+    model::SignalPtr signal; // null: not found (error says what, in French)
+    std::size_t channel = 0;
+    std::string error;
+
+    bool ok() const noexcept { return signal != nullptr; }
+};
+RecordedSource findRecordedSource(const GeneratorComponent &component, std::span<const model::SignalPtr> sources);
+// The component reading that channel of that signal (its id, its names and its number of samples).
+void setRecordedSource(GeneratorComponent &component, const model::Signal &signal, std::size_t channel);
+// Whether the recipe reads recorded signals (components counted or not).
+bool readsRecordedSignals(const GeneratorRecipe &recipe) noexcept;
+// A channel of a signal of the session used in a recipe: "wave", a channel made of it; "am", "fm", "pm", "dsb",
+// "usb" or "lsb", a channel where it is the message, scaled to a peak of 1, of a carrier so modulated (1 V, the
+// carrier of defaultGeneratorComponent: 10 kHz, at most fs/4; AM: index 0.8, the peak of the message at 80 %), the
+// message (the record) above the carrier, which reads it as x. A blank recipe becomes that channel alone, at the
+// rate and for the duration of the record (and its name, if it had the default one); otherwise the channel takes
+// the place of the first blank channel that no other reads, or comes after the others.
+struct SignalUse
+{
+    std::size_t channel = 0; // where the channel made is
+    bool alone = false;      // the recipe was blank: it is that channel alone
+    bool timed = false;      // at the rate and for the duration of the record
+    std::string text;        // what was done, in French, for the user
+    std::string error;       // why nothing was done, in French
+    bool ok() const noexcept { return error.empty(); }
+};
+SignalUse useSignalInRecipe(GeneratorRecipe &recipe, const model::Signal &signal, std::size_t sourceChannel, std::string_view use);
+// A channel of the recipe itself as the message of a carrier so modulated ("am", "fm", "pm", "dsb", "usb", "lsb"; AM:
+// index 0.8), in a channel of its own that reads it as it is (message "v<k>": not scaled to a peak of 1, as a record
+// is), named after it ("A modulé", "Voie 1 modulée"), placed as useSignalInRecipe places one (the first blank channel
+// that no other reads, or after the others); the rate and the duration stay. Refused, the recipe unchanged: no such
+// channel, a blank one (nothing to modulate with), no room.
+SignalUse modulateChannelInRecipe(GeneratorRecipe &recipe, std::size_t channel, std::string_view use);
+// The message of a modulated carrier (channel, component) taken from a channel of a signal of the session: that
+// record, scaled to a peak of 1, as the component just above the carrier (in place of a record already there),
+// the carrier reading the components above it (x). False, the recipe unchanged, with why (in French): not a
+// carrier, no such channel in the record, no room in the channel.
+bool useSignalAsMessage(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, const model::Signal &signal,
+                        std::size_t sourceChannel, std::string *error = nullptr);
+// The recipe at the rate and for the duration of the record a component reads (from its start chosen; in a
+// loop, the whole record once). False, the recipe unchanged, if it reads none.
+bool adoptRecordedTiming(GeneratorRecipe &recipe, std::size_t channel, std::size_t component,
+                         std::span<const model::SignalPtr> sources);
+
+// A digital frame as a component gives it: where it lies in time.
+struct FrameTiming
+{
+    BuiltFrame frame;             // as built (its error: what is wrong in the data or the settings)
+    std::size_t line = 0;         // of the component, among those of its protocol
+    double bitSeconds = 0.0;      // 1 / bit rate
+    double durationSeconds = 0.0; // of one frame
+    double endSeconds = 0.0;      // start + duration
+    double samplesPerBit = 0.0;
+    double samplesPerTick = 0.0;  // under 1, levels are missed
+
+    bool ok() const noexcept { return frame.ok(); }
+};
+FrameTiming frameTiming(const GeneratorComponent &component, double sampleRateHz);
+// The lines of the frame a component belongs to, in the recipe: itself, and the components of its group.
+struct FrameMember
+{
+    std::size_t channel = 0, component = 0;
+    std::size_t line = 0; // among those of the protocol
+};
+std::vector<FrameMember> frameMembers(const GeneratorRecipe &recipe, std::size_t channel, std::size_t component);
+// The settings of that component (its frame, bit rate, start, repetition, levels) given to the other lines of
+// its group; `before`: the protocol it had (another one now: each line takes the part it played, the clock stays
+// a clock). Nothing to do for a component alone.
+void spreadFrame(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, FrameProtocol before);
+// The other lines of its protocol, each as a new channel named after it (the channel of the component too, if it
+// still has the name it was made with); the component and the new ones form a group. The number of channels
+// added; false with why (in French) when there is no room for them.
+bool addFrameLines(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, std::size_t *added = nullptr,
+                   std::string *error = nullptr);
+// The recipe framed on that frame: it starts after two bits of rest and the signal ends two bits after it, at a
+// rate of at least ten samples a bit (five a tick), a whole number of them; with `realRate`, at the bit rate of
+// its protocol first (USB). False, the recipe unchanged, if the frame cannot be built.
+bool adoptFrameTiming(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, bool realRate = false);
 
 // The coefficients of a Fourier series, in the form aₙ / bₙ whatever the form typed, for n = 1..count.
 struct SeriesCoefficients
@@ -338,7 +478,7 @@ std::size_t generatorSampleCount(const GeneratorRecipe &recipe) noexcept;
 std::string checkGeneratorRecipe(const GeneratorRecipe &recipe);
 
 std::string_view waveformKey(WaveKind waveform) noexcept; // "sine", "square"... as the simulator; "fourier", "drawn",
-                                                         // "recurrence", "formula", "modulation"
+                                                         // "recurrence", "formula", "modulation", "recorded", "frame"
 bool waveformFromKey(std::string_view key, WaveKind &waveform) noexcept;
 std::string_view generatorWaveformName(WaveKind waveform) noexcept; // "Sinus"... "Dirac", "Balayage"
 // The waveform of qacq::dsp::generate behind a kind (false for a Fourier series).
@@ -357,7 +497,8 @@ GeneratorRecipe generatorRecipeFromJson(const model::Json &json);
 // "Sinus 1 kHz, 1 V crête", "Bruit gaussien, écart type 100 mV", "Balayage 20 Hz → 20 kHz (log.), 1 V crête",
 // "Série de Fourier 1 kHz, 15 harmoniques : bₙ = 4*E/(pi*n)*odd(n) (E = 1)", "Motif dessiné 1 kHz, 4 points
 // (segments), 1 V crête", "Opération entre voies : v1*v2", "Porteuse 10 kHz, 1 V crête, modulée en amplitude
-// (m = 0,5) par sin(2*pi*fm*t) (fm = 1000)".
+// (m = 0,5) par sin(2*pi*fm*t) (fm = 1000)", "Signal enregistré « Voix » (voie Micro), crête ramenée à 1 V",
+// "Trame UART 8N1 à 9,6 kbit/s (7 octets : 42 6F 6E 6A 6F 75 72), de 0 V à 3,3 V".
 std::string componentText(const GeneratorComponent &component, const std::string &unit);
 
 // The first values of a recurrence as generated (12 at most), to show them.
@@ -379,8 +520,10 @@ struct GeneratorResult
 };
 
 // The signal of the recipe: every channel the offset plus its enabled components, made after the channels
-// its operations read. The progress goes by components.
-GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progress &progress = {});
+// its operations read; the channels left out of the signal (output false) are made too, and not kept. The
+// progress goes by components. `sources`: the signals its recorded components may read (those of the session).
+GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progress &progress = {},
+                               std::span<const model::SignalPtr> sources = {});
 
 // Ready-made recipes for the menu "Exemples".
 struct GeneratorExample

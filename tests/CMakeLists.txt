@@ -10,6 +10,8 @@ add_executable(qacq_tests
     test_generator.cpp
     test_modulation.cpp
     test_link.cpp
+    test_sync.cpp
+    test_equalizer.cpp
     test_io.cpp
     test_model.cpp
     test_acquisition.cpp
@@ -19,6 +21,7 @@ add_executable(qacq_tests
     test_curves.cpp
     test_expression.cpp
     test_generation.cpp
+    test_frames.cpp
     test_playback.cpp
     qt_keywords_check.cpp
 )
@@ -40,6 +43,8 @@ qacq_add_test_group(fir        "[fir]"        fast)
 qacq_add_test_group(generator  "[generator]"  fast)
 qacq_add_test_group(modulation "[modulation]" fast)
 qacq_add_test_group(link       "[link]"       fast)
+qacq_add_test_group(sync       "[sync]"       fast)
+qacq_add_test_group(equalizer  "[equalizer]"  fast)
 qacq_add_test_group(crc        "[crc]"        fast)
 qacq_add_test_group(text       "[text]"       fast)
 qacq_add_test_group(binary     "[binary]"     fast)
@@ -51,6 +56,7 @@ qacq_add_test_group(session    "[session]"    fast)
 qacq_add_test_group(csv        "[csv]"        fast)
 qacq_add_test_group(plot       "[plot]"       fast)
 qacq_add_test_group(analysis   "[analysis]"   fast)
+qacq_add_test_group(frames     "[frames]"     fast)
 qacq_add_test_group(code       "[code]"       fast)
 qacq_add_test_group(wav        "[wav]"        fast)
 qacq_add_test_group(acquisition "[acquisition]" fast)

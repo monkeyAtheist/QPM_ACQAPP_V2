@@ -41,7 +41,7 @@ struct ReceiverSpec
     double fskDeviationHz = 1000.0;
     PulseShape pulse = PulseShape::Rectangular;
     double rolloff = 0.35;
-    std::size_t pulseSpanSymbols = 12; // ISI of the truncated pair below -50 dB
+    std::size_t pulseSpanSymbols = 0; // symbols the root raised cosine is cut to; 0: rootRaisedCosineSpan(rolloff)
     // Analog.
     double messageBandwidthHz = 3000.0; // low-pass cut-off of the recovered message
     double amIndex = 0.8;
@@ -73,6 +73,8 @@ struct DigitalReception
     std::vector<double> matchedI, matchedQ;
     std::vector<double> decisionTimes;
     double samplesPerSymbol = 0.0;
+    // The rate of matchedI, matchedQ and decisionTimes (the record's, or the synchronized receiver's own).
+    double matchedRateHz = 0.0;
     std::vector<std::string> warnings;
     std::string error;
 
@@ -80,6 +82,23 @@ struct DigitalReception
 };
 
 DigitalReception receiveDigital(const ReceivedInput &input, const ReceiverSpec &spec);
+
+// The complex baseband of a record received, as receiveDigital starts from it: a passband record mixed down by
+// the carrier the receiver knows, 2 x exp(-j (2 pi fc t + phi)), and freed of its 2 fc image by a linear-phase
+// low-pass that keeps the band of the modulation (receiverBandEdgeHz); a complex record turned by -phi.
+struct Baseband
+{
+    std::vector<double> inPhase, quadrature;
+    std::vector<std::string> warnings;
+    std::string error;
+
+    bool ok() const noexcept { return error.empty(); }
+};
+
+Baseband toBaseband(const ReceivedInput &input, const ReceiverSpec &spec);
+// The band a digital modulation occupies about its carrier: FSK deltaF + Rs, root raised cosine (1 + rolloff) Rs / 2,
+// rectangular pulses Rs (their main lobe).
+double receiverBandEdgeHz(const ReceiverSpec &spec) noexcept;
 
 struct AnalogReception
 {
@@ -112,6 +131,13 @@ BitErrors countBitErrors(std::span<const std::uint8_t> sent, std::span<const std
 double theoreticalBer(Modulation modulation, double ebN0Db, double askLowLevel = 0.0) noexcept;
 // The same for the symbols (a symbol wrong: one bit or more).
 double theoreticalSer(Modulation modulation, double ebN0Db, double askLowLevel = 0.0) noexcept;
+// The same through flat fading (a single path whose gain g, of mean power 1, the receiver knows at each symbol):
+// the rates at Eb/N0 times |g|^2, averaged over its distribution. riceK (linear) 0: Rayleigh (|g|^2 exponential:
+// BPSK gives (1 - sqrt(Γ / (1 + Γ))) / 2, about 1 / (4 Γ) at a high mean Eb/N0 Γ: the deep fades, not the noise,
+// make the errors); larger: Rice (a line of sight K times the scattered power: noncentral chi-square), towards the
+// rates without fading as K grows. Integrated over the logarithm of |g|^2 (the deep fades resolved at any Eb/N0).
+double fadingBer(Modulation modulation, double ebN0Db, double askLowLevel = 0.0, double riceK = 0.0) noexcept;
+double fadingSer(Modulation modulation, double ebN0Db, double askLowLevel = 0.0, double riceK = 0.0) noexcept;
 
 // Gaussian tail Q(x) = 0.5 erfc(x / sqrt(2)).
 double gaussianQ(double x) noexcept;

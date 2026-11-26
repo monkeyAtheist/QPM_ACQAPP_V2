@@ -4,7 +4,8 @@ import QtQuick.Layouts
 
 // Left panel: the signals of the session, the same in every module. A click selects a signal (the
 // views and the properties follow it), a double click renames it (F2), the right click offers rename,
-// export and delete (also the Suppr key). Every change can be undone (Ctrl+Z).
+// export, its use in the generator (as a waveform, or as the message of a modulated carrier), taking some of
+// its channels out, and delete (also the Suppr key). Every change can be undone (Ctrl+Z).
 Rectangle {
     id: root
     required property var session
@@ -13,6 +14,9 @@ Rectangle {
     signal collapseRequested()
     signal importRequested()
     signal exportRequested(var id)
+    // Its use in the generator: "wave" (a waveform of a new channel) or "am" (the message of a modulated
+    // carrier).
+    signal generatorRequested(var id, string use)
 
     color: Theme.panel
 
@@ -75,6 +79,7 @@ Rectangle {
                 required property string originName
                 required property string summary
                 required property int discontinuityCount
+                required property int channelCount
                 required property int index
                 readonly property bool selected: signalId === root.selectedId
 
@@ -91,6 +96,7 @@ Rectangle {
                         root.signalSelected(entry.signalId)
                         contextMenu.targetId = entry.signalId
                         contextMenu.targetName = entry.name
+                        contextMenu.targetChannels = entry.channelCount
                         contextMenu.popup()
                     }
                 }
@@ -170,6 +176,7 @@ Rectangle {
         id: contextMenu
         property var targetId: 0
         property string targetName: ""
+        property int targetChannels: 1
         MenuItem {
             text: qsTr("Renommer…")
             onTriggered: renameDialog.openFor(contextMenu.targetId, contextMenu.targetName)
@@ -180,8 +187,113 @@ Rectangle {
         }
         MenuSeparator { }
         MenuItem {
+            text: contextMenu.targetChannels > 1 ? qsTr("Utiliser sa première voie dans le Générateur") : qsTr("Utiliser dans le Générateur")
+            onTriggered: root.generatorRequested(contextMenu.targetId, "wave")
+            ToolTip.visible: hovered
+            ToolTip.delay: 500
+            ToolTip.text: qsTr("Une voie de plus dans la recette du Générateur, faite de ce signal : pour lui ajouter un bruit, le mêler à d'autres, le lire dans une opération ; sur une page vierge, toute la page, à sa fréquence et pour sa durée")
+        }
+        MenuItem {
+            text: contextMenu.targetChannels > 1 ? qsTr("Moduler une porteuse avec sa première voie (AM, FM…)") : qsTr("Moduler une porteuse (AM, FM…)")
+            onTriggered: root.generatorRequested(contextMenu.targetId, "am")
+            ToolTip.visible: hovered
+            ToolTip.delay: 500
+            ToolTip.text: qsTr("Dans le Générateur : ce signal, ramené à 1 V crête, devient le message d'une porteuse modulée en amplitude, dans une voie de plus (sur une page vierge, toute la page) ; la carte de la porteuse propose aussi DBL, BLU, FM et PM. Ses autres voies : Générateur ▸ Moduler ▾")
+        }
+        MenuSeparator { }
+        MenuItem {
+            text: qsTr("Supprimer des voies…")
+            enabled: contextMenu.targetChannels > 1
+            onTriggered: channelsDialog.openFor(contextMenu.targetId)
+        }
+        MenuItem {
             text: qsTr("Supprimer")
             onTriggered: root.session.signalList.removeSignal(contextMenu.targetId)
+        }
+    }
+
+    // Some channels of a signal taken out at once: those left ticked stay.
+    Dialog {
+        id: channelsDialog
+        property var targetId: 0
+        property string targetName: ""
+        property var names: [] // of its channels, with their units
+        property var kept: []  // one boolean a channel
+        readonly property int keptCount: kept.filter((k) => k === true).length
+        readonly property int goneCount: names.length - keptCount
+        title: qsTr("Supprimer des voies de « %1 »").arg(targetName)
+        modal: true
+        width: 420
+        anchors.centerIn: Overlay.overlay
+        function openFor(id) {
+            const info = root.session.signalList.info(id)
+            targetId = id
+            targetName = info.name ?? ""
+            names = (info.channels ?? []).map((c) => (c.unit ?? "").length > 0 ? c.name + " (" + c.unit + ")" : c.name)
+            kept = names.map(() => true)
+            open()
+        }
+        function setKept(index, value) {
+            const next = kept.slice()
+            next[index] = value
+            kept = next
+        }
+        onAccepted: {
+            const indices = []
+            for (let i = 0; i < kept.length; ++i)
+                if (kept[i] === true)
+                    indices.push(i)
+            root.session.signalList.keepChannels(targetId, indices)
+        }
+        ColumnLayout {
+            width: parent ? parent.width : 380
+            spacing: 6
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("Décochez les voies à supprimer : les autres restent, dans leur ordre. Ctrl+Z les rend.")
+                color: Theme.textMuted
+                font.pixelSize: Theme.smallText
+            }
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(320, channelColumn.implicitHeight)
+                clip: true
+                Column {
+                    id: channelColumn
+                    Repeater {
+                        model: channelsDialog.names.length
+                        delegate: CheckBox {
+                            required property int index
+                            text: channelsDialog.names[index] ?? ""
+                            checked: channelsDialog.kept[index] === true
+                            onToggled: channelsDialog.setKept(index, checked)
+                        }
+                    }
+                }
+            }
+            Label {
+                visible: channelsDialog.keptCount === 0
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("Un signal garde au moins une voie (pour tout enlever : Supprimer le signal).")
+                color: Theme.warning
+                font.pixelSize: Theme.smallText
+            }
+        }
+        footer: DialogButtonBox {
+            Button {
+                text: channelsDialog.goneCount <= 0 ? qsTr("Supprimer")
+                      : channelsDialog.goneCount === 1 ? qsTr("Supprimer 1 voie") : qsTr("Supprimer %1 voies").arg(channelsDialog.goneCount)
+                highlighted: true
+                enabled: channelsDialog.keptCount > 0 && channelsDialog.goneCount > 0
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+            Button {
+                text: qsTr("Annuler")
+                flat: true
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
         }
     }
 

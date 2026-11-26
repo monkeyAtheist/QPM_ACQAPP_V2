@@ -4,7 +4,10 @@ option(QACQ_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 function(qacq_set_warnings target)
     if(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+        # C4324 ("structure was padded due to alignment specifier"): the alignas(64) of the lock-free ring are
+        # there for that padding (each index on its cache line). /bigobj: the test files hold thousands of checks.
+        # Headers included with <> (the standard library, Qt) are not ours: no warnings from them.
+        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /wd4324 /bigobj /external:anglebrackets /external:W0)
         if(QACQ_WARNINGS_AS_ERRORS)
             target_compile_options(${target} PRIVATE /WX)
         endif()

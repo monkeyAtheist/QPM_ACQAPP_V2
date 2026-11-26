@@ -3,6 +3,7 @@
 #include "qacq/analysis/expression.h"
 
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <string>
 #include <vector>

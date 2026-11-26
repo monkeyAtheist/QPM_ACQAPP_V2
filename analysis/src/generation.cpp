@@ -1,7 +1,9 @@
 #include "qacq/analysis/generation.h"
 
 #include "qacq/analysis/expression.h"
+#include "qacq/analysis/playback.h"
 #include "qacq/dsp/constants.h"
+#include "qacq/dsp/fft.h"
 #include "qacq/dsp/modulation.h"
 #include "qacq/plot/axis.h"
 
@@ -10,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -25,7 +28,8 @@ constexpr std::pair<Kind, std::string_view> kKeys[] = {
     {Kind::Sawtooth, "sawtooth"}, {Kind::Pulse, "pulse"},   {Kind::Dc, "dc"},
     {Kind::Step, "step"},         {Kind::Impulse, "impulse"}, {Kind::Noise, "noise"},
     {Kind::Sweep, "sweep"},       {Kind::FourierSeries, "fourier"}, {Kind::Drawn, "drawn"},
-    {Kind::Recurrence, "recurrence"}, {Kind::Formula, "formula"}, {Kind::Modulation, "modulation"}};
+    {Kind::Recurrence, "recurrence"}, {Kind::Formula, "formula"}, {Kind::Modulation, "modulation"},
+    {Kind::Recorded, "recorded"}, {Kind::Frame, "frame"}};
 
 constexpr double kLargest = 1e15;              // amplitudes and offsets
 constexpr double kHighestFrequency = 1e12;     // Hz
@@ -63,6 +67,16 @@ double niceFloor(double value)
     const double m = value / decade;
     const double step = m >= 5.0 ? 5.0 : m >= 2.0 ? 2.0 : 1.0;
     return step * decade;
+}
+
+// 1, 2 or 5 times a power of ten, at least `value` (value > 0): the one after niceFloor (twice a 1 or a 5, two
+// and a half times a 2), so that it is as exact as niceFloor is.
+double niceCeil(double value)
+{
+    const double below = niceFloor(value);
+    if (below >= value) return below;
+    const double m = below / std::pow(10.0, std::floor(std::log10(below))); // 1, 2 or 5 (10: log10 a hair under an integer)
+    return below * (m > 1.5 && m < 3.5 ? 2.5 : 2.0);
 }
 
 bool hasSeries(Kind w) noexcept
@@ -288,7 +302,7 @@ std::string notesOf(const GeneratorRecipe &recipe)
         if (channel.offset != 0.0)
             line += (line.empty() ? "Continu " : " ; décalage ") + quantity(channel.offset, channel.unit);
         if (line.empty()) line = "nulle";
-        notes += "\n" + channelName(channel, c) + " : " + line + ".";
+        notes += "\n" + channelName(channel, c) + (channel.output ? "" : " (voie de calcul, hors du signal)") + " : " + line + ".";
     }
     return notes;
 }
@@ -321,14 +335,38 @@ GeneratorChannel channelOf(std::string name, std::string unit, std::vector<Gener
 }
 } // namespace
 
-GeneratorRecipe defaultGeneratorRecipe()
+GeneratorRecipe blankGeneratorRecipe()
 {
     GeneratorRecipe r;
-    r.channels.push_back(defaultGeneratorChannel(0, r.sampleRateHz));
+    r.channels.push_back(blankGeneratorChannel(0));
     return r;
 }
 
-GeneratorChannel defaultGeneratorChannel(std::size_t index, double sampleRateHz)
+GeneratorChannel blankGeneratorChannel(std::size_t index)
+{
+    GeneratorChannel c;
+    c.name = "Voie " + std::to_string(index + 1);
+    return c;
+}
+
+bool isBlankChannel(const GeneratorChannel &channel) noexcept
+{
+    return channel.components.empty() && channel.offset == 0.0;
+}
+
+bool isBlankRecipe(const GeneratorRecipe &recipe) noexcept
+{
+    return std::all_of(recipe.channels.begin(), recipe.channels.end(), [](const GeneratorChannel &c) { return isBlankChannel(c); });
+}
+
+GeneratorRecipe sineGeneratorRecipe()
+{
+    GeneratorRecipe r;
+    r.channels.push_back(sineGeneratorChannel(0, r.sampleRateHz));
+    return r;
+}
+
+GeneratorChannel sineGeneratorChannel(std::size_t index, double sampleRateHz)
 {
     GeneratorChannel c;
     c.name = "Voie " + std::to_string(index + 1);
@@ -367,6 +405,13 @@ GeneratorComponent defaultGeneratorComponent(Kind waveform, double sampleRateHz,
         c.variables = "fm = " + plot::formatCompact(c.frequencyHz / 10.0, "", 6);
         c.message = "sin(2*pi*fm*t)";
         c.deviationHz = c.frequencyHz / 5.0;
+    }
+    if (waveform == Kind::Frame)
+    {
+        // "Bonjour" as bits, at a rate a frame of eighty bits fits the signal at (eight samples a bit at least),
+        // after a tenth of the duration.
+        c.frequencyHz = std::min(niceCeil(80.0 / duration), niceFloor(fs / 8.0));
+        c.eventSeconds = duration / 10.0;
     }
     return c;
 }
@@ -2307,6 +2352,32 @@ ComponentSamples operationSamples(const GeneratorComponent &c, double fs, std::s
     return out;
 }
 
+// The Hilbert transform of a record (the imaginary part of its analytic signal), by the DFT of the whole record:
+// exact for what is periodic over it; a record that does not end as it starts is taken as repeated, and its
+// transform rings near both ends.
+std::vector<double> hilbertTransform(std::span<const double> x)
+{
+    const std::size_t n = x.size();
+    std::vector<double> out(n, 0.0);
+    if (n < 2) return out;
+    std::vector<dsp::Complex> spectrum(n);
+    for (std::size_t i = 0; i < n; ++i) spectrum[i] = dsp::Complex(x[i], 0.0);
+    const dsp::FftPlan plan(n);
+    plan.forward(spectrum);
+    // The analytic signal: the positive frequencies twice, the negative ones gone (0 and fs/2 once).
+    const std::size_t half = n / 2;
+    for (std::size_t k = 1; k < n; ++k)
+    {
+        if (k < half || (k == half && n % 2 != 0))
+            spectrum[k] *= 2.0;
+        else if (!(k == half && n % 2 == 0))
+            spectrum[k] = dsp::Complex(0.0, 0.0);
+    }
+    plan.inverse(spectrum);
+    for (std::size_t i = 0; i < n; ++i) out[i] = spectrum[i].imag();
+    return out;
+}
+
 ComponentSamples modulationSamples(const GeneratorComponent &c, double fs, std::size_t n, std::span<const double> above,
                                    std::span<const std::vector<double>> channels, const model::Progress &progress)
 {
@@ -2325,13 +2396,33 @@ ComponentSamples modulationSamples(const GeneratorComponent &c, double fs, std::
                                  : c.modulation == CarrierModulation::Pm ? dsp::Modulation::Pm
                                                                          : dsp::Modulation::Am;
     dsp::AnalogModulator modulator(type, fs, c.amplitude, c.amIndex, c.deviationHz, c.phaseDeviationDegrees * dsp::kPi / 180.0);
+    // Without its carrier: the envelope is the message itself (double sideband), or the message and its Hilbert
+    // transform in quadrature, A (m ± j m̂): the spectrum of the message on one side of the carrier only (upper: +).
+    const bool sideband = c.modulation == CarrierModulation::Usb || c.modulation == CarrierModulation::Lsb;
+    const bool suppressed = sideband || c.modulation == CarrierModulation::Dsb;
+    std::vector<double> quadrature;
+    if (sideband)
+    {
+        if (n > kMaximumSidebandSamples)
+        {
+            out.error = "une bande latérale unique se calcule sur " + grouped(kMaximumSidebandSamples) +
+                        " échantillons au plus (la transformée de Hilbert du message porte sur tout le signal) : " +
+                        "raccourcissez la durée ou baissez la fréquence d'échantillonnage.";
+            return out;
+        }
+        quadrature = hilbertTransform(message);
+        if (c.modulation == CarrierModulation::Lsb)
+            for (double &v : quadrature) v = -v;
+    }
     // As qacq::dsp::modulate: Re{b exp(jφ) exp(j 2π fc t)}.
     const std::complex<double> rotation(std::cos(c.phaseDegrees * dsp::kPi / 180.0), std::sin(c.phaseDegrees * dsp::kPi / 180.0));
     const double ratio = c.frequencyHz / fs;
     out.samples.resize(n);
     for (std::size_t i = 0; i < n; ++i)
     {
-        const std::complex<double> b = modulator.next(message[i]) * rotation;
+        const std::complex<double> envelope =
+            suppressed ? c.amplitude * std::complex<double>(message[i], sideband ? quadrature[i] : 0.0) : modulator.next(message[i]);
+        const std::complex<double> b = envelope * rotation;
         const double turn = ratio * static_cast<double>(i);
         const double angle = dsp::kTwoPi * (turn - std::floor(turn));
         out.samples[i] = (b * std::complex<double>(std::cos(angle), std::sin(angle))).real();
@@ -2362,6 +2453,160 @@ ComponentSamples modulationSamples(const GeneratorComponent &c, double fs, std::
             out.warnings.push_back("la fréquence instantanée va de " + quantity(fmin, "Hz") + " à " + quantity(fmax, "Hz") +
                                    " : hors de 0…fs/2 (" + quantity(0.5 * fs, "Hz") + "), le spectre se replie.");
     }
+    return out;
+}
+
+// A recorded signal: the part of the record read, at the rate of the recipe, placed in the signal.
+ComponentSamples recordedSamples(const GeneratorComponent &c, double fs, std::size_t n, std::span<const model::SignalPtr> sources,
+                                 const model::Progress &progress)
+{
+    ComponentSamples out;
+    const RecordedSource source = findRecordedSource(c, sources);
+    if (!source.ok())
+    {
+        out.error = source.error;
+        return out;
+    }
+    const model::Signal &signal = *source.signal;
+    const std::span<const double> record = signal.channel(source.channel);
+    const double rate = signal.sampleRateHz;
+    if (record.empty() || !(std::isfinite(rate) && rate > 0.0))
+    {
+        out.error = "le signal « " + signal.name + " » est vide.";
+        return out;
+    }
+    // From where in the record.
+    const double skipped = std::isfinite(c.sourceStartSeconds) ? std::max(0.0, c.sourceStartSeconds) * rate : 0.0;
+    if (skipped >= static_cast<double>(record.size()))
+    {
+        out.error = "le début choisi (" + quantity(c.sourceStartSeconds, "s") + ") est après la fin de l'enregistrement (" +
+                    quantity(static_cast<double>(record.size()) / rate, "s") + ").";
+        return out;
+    }
+    std::span<const double> part = record.subspan(static_cast<std::size_t>(std::min(skipped + 0.5, static_cast<double>(record.size() - 1))));
+    // Where it starts in the signal made (a whole number of samples).
+    const double delaySamples = std::isfinite(c.eventSeconds) ? std::clamp(std::round(c.eventSeconds * fs), -1e15, 1e15) : 0.0;
+    const auto delay = static_cast<long long>(delaySamples);
+    out.samples.assign(n, 0.0);
+    if (!c.sourceLoop)
+    {
+        // No more of the record than the signal lasts (and what the interpolation reads beyond).
+        const double needed = (static_cast<double>(n) - delaySamples) / fs * rate + 64.0;
+        if (needed <= 64.0)
+        {
+            out.warnings.push_back("retardé de " + quantity(c.eventSeconds, "s") + ", il commence après la fin du signal : rien n'en est lu.");
+            return out;
+        }
+        if (needed < static_cast<double>(part.size())) part = part.first(static_cast<std::size_t>(std::ceil(needed)));
+    }
+    std::vector<double> converted;
+    std::span<const double> read = part;
+    const bool sameRate = std::abs(rate - fs) <= 1e-9 * fs;
+    if (!sameRate)
+    {
+        converted = resample(part, rate, fs, c.sourceLoop, progress);
+        if (progress.stopped())
+        {
+            out.cancelled = true;
+            return out;
+        }
+        read = converted;
+        std::string text = "rééchantillonné de " + quantity(rate, "Hz") + " à " + quantity(fs, "Hz");
+        if (fs < rate) text += " : ce qu'il contient au-delà de " + quantity(0.45 * fs, "Hz") + " est retiré";
+        out.warnings.push_back(text + ".");
+    }
+    if (read.empty())
+    {
+        out.error = "il ne reste aucun échantillon de l'enregistrement à cette fréquence d'échantillonnage.";
+        return out;
+    }
+    const auto length = static_cast<long long>(read.size());
+    double factor = c.amplitude;
+    if (c.sourceNormalize)
+    {
+        // The peak of what is placed in the signal (in a loop: of the whole part read).
+        const long long first = c.sourceLoop ? 0 : std::max(0LL, -delay);
+        const long long last = c.sourceLoop ? length : std::min(length, static_cast<long long>(n) - delay);
+        double peak = 0.0;
+        for (long long j = first; j < last; ++j)
+        {
+            const double v = read[static_cast<std::size_t>(j)];
+            if (std::isfinite(v)) peak = std::max(peak, std::abs(v));
+        }
+        if (peak > 0.0)
+        {
+            factor = c.amplitude / peak;
+        }
+        else
+        {
+            factor = 0.0;
+            out.warnings.push_back("la partie lue de l'enregistrement est nulle : rien à mettre à l'échelle.");
+        }
+    }
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        long long j = static_cast<long long>(i) - delay;
+        if (c.sourceLoop)
+            j = ((j % length) + length) % length;
+        else if (j < 0 || j >= length)
+            continue;
+        out.samples[i] = factor * read[static_cast<std::size_t>(j)];
+    }
+    if (!c.sourceLoop && static_cast<double>(delay) + static_cast<double>(length) < static_cast<double>(n))
+        out.warnings.push_back("l'enregistrement s'arrête à " + quantity((static_cast<double>(delay) + static_cast<double>(length)) / fs, "s") +
+                               " : la suite vaut 0 (« En boucle » le répète).");
+    return out;
+}
+
+// A line of a digital frame: the level of the tick each sample falls in (a millionth of a tick early, so that a
+// sample right on an edge is after it whatever the rounding).
+ComponentSamples frameSamples(const GeneratorComponent &c, double fs, std::size_t n)
+{
+    ComponentSamples out;
+    const FrameTiming timing = frameTiming(c, fs);
+    if (!timing.ok())
+    {
+        out.error = timing.frame.error;
+        return out;
+    }
+    const BuiltFrame &frame = timing.frame;
+    const std::vector<std::uint8_t> &levels = frame.levels[timing.line];
+    const double high = c.amplitude, low = c.frameLow;
+    const double rest = frame.idle[timing.line] ? high : low;
+    const double ticks = static_cast<double>(frame.tickCount);
+    const double perSample = 1.0 / timing.samplesPerTick; // ticks a sample
+    const double startSample = c.eventSeconds * fs;
+    const double period = ticks + std::max(0.0, c.frameGapBits) * static_cast<double>(frame.ticksPerBit);
+    out.samples.resize(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        double at = (static_cast<double>(i) - startSample) * perSample + 1e-6;
+        double value = rest;
+        if (at >= 0.0)
+        {
+            if (c.frameRepeat) at = std::max(0.0, at - period * std::floor(at / period));
+            if (at < ticks) value = levels[static_cast<std::size_t>(at)] ? high : low;
+        }
+        out.samples[i] = value;
+    }
+
+    const double duration = static_cast<double>(n) / fs;
+    if (timing.samplesPerTick < 1.0 - 1e-9)
+        out.warnings.push_back(quantity(timing.samplesPerBit, "") + (timing.samplesPerBit >= 2.0 ? " échantillons" : " échantillon") +
+                               " par bit à " + quantity(c.frequencyHz, "bit/s") + " : il en faut au moins " +
+                               std::to_string(frame.ticksPerBit) +
+                               " pour que tous ses niveaux y soient ; montez la fréquence d'échantillonnage ou baissez le débit "
+                               "(« Cadrer la trame » le fait).");
+    if (!c.frameRepeat)
+    {
+        if (c.eventSeconds >= duration)
+            out.warnings.push_back("elle commence à " + quantity(c.eventSeconds, "s") + ", après la fin du signal (" +
+                                   quantity(duration, "s") + ") : rien n'en est généré.");
+        else if (timing.endSeconds > duration * (1.0 + 1e-9) + 0.5 / fs)
+            out.warnings.push_back("elle dure " + quantity(timing.durationSeconds, "s") + " et finit à " + quantity(timing.endSeconds, "s") +
+                                   ", après la fin du signal (" + quantity(duration, "s") + ") : sa fin manque (« Cadrer la trame » ajuste la durée).");
+    }
+    for (const std::string &w : frame.warnings) out.warnings.push_back(w);
     return out;
 }
 
@@ -2544,6 +2789,9 @@ std::string_view carrierModulationKey(CarrierModulation modulation) noexcept
         case CarrierModulation::Am: return "am";
         case CarrierModulation::Fm: return "fm";
         case CarrierModulation::Pm: return "pm";
+        case CarrierModulation::Dsb: return "dsb";
+        case CarrierModulation::Usb: return "usb";
+        case CarrierModulation::Lsb: return "lsb";
     }
     return "am";
 }
@@ -2566,7 +2814,9 @@ bool dspWaveform(WaveKind waveform, dsp::Waveform &out) noexcept
         case Kind::Drawn:
         case Kind::Recurrence:
         case Kind::Formula:
-        case Kind::Modulation: return false;
+        case Kind::Modulation:
+        case Kind::Recorded:
+        case Kind::Frame: return false;
     }
     return false;
 }
@@ -2641,6 +2891,8 @@ std::string checkGeneratorRecipe(const GeneratorRecipe &recipe)
     if (recipe.channels.empty()) return "Le signal n'a aucune voie.";
     if (recipe.channels.size() > kMaximumGeneratorChannels)
         return "Au plus " + std::to_string(kMaximumGeneratorChannels) + " voies.";
+    if (std::none_of(recipe.channels.begin(), recipe.channels.end(), [](const GeneratorChannel &c) { return c.output; }))
+        return "Aucune voie n'est gardée dans le signal : cochez « Dans le signal » pour l'une d'elles au moins.";
     for (const GeneratorChannel &c : recipe.channels)
     {
         if (c.components.size() > kMaximumGeneratorComponents)
@@ -2697,6 +2949,8 @@ std::string_view generatorWaveformName(Kind waveform) noexcept
         case Kind::Recurrence: return "Récurrence";
         case Kind::Formula: return "Opération entre voies";
         case Kind::Modulation: return "Porteuse modulée";
+        case Kind::Recorded: return "Signal enregistré";
+        case Kind::Frame: return "Trame numérique";
     }
     return "?";
 }
@@ -2761,6 +3015,26 @@ model::Json toJson(const GeneratorComponent &c)
         j["deviation"] = c.deviationHz;
         j["phaseDeviation"] = c.phaseDeviationDegrees;
     }
+    if (c.waveform == Kind::Recorded)
+    {
+        j["source"] = static_cast<unsigned long long>(c.sourceId);
+        j["sourceName"] = c.sourceName;
+        j["sourceFrames"] = static_cast<unsigned long long>(c.sourceFrames);
+        j["sourceChannel"] = static_cast<unsigned long long>(c.sourceChannel);
+        j["sourceChannelName"] = c.sourceChannelName;
+        j["sourceStart"] = c.sourceStartSeconds;
+        j["loop"] = c.sourceLoop;
+        j["normalize"] = c.sourceNormalize;
+    }
+    if (c.waveform == Kind::Frame)
+    {
+        frameToJson(c.frame, j);
+        j["line"] = frameLines(c.frame.protocol)[frameLineIndex(c.frame.protocol, c.frameLine)].key;
+        j["low"] = c.frameLow;
+        j["repeat"] = c.frameRepeat;
+        j["gap"] = c.frameGapBits;
+        j["group"] = static_cast<unsigned long long>(c.frameGroup);
+    }
     return j;
 }
 
@@ -2770,6 +3044,7 @@ model::Json toJson(const GeneratorChannel &channel)
     j["name"] = channel.name;
     j["unit"] = channel.unit;
     j["offset"] = channel.offset;
+    j["output"] = channel.output;
     model::Json list = model::Json::array();
     for (const GeneratorComponent &c : channel.components) list.push_back(toJson(c));
     j["components"] = std::move(list);
@@ -2852,12 +3127,35 @@ GeneratorComponent generatorComponentFromJson(const model::Json &j)
     if (c.waveform == Kind::Modulation)
     {
         const std::string modulation = j["modulation"].toString();
-        c.modulation = modulation == "fm" ? CarrierModulation::Fm : modulation == "pm" ? CarrierModulation::Pm : CarrierModulation::Am;
+        c.modulation = CarrierModulation::Am;
+        for (const CarrierModulation m : {CarrierModulation::Fm, CarrierModulation::Pm, CarrierModulation::Dsb, CarrierModulation::Usb,
+                                          CarrierModulation::Lsb})
+            if (modulation == carrierModulationKey(m)) c.modulation = m;
         c.message = j["message"].toString("sin(2*pi*fm*t)");
         c.variables = j["variables"].toString();
         c.amIndex = number(j, "index", c.amIndex, -1e6, 1e6);
         c.deviationHz = number(j, "deviation", c.deviationHz, -kHighestFrequency, kHighestFrequency);
         c.phaseDeviationDegrees = number(j, "phaseDeviation", c.phaseDeviationDegrees, -1e9, 1e9);
+    }
+    if (c.waveform == Kind::Recorded)
+    {
+        c.sourceId = static_cast<std::uint64_t>(std::floor(number(j, "source", 0.0, 0.0, 9e15)));
+        c.sourceName = j["sourceName"].toString();
+        c.sourceFrames = static_cast<std::size_t>(std::floor(number(j, "sourceFrames", 0.0, 0.0, 9e15)));
+        c.sourceChannel = static_cast<std::size_t>(std::floor(number(j, "sourceChannel", 0.0, 0.0, 1e6)));
+        c.sourceChannelName = j["sourceChannelName"].toString();
+        c.sourceStartSeconds = number(j, "sourceStart", 0.0, 0.0, 1e9);
+        c.sourceLoop = j["loop"].toBool(false);
+        c.sourceNormalize = j["normalize"].toBool(false);
+    }
+    if (c.waveform == Kind::Frame)
+    {
+        c.frame = frameFromJson(j);
+        c.frameLine = std::string(frameLines(c.frame.protocol)[frameLineIndex(c.frame.protocol, j["line"].toString())].key);
+        c.frameLow = number(j, "low", 0.0, -kLargest, kLargest);
+        c.frameRepeat = j["repeat"].toBool(false);
+        c.frameGapBits = number(j, "gap", 10.0, 0.0, 1e9);
+        c.frameGroup = static_cast<std::uint64_t>(std::floor(number(j, "group", 0.0, 0.0, 9e15)));
     }
     return c;
 }
@@ -2869,6 +3167,7 @@ GeneratorChannel generatorChannelFromJson(const model::Json &j, std::size_t inde
     if (c.name.empty()) c.name = "Voie " + std::to_string(index + 1);
     c.unit = j.contains("unit") ? j["unit"].toString() : std::string("V");
     c.offset = number(j, "offset", 0.0, -kLargest, kLargest);
+    c.output = j["output"].toBool(true);
     for (const model::Json &item : j["components"].items())
     {
         if (c.components.size() >= kMaximumGeneratorComponents) break;
@@ -2893,7 +3192,7 @@ GeneratorRecipe generatorRecipeFromJson(const model::Json &j)
         if (!item.isObject()) continue;
         r.channels.push_back(generatorChannelFromJson(item, r.channels.size()));
     }
-    if (r.channels.empty()) r.channels.push_back(defaultGeneratorChannel(0, r.sampleRateHz));
+    if (r.channels.empty()) r.channels.push_back(blankGeneratorChannel(0));
     return r;
 }
 
@@ -2955,12 +3254,44 @@ std::string componentText(const GeneratorComponent &c, const std::string &unit)
         {
             text = "Porteuse " + frequency + ", " + amplitude + " crête";
             if (c.phaseDegrees != 0.0) text += ", phase " + quantity(c.phaseDegrees, "") + "°";
-            text += c.modulation == CarrierModulation::Fm   ? ", modulée en fréquence (Δf = " + quantity(c.deviationHz, "Hz") + ")"
-                    : c.modulation == CarrierModulation::Pm ? ", modulée en phase (Δφ = " + quantity(c.phaseDeviationDegrees, "") + "°)"
-                                                            : ", modulée en amplitude (m = " + quantity(c.amIndex, "") + ")";
+            switch (c.modulation)
+            {
+                case CarrierModulation::Am: text += ", modulée en amplitude (m = " + quantity(c.amIndex, "") + ")"; break;
+                case CarrierModulation::Fm: text += ", modulée en fréquence (Δf = " + quantity(c.deviationHz, "Hz") + ")"; break;
+                case CarrierModulation::Pm: text += ", modulée en phase (Δφ = " + quantity(c.phaseDeviationDegrees, "") + "°)"; break;
+                case CarrierModulation::Dsb: text += ", modulée en amplitude sans porteuse (double bande latérale)"; break;
+                case CarrierModulation::Usb: text += ", modulée en bande latérale unique (supérieure)"; break;
+                case CarrierModulation::Lsb: text += ", modulée en bande latérale unique (inférieure)"; break;
+            }
             text += " par " + operationBody(c.message, true);
             const std::string_view variables = trim(c.variables);
             if (!variables.empty()) text += " (" + std::string(variables) + ")";
+            break;
+        }
+        case Kind::Recorded:
+        {
+            text = "Signal enregistré " + (c.sourceName.empty() ? std::string("(à choisir)") : "« " + c.sourceName + " »");
+            if (!c.sourceChannelName.empty()) text += " (voie " + c.sourceChannelName + ")";
+            text += c.sourceNormalize ? ", crête ramenée à " + amplitude : c.amplitude != 1.0 ? ", × " + quantity(c.amplitude, "") : std::string();
+            if (c.sourceStartSeconds > 0.0) text += ", à partir de " + quantity(c.sourceStartSeconds, "s");
+            if (c.eventSeconds != 0.0) text += ", retardé de " + quantity(c.eventSeconds, "s");
+            if (c.sourceLoop) text += ", en boucle";
+            break;
+        }
+        case Kind::Frame:
+        {
+            const BuiltFrame frame = buildFrame(c.frame);
+            const std::span<const FrameLineInfo> lines = frameLines(c.frame.protocol);
+            const std::string title = frameTitle(c.frame);
+            text = (c.frame.protocol == FrameProtocol::Bits ? "" : "Trame ") + title +
+                   (title.find(',') == std::string::npos ? " à " : ", à ") + quantity(c.frequencyHz, "bit/s");
+            // (The data line of bits sent as they are goes without saying.)
+            const std::size_t line = frameLineIndex(c.frame.protocol, c.frameLine);
+            if (lines.size() > 1 && (c.frame.protocol != FrameProtocol::Bits || line != 0)) text += ", ligne " + std::string(lines[line].name);
+            text += frame.ok() ? " (" + frame.summary + ")" : std::string(" (à corriger)");
+            text += ", de " + quantity(c.frameLow, unit) + " à " + amplitude;
+            if (c.eventSeconds != 0.0) text += ", à partir de " + quantity(c.eventSeconds, "s");
+            if (c.frameRepeat) text += ", répétée";
             break;
         }
         case Kind::Recurrence:
@@ -2993,11 +3324,525 @@ std::string componentText(const GeneratorComponent &c, const std::string &unit)
     return text;
 }
 
-GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progress &progress)
+RecordedSource findRecordedSource(const GeneratorComponent &c, std::span<const model::SignalPtr> sources)
+{
+    RecordedSource out;
+    if (c.sourceId == 0 && c.sourceName.empty())
+    {
+        out.error = "Aucun signal enregistré choisi.";
+        return out;
+    }
+    // The one of its id, if it is still the one chosen (ids are those of a session); else the one of its name.
+    for (const model::SignalPtr &s : sources)
+    {
+        if (!s || s->id != c.sourceId || c.sourceId == 0) continue;
+        if (c.sourceName.empty() || s->name == c.sourceName || s->frameCount() == c.sourceFrames) out.signal = s;
+        break;
+    }
+    if (!out.signal && !c.sourceName.empty())
+    {
+        for (const model::SignalPtr &s : sources)
+        {
+            if (!s || s->name != c.sourceName) continue;
+            if (!out.signal || s->frameCount() == c.sourceFrames) out.signal = s;
+            if (s->frameCount() == c.sourceFrames) break;
+        }
+    }
+    if (!out.signal)
+    {
+        out.error = "Le signal enregistré " + (c.sourceName.empty() ? std::string("choisi") : "« " + c.sourceName + " »") +
+                    " n'est pas dans la session : choisissez-en un autre.";
+        return out;
+    }
+    const std::vector<model::ChannelInfo> &channels = out.signal->channels;
+    std::size_t channel = c.sourceChannel;
+    if (!(channel < channels.size() && (c.sourceChannelName.empty() || channels[channel].name == c.sourceChannelName)))
+    {
+        std::size_t named = channels.size();
+        for (std::size_t k = 0; k < channels.size() && !c.sourceChannelName.empty(); ++k)
+        {
+            if (channels[k].name != c.sourceChannelName) continue;
+            named = k;
+            break;
+        }
+        if (named < channels.size())
+        {
+            channel = named;
+        }
+        else if (channel >= channels.size())
+        {
+            out.error = "La voie " + (c.sourceChannelName.empty() ? std::to_string(c.sourceChannel + 1) : "« " + c.sourceChannelName + " »") +
+                        " du signal « " + out.signal->name + " » n'existe plus : choisissez-en une autre.";
+            out.signal.reset();
+            return out;
+        }
+    }
+    out.channel = channel;
+    return out;
+}
+
+void setRecordedSource(GeneratorComponent &component, const model::Signal &signal, std::size_t channel)
+{
+    component.sourceId = signal.id;
+    component.sourceName = signal.name;
+    component.sourceFrames = signal.frameCount();
+    component.sourceChannel = channel < signal.channels.size() ? channel : 0;
+    component.sourceChannelName = component.sourceChannel < signal.channels.size() ? signal.channels[component.sourceChannel].name : std::string();
+}
+
+bool readsRecordedSignals(const GeneratorRecipe &recipe) noexcept
+{
+    for (const GeneratorChannel &channel : recipe.channels)
+        for (const GeneratorComponent &c : channel.components)
+            if (c.waveform == Kind::Recorded) return true;
+    return false;
+}
+
+namespace
+{
+// How a carrier is modulated, said after "modulée" ("en amplitude (indice 0,8…)").
+std::string modulationPhrase(const GeneratorComponent &carrier)
+{
+    switch (carrier.modulation)
+    {
+        case CarrierModulation::Am:
+            return "en amplitude (indice " + quantity(carrier.amIndex, "") + " : aux crêtes du message, l'enveloppe va de " +
+                   quantity(carrier.amplitude * std::abs(1.0 - carrier.amIndex), "V") + " à " +
+                   quantity(carrier.amplitude * (1.0 + carrier.amIndex), "V") + ")";
+        case CarrierModulation::Fm: return "en fréquence (Δf = " + quantity(carrier.deviationHz, "Hz") + ")";
+        case CarrierModulation::Pm: return "en phase (Δφ = " + quantity(carrier.phaseDeviationDegrees, "") + "°)";
+        case CarrierModulation::Dsb: return "en amplitude, porteuse supprimée (double bande latérale)";
+        case CarrierModulation::Usb: return "en bande latérale unique supérieure";
+        case CarrierModulation::Lsb: return "en bande latérale unique inférieure";
+    }
+    return {};
+}
+} // namespace
+
+SignalUse useSignalInRecipe(GeneratorRecipe &recipe, const model::Signal &signal, std::size_t sourceChannel, std::string_view use)
+{
+    SignalUse out;
+    if (signal.channels.empty() || sourceChannel >= signal.channels.size())
+    {
+        out.error = "Ce signal n'a pas cette voie.";
+        return out;
+    }
+    const bool wave = use == "wave";
+    CarrierModulation modulation = CarrierModulation::Am;
+    bool known = wave || use == "am";
+    for (const CarrierModulation m : {CarrierModulation::Fm, CarrierModulation::Pm, CarrierModulation::Dsb, CarrierModulation::Usb, CarrierModulation::Lsb})
+    {
+        if (use != carrierModulationKey(m)) continue;
+        modulation = m;
+        known = true;
+    }
+    if (!known)
+    {
+        out.error = "Usage inconnu d'un signal : « " + std::string(use) + " ».";
+        return out;
+    }
+    GeneratorRecipe next = recipe;
+    out.alone = isBlankRecipe(recipe);
+    // Where: the whole page when it is blank; else the first blank channel nothing reads, or after the others.
+    std::size_t at = next.channels.size();
+    if (!out.alone)
+    {
+        for (std::size_t k = 0; k < next.channels.size(); ++k)
+        {
+            if (!isBlankChannel(next.channels[k]) || !channelReaders(next, k).empty()) continue;
+            at = k;
+            break;
+        }
+        if (at == next.channels.size() && next.channels.size() >= kMaximumGeneratorChannels)
+        {
+            out.error = "Au plus " + std::to_string(kMaximumGeneratorChannels) + " voies : retirez-en une du Générateur.";
+            return out;
+        }
+    }
+    std::string untimed; // why a blank page could not take the timing of the record
+    if (out.alone && std::isfinite(signal.sampleRateHz) && signal.sampleRateHz > 0.0 && signal.frameCount() > 0)
+    {
+        // A blank page takes the timing of the record (unless it is too large for the generator).
+        GeneratorRecipe timed = next;
+        timed.sampleRateHz = signal.sampleRateHz;
+        timed.durationSeconds = signal.durationSeconds();
+        timed.channels = {GeneratorChannel{}};
+        untimed = checkGeneratorRecipe(timed);
+        if (untimed.empty())
+        {
+            next.sampleRateHz = timed.sampleRateHz;
+            next.durationSeconds = timed.durationSeconds;
+            out.timed = true;
+        }
+    }
+    const std::string &channelName = signal.channels[sourceChannel].name;
+    const bool several = signal.channels.size() > 1;
+    GeneratorChannel channel;
+    channel.unit = signal.channels[sourceChannel].unit;
+    GeneratorComponent record = defaultGeneratorComponent(Kind::Recorded, next.sampleRateHz, next.durationSeconds);
+    setRecordedSource(record, signal, sourceChannel);
+    GeneratorComponent carrier;
+    if (wave)
+    {
+        channel.name = several ? channelName : signal.name;
+        channel.components.push_back(record);
+    }
+    else
+    {
+        // The message of a carrier: scaled to a peak of 1, so that the index or the excursion are what they say.
+        record.sourceNormalize = true;
+        record.amplitude = 1.0;
+        carrier = defaultGeneratorComponent(Kind::Modulation, next.sampleRateHz, next.durationSeconds);
+        carrier.message = "x";
+        carrier.variables.clear();
+        carrier.modulation = modulation;
+        carrier.amIndex = 0.8;
+        channel.name = (several ? channelName : signal.name) + " modulé";
+        channel.unit = "V";
+        channel.components = {record, carrier};
+    }
+    if (out.alone)
+    {
+        next.channels = {channel};
+        at = 0;
+        if (next.name == GeneratorRecipe{}.name) next.name = wave ? signal.name + " (générateur)" : signal.name + " modulé";
+    }
+    else if (at < next.channels.size())
+        next.channels[at] = channel;
+    else
+        next.channels.push_back(channel);
+    out.channel = at;
+
+    // What was done.
+    const std::string where = "Voie " + std::to_string(at + 1) + " « " + channel.name + " »";
+    const std::string source = "« " + signal.name + " »" + (several ? " (voie " + channelName + ")" : std::string());
+    const std::string timing = out.timed ? " (" + quantity(next.sampleRateHz, "Hz") + ", " + quantity(next.durationSeconds, "s") + ")" : std::string();
+    if (wave)
+        out.text = where + " : le signal " + source + (out.timed ? ", à sa fréquence d'échantillonnage et pour sa durée" + timing : std::string()) +
+                   ". Ajoutez-lui d'autres formes d'onde (un bruit…), ou lisez-la dans une opération (v" + std::to_string(at + 1) + ").";
+    else
+        out.text = where + " : " + source + ", ramené à 1 V crête, est le message d'une porteuse de " + quantity(carrier.frequencyHz, "Hz") +
+                   " modulée " + modulationPhrase(carrier) +
+                   (out.timed ? ", à la fréquence d'échantillonnage et pour la durée de l'enregistrement" + timing : std::string()) +
+                   ". Sa carte « Porteuse modulée » règle la modulation (AM, FM, PM, DBL, BLU), la porteuse et l'indice ; « Ajouter » met le "
+                   "signal dans la session.";
+    if (!wave && modulation == CarrierModulation::Am)
+    {
+        // A voice, music: its peaks far above its level, the envelope moves little but at them. Said, with how to see it.
+        const std::span<const double> samples = signal.channel(sourceChannel);
+        double peak = 0.0, energy = 0.0;
+        for (const double v : samples)
+        {
+            if (!std::isfinite(v)) continue;
+            peak = std::max(peak, std::abs(v));
+            energy += v * v;
+        }
+        const double rms = samples.empty() ? 0.0 : std::sqrt(energy / static_cast<double>(samples.size()));
+        const double crest = rms > 0.0 ? peak / rms : 0.0;
+        if (crest > 3.0)
+            out.text += " Son facteur de crête (crête ÷ valeur efficace) est de " + plot::formatCompact(crest, "", 2) + " : l'enveloppe ne va de " +
+                        quantity(carrier.amplitude * std::abs(1.0 - carrier.amIndex), "V") + " à " +
+                        quantity(carrier.amplitude * (1.0 + carrier.amIndex), "V") + " qu'à ses crêtes, et ne s'écarte de " +
+                        quantity(carrier.amplitude, "V") + " que de " + std::to_string(std::lround(100.0 * carrier.amIndex / crest)) +
+                        " % en valeur efficace. Pour mieux voir la modulation : un passage fort (zoom), les bandes latérales autour de " +
+                        quantity(carrier.frequencyHz, "Hz") + " dans le spectre, ou un indice plus grand (jusqu'à 1).";
+    }
+    // The page kept its timing, not that of the record: said, with what sets it (or why it cannot).
+    const double recordDuration = signal.durationSeconds();
+    const bool otherDuration = std::isfinite(recordDuration) && recordDuration > 0.0 &&
+                               std::abs(recordDuration - next.durationSeconds) > 1e-9 * std::max(recordDuration, next.durationSeconds);
+    const bool otherRate = std::isfinite(signal.sampleRateHz) && signal.sampleRateHz > 0.0 && signal.sampleRateHz != next.sampleRateHz;
+    if (!out.timed && (otherDuration || otherRate))
+    {
+        out.text += " Le signal " + (otherDuration ? "dure " + quantity(recordDuration, "s") + ", la page " + quantity(next.durationSeconds, "s")
+                                                   : "est à " + quantity(signal.sampleRateHz, "Hz") + ", la page à " + quantity(next.sampleRateHz, "Hz"));
+        if (untimed.empty())
+            out.text += " : « Sa fréquence et sa durée », dans la carte du signal enregistré, règle la page sur lui.";
+        else
+        {
+            if (untimed.front() >= 'A' && untimed.front() <= 'Z') untimed.front() = static_cast<char>(untimed.front() - 'A' + 'a');
+            out.text += " ; la page ne peut pas prendre sa fréquence et sa durée : " + untimed;
+        }
+    }
+    recipe = std::move(next);
+    return out;
+}
+
+namespace
+{
+// How a carrier is modulated by a channel read as it is (not scaled to a peak of 1), said after "modulée".
+std::string channelModulationPhrase(const GeneratorComponent &carrier, const std::string &variable)
+{
+    switch (carrier.modulation)
+    {
+        case CarrierModulation::Am:
+            return "en amplitude (indice " + quantity(carrier.amIndex, "") + " : l'enveloppe vaut " + quantity(carrier.amplitude, "V") +
+                   " × (1 + " + quantity(carrier.amIndex, "") + " × " + variable + "), sans surmodulation tant que la crête de " + variable +
+                   " reste sous " + quantity(1.0 / std::abs(carrier.amIndex), "") + ")";
+        case CarrierModulation::Fm: return "en fréquence (Δf = " + quantity(carrier.deviationHz, "Hz") + " pour " + variable + " = 1)";
+        case CarrierModulation::Pm: return "en phase (Δφ = " + quantity(carrier.phaseDeviationDegrees, "") + "° pour " + variable + " = 1)";
+        default: return modulationPhrase(carrier);
+    }
+}
+} // namespace
+
+SignalUse modulateChannelInRecipe(GeneratorRecipe &recipe, std::size_t channel, std::string_view use)
+{
+    SignalUse out;
+    if (channel >= recipe.channels.size())
+    {
+        out.error = "Cette voie n'existe plus.";
+        return out;
+    }
+    const GeneratorChannel &source = recipe.channels[channel];
+    if (source.components.empty())
+    {
+        out.error = "La voie " + std::to_string(channel + 1) + " « " + source.name + " » est vide : rien pour moduler une porteuse.";
+        return out;
+    }
+    CarrierModulation modulation = CarrierModulation::Am;
+    bool known = use == "am";
+    for (const CarrierModulation m : {CarrierModulation::Fm, CarrierModulation::Pm, CarrierModulation::Dsb, CarrierModulation::Usb, CarrierModulation::Lsb})
+    {
+        if (use != carrierModulationKey(m)) continue;
+        modulation = m;
+        known = true;
+    }
+    if (!known)
+    {
+        out.error = "Modulation inconnue : « " + std::string(use) + " ».";
+        return out;
+    }
+    // Where: the first blank channel nothing reads (not the message itself), or after the others.
+    std::size_t at = recipe.channels.size();
+    for (std::size_t k = 0; k < recipe.channels.size(); ++k)
+    {
+        if (k == channel || !isBlankChannel(recipe.channels[k]) || !channelReaders(recipe, k).empty()) continue;
+        at = k;
+        break;
+    }
+    if (at == recipe.channels.size() && recipe.channels.size() >= kMaximumGeneratorChannels)
+    {
+        out.error = "Au plus " + std::to_string(kMaximumGeneratorChannels) + " voies : retirez-en une du Générateur.";
+        return out;
+    }
+    const std::string variable = "v" + std::to_string(channel + 1);
+    GeneratorComponent carrier = defaultGeneratorComponent(Kind::Modulation, recipe.sampleRateHz, recipe.durationSeconds);
+    carrier.message = variable;
+    carrier.variables.clear();
+    carrier.modulation = modulation;
+    carrier.amIndex = 0.8;
+    GeneratorChannel made;
+    made.name = source.name + (source.name.rfind("Voie", 0) == 0 ? " modulée" : " modulé");
+    made.unit = "V";
+    made.components = {carrier};
+    GeneratorRecipe next = recipe;
+    if (at < next.channels.size())
+        next.channels[at] = made;
+    else
+        next.channels.push_back(made);
+    out.channel = at;
+    out.text = "Voie " + std::to_string(at + 1) + " « " + made.name + " » : la voie " + std::to_string(channel + 1) + " « " + source.name +
+               " », lue telle quelle (" + variable + "), est le message d'une porteuse de " + quantity(carrier.frequencyHz, "Hz") + " modulée " +
+               channelModulationPhrase(carrier, variable) + ". Sa carte « Porteuse modulée » règle la modulation (AM, FM, PM, DBL, BLU), la "
+               "porteuse et l'indice ; décochez « Dans le signal » de la voie " + std::to_string(channel + 1) +
+               " pour ne garder que la porteuse modulée.";
+    recipe = std::move(next);
+    return out;
+}
+
+bool useSignalAsMessage(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, const model::Signal &signal,
+                        std::size_t sourceChannel, std::string *error)
+{
+    const auto fail = [error](std::string text) {
+        if (error) *error = std::move(text);
+        return false;
+    };
+    if (channel >= recipe.channels.size() || component >= recipe.channels[channel].components.size())
+        return fail("Cette forme d'onde n'existe plus.");
+    if (recipe.channels[channel].components[component].waveform != Kind::Modulation) return fail("Seule une porteuse modulée a un message.");
+    if (signal.channels.empty() || sourceChannel >= signal.channels.size()) return fail("Ce signal n'a pas cette voie.");
+    GeneratorChannel next = recipe.channels[channel];
+    std::size_t carrier = component;
+    if (component > 0 && next.components[component - 1].waveform == Kind::Recorded)
+    {
+        // A record already its message: the new one in its place (its start, delay and reading kept).
+        GeneratorComponent &above = next.components[component - 1];
+        setRecordedSource(above, signal, sourceChannel);
+        above.sourceNormalize = true;
+        above.amplitude = 1.0;
+        above.enabled = true;
+    }
+    else
+    {
+        if (next.components.size() >= kMaximumGeneratorComponents)
+            return fail("Au plus " + std::to_string(kMaximumGeneratorComponents) + " formes d'onde par voie : retirez-en une pour placer le message.");
+        GeneratorComponent record = defaultGeneratorComponent(Kind::Recorded, recipe.sampleRateHz, recipe.durationSeconds);
+        setRecordedSource(record, signal, sourceChannel);
+        record.sourceNormalize = true;
+        record.amplitude = 1.0;
+        next.components.insert(next.components.begin() + static_cast<std::ptrdiff_t>(component), record);
+        carrier = component + 1;
+    }
+    GeneratorComponent &modulated = next.components[carrier];
+    modulated.message = "x";
+    // The variables of the message it had, when they were only its fm: x needs none.
+    const Variables v = parseVariables(modulated.variables, {}, {});
+    if (v.error.empty() && v.names.size() == 1 && v.names.front() == "fm") modulated.variables.clear();
+    recipe.channels[channel] = std::move(next);
+    if (error) error->clear();
+    return true;
+}
+
+bool adoptRecordedTiming(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, std::span<const model::SignalPtr> sources)
+{
+    if (channel >= recipe.channels.size() || component >= recipe.channels[channel].components.size()) return false;
+    const GeneratorComponent &c = recipe.channels[channel].components[component];
+    if (c.waveform != Kind::Recorded) return false;
+    const RecordedSource source = findRecordedSource(c, sources);
+    if (!source.ok()) return false;
+    const double rate = source.signal->sampleRateHz;
+    const double whole = source.signal->durationSeconds();
+    const double left = c.sourceLoop ? whole : whole - std::max(0.0, c.sourceStartSeconds) + std::max(0.0, c.eventSeconds);
+    if (!(std::isfinite(rate) && rate > 0.0) || !(left > 0.0)) return false;
+    recipe.sampleRateHz = rate;
+    recipe.durationSeconds = left;
+    return true;
+}
+
+FrameTiming frameTiming(const GeneratorComponent &c, double sampleRateHz)
+{
+    FrameTiming t;
+    t.frame = buildFrame(c.frame);
+    if (t.frame.ok() && !(std::isfinite(c.frequencyHz) && c.frequencyHz > 0.0)) t.frame.error = "Le débit doit être positif.";
+    if (!t.frame.ok()) return t;
+    t.line = frameLineIndex(c.frame.protocol, c.frameLine);
+    t.bitSeconds = 1.0 / c.frequencyHz;
+    t.durationSeconds = t.frame.bitCount() * t.bitSeconds;
+    t.endSeconds = c.eventSeconds + t.durationSeconds;
+    t.samplesPerBit = sampleRateHz / c.frequencyHz;
+    t.samplesPerTick = t.samplesPerBit / static_cast<double>(t.frame.ticksPerBit);
+    return t;
+}
+
+std::vector<FrameMember> frameMembers(const GeneratorRecipe &recipe, std::size_t channel, std::size_t component)
+{
+    std::vector<FrameMember> out;
+    if (channel >= recipe.channels.size() || component >= recipe.channels[channel].components.size()) return out;
+    const GeneratorComponent &own = recipe.channels[channel].components[component];
+    if (own.waveform != Kind::Frame) return out;
+    for (std::size_t c = 0; c < recipe.channels.size(); ++c)
+    {
+        for (std::size_t k = 0; k < recipe.channels[c].components.size(); ++k)
+        {
+            const GeneratorComponent &other = recipe.channels[c].components[k];
+            const bool self = c == channel && k == component;
+            if (!self && (own.frameGroup == 0 || other.waveform != Kind::Frame || other.frameGroup != own.frameGroup)) continue;
+            out.push_back({c, k, frameLineIndex(other.frame.protocol, other.frameLine)});
+        }
+    }
+    return out;
+}
+
+void spreadFrame(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, FrameProtocol before)
+{
+    const std::vector<FrameMember> members = frameMembers(recipe, channel, component);
+    if (members.size() < 2) return;
+    const GeneratorComponent own = recipe.channels[channel].components[component];
+    for (const FrameMember &m : members)
+    {
+        if (m.channel == channel && m.component == component) continue;
+        GeneratorComponent &other = recipe.channels[m.channel].components[m.component];
+        if (own.frame.protocol != before) other.frameLine = std::string(frameLineFor(before, other.frameLine, own.frame.protocol));
+        other.frame = own.frame;
+        other.frequencyHz = own.frequencyHz;
+        other.eventSeconds = own.eventSeconds;
+        other.frameRepeat = own.frameRepeat;
+        other.frameGapBits = own.frameGapBits;
+        other.amplitude = own.amplitude;
+        other.frameLow = own.frameLow;
+    }
+}
+
+bool addFrameLines(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, std::size_t *added, std::string *error)
+{
+    if (added) *added = 0;
+    const std::vector<FrameMember> members = frameMembers(recipe, channel, component);
+    if (members.empty()) return false;
+    const FrameProtocol protocol = recipe.channels[channel].components[component].frame.protocol;
+    const std::span<const FrameLineInfo> lines = frameLines(protocol);
+    std::vector<bool> present(lines.size(), false);
+    for (const FrameMember &m : members) present[m.line] = true;
+    const auto missing = static_cast<std::size_t>(std::count(present.begin(), present.end(), false));
+    if (missing == 0) return true;
+    if (recipe.channels.size() + missing > kMaximumGeneratorChannels)
+    {
+        if (error)
+            *error = "Il faudrait " + countText(missing) + " de plus pour les autres lignes : au plus " +
+                     std::to_string(kMaximumGeneratorChannels) + " voies.";
+        return false;
+    }
+    // A group of its own, if it has none yet.
+    if (recipe.channels[channel].components[component].frameGroup == 0)
+    {
+        std::uint64_t last = 0;
+        for (const GeneratorChannel &c : recipe.channels)
+            for (const GeneratorComponent &k : c.components) last = std::max(last, k.frameGroup);
+        recipe.channels[channel].components[component].frameGroup = last + 1;
+    }
+    GeneratorComponent &kept = recipe.channels[channel].components[component];
+    kept.frameLine = std::string(lines[frameLineIndex(protocol, kept.frameLine)].key);
+    const GeneratorComponent own = kept;
+    const std::string unit = recipe.channels[channel].unit;
+    // Its channel takes the name of its line, if it still has the name it was made with.
+    if (recipe.channels[channel].name == "Voie " + std::to_string(channel + 1))
+        recipe.channels[channel].name = std::string(lines[frameLineIndex(protocol, own.frameLine)].name);
+    for (std::size_t i = 0; i < lines.size(); ++i)
+    {
+        if (present[i]) continue;
+        GeneratorComponent line = own;
+        line.enabled = true;
+        line.frameLine = std::string(lines[i].key);
+        recipe.channels.push_back(channelOf(std::string(lines[i].name), unit, {std::move(line)}));
+    }
+    if (added) *added = missing;
+    return true;
+}
+
+bool adoptFrameTiming(GeneratorRecipe &recipe, std::size_t channel, std::size_t component, bool realRate)
+{
+    if (channel >= recipe.channels.size() || component >= recipe.channels[channel].components.size()) return false;
+    GeneratorComponent &c = recipe.channels[channel].components[component];
+    if (c.waveform != Kind::Frame) return false;
+    GeneratorComponent framed = c;
+    if (realRate && fixedFrameRate(framed.frame) > 0.0) framed.frequencyHz = fixedFrameRate(framed.frame);
+    const FrameTiming t = frameTiming(framed, recipe.sampleRateHz);
+    if (!t.ok()) return false;
+    // A whole number of samples a tick: five at least, ten a bit at least. The rate stays if it gives that.
+    const auto perBit = static_cast<double>(t.frame.ticksPerBit);
+    const double least = std::max(5.0, std::ceil(10.0 / perBit));
+    const double whole = std::round(t.samplesPerTick);
+    const bool suits = whole >= least && std::abs(t.samplesPerTick - whole) <= 1e-9 * whole;
+    const double rate = suits ? recipe.sampleRateHz : framed.frequencyHz * perBit * least;
+    if (!(std::isfinite(rate) && rate >= 1e-3 && rate <= 1e11)) return false;
+    // Two bits of rest, the frame (three of them when it repeats), two bits of rest.
+    const double rest = 2.0 * t.bitSeconds;
+    const double gap = std::max(0.0, framed.frameGapBits) * t.bitSeconds;
+    const double shown = framed.frameRepeat ? 3.0 * t.durationSeconds + 2.0 * gap : t.durationSeconds;
+    c.frequencyHz = framed.frequencyHz;
+    c.eventSeconds = rest;
+    recipe.sampleRateHz = rate;
+    recipe.durationSeconds = rest + shown + rest;
+    spreadFrame(recipe, channel, component, c.frame.protocol);
+    return true;
+}
+
+GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progress &progress, std::span<const model::SignalPtr> sources)
 {
     GeneratorResult out;
     out.error = checkGeneratorRecipe(recipe);
     if (!out.error.empty()) return out;
+
     const double fs = recipe.sampleRateHz;
     const std::size_t n = generatorSampleCount(recipe);
 
@@ -3060,6 +3905,10 @@ GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progr
                 g = operationSamples(component, fs, n, above, made, progress);
             else if (component.waveform == Kind::Modulation)
                 g = modulationSamples(component, fs, n, above, made, progress);
+            else if (component.waveform == Kind::Recorded)
+                g = recordedSamples(component, fs, n, sources, progress);
+            else if (component.waveform == Kind::Frame)
+                g = frameSamples(component, fs, n);
             else if (component.waveform == Kind::FourierSeries)
                 g = seriesSamples(component, fs, n);
             else if (component.waveform == Kind::Drawn)
@@ -3109,8 +3958,10 @@ GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progr
         }
         made[c] = std::move(x);
     }
+    // The channels of the signal: those not left out.
     auto data = std::make_shared<model::SampleData>();
-    data->channels = std::move(made);
+    for (std::size_t c = 0; c < recipe.channels.size(); ++c)
+        if (recipe.channels[c].output) data->channels.push_back(std::move(made[c]));
     if (progress.stopped())
     {
         stop();
@@ -3124,7 +3975,7 @@ GeneratorResult generateSignal(const GeneratorRecipe &recipe, const model::Progr
     s.sampleRateHz = fs;
     s.startSeconds = 0.0;
     for (std::size_t c = 0; c < recipe.channels.size(); ++c)
-        s.channels.push_back({channelName(recipe.channels[c], c), recipe.channels[c].unit});
+        if (recipe.channels[c].output) s.channels.push_back({channelName(recipe.channels[c], c), recipe.channels[c].unit});
     s.data = std::move(data);
     s.provenance = model::Json::object();
     s.provenance["generator"] = toJson(recipe);
@@ -3259,6 +4110,52 @@ const std::vector<GeneratorExample> &generatorExamples()
                         recipeOf("Modulation de fréquence", 48000.0, 0.1,
                                  {channelOf("Message", "V", {component(Kind::Sine, 1.0, 500.0)}),
                                   channelOf("FM", "V", {fm})})});
+
+        // Digital frames: each line a channel, framed as « Cadrer la trame » does.
+        const auto frameExample = [&list](std::string name, std::string tip, const FrameSpec &spec, double rate, double high) {
+            GeneratorComponent line = defaultGeneratorComponent(Kind::Frame);
+            line.frame = spec;
+            line.frameLine = std::string(frameLines(spec.protocol).front().key);
+            line.frequencyHz = rate;
+            line.amplitude = high;
+            GeneratorRecipe recipe = recipeOf(name, 48000.0, 1.0, {channelOf("Voie 1", "V", {line})});
+            addFrameLines(recipe, 0, 0);
+            if (recipe.channels.size() == 1) recipe.channels[0].name = std::string(frameLines(spec.protocol).front().name);
+            adoptFrameTiming(recipe, 0, 0);
+            list.push_back({std::move(name), std::move(tip), std::move(recipe)});
+        };
+        FrameSpec uart = withFrameProtocol(FrameSpec{}, FrameProtocol::Uart);
+        frameExample("Trame UART « Bonjour »",
+                     "Le texte « Bonjour » en UART 8N1 à 9 600 bit/s, entre 0 et 3,3 V : chaque octet entre un bit de départ (0) et un "
+                     "bit d'arrêt (1), poids faible d'abord. La trame construite se lit dans le panneau Composition.",
+                     uart, 9600.0, 3.3);
+        FrameSpec i2c = withFrameProtocol(FrameSpec{}, FrameProtocol::I2c);
+        i2c.data = "0x01 0xA5";
+        frameExample("Bus I2C : écriture de deux octets",
+                     "SDA et SCL à 100 kbit/s : départ, adresse 0x48 et bit d'écriture, deux octets (0x01 0xA5) acquittés chacun, arrêt. "
+                     "SDA ne change que pendant que SCL est bas, sauf au départ et à l'arrêt.",
+                     i2c, 100000.0, 3.3);
+        FrameSpec spi = withFrameProtocol(FrameSpec{}, FrameProtocol::Spi);
+        spi.data = "0x9F 0x00 0x00 0x00";
+        spi.reply = "0x00 0xEF 0x40 0x18";
+        frameExample("Bus SPI : lecture d'un identifiant",
+                     "MOSI, MISO, SCLK et CS en mode 0 à 1 Mbit/s : la commande 0x9F, puis les trois octets de la réponse (EF 40 18, "
+                     "l'identifiant JEDEC d'une mémoire flash), lus sur les fronts montants de l'horloge.",
+                     spi, 1e6, 3.3);
+        FrameSpec usb = withFrameProtocol(FrameSpec{}, FrameProtocol::Usb);
+        usb.usbPacket = UsbPacket::SetupTransaction;
+        usb.data = "0x80 0x06 0x00 0x01 0x00 0x00 0x12 0x00";
+        frameExample("USB : transaction SETUP",
+                     "D+ et D− en bas débit (1,5 Mbit/s) : le jeton SETUP, le paquet DATA0 de la requête GET_DESCRIPTOR (8 octets et "
+                     "leur CRC16) et l'acquittement ACK ; codage NRZI, fin de paquet par les deux lignes à 0.",
+                     usb, 1.5e6, 3.3);
+        FrameSpec manchester;
+        manchester.data = "1011 0010";
+        manchester.code = LineCode::Manchester;
+        frameExample("Code Manchester et son horloge",
+                     "L'octet 1011 0010 en code Manchester à 1 kbit/s, avec son horloge : un front au milieu de chaque bit, montant "
+                     "pour un 1, descendant pour un 0 ; jamais plus d'un bit sans transition.",
+                     manchester, 1000.0, 1.0);
 
         GeneratorComponent white = defaultGeneratorComponent(Kind::Noise);
         white.amplitude = 1.0;

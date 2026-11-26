@@ -73,6 +73,59 @@ std::string validateSignal(const Signal &signal)
     return {};
 }
 
+bool keepChannels(Signal &signal, std::span<const std::size_t> channels, std::string *error)
+{
+    const auto fail = [error](const char *why) {
+        if (error) *error = why;
+        return false;
+    };
+    const std::size_t count = signal.channels.size();
+    if (!signal.data || signal.data->channelCount() != count) return fail("Le signal n'a pas de données.");
+    if (channels.empty()) return fail("Un signal garde au moins une voie.");
+    std::vector<bool> kept(count, false);
+    for (const std::size_t c : channels)
+    {
+        if (c >= count) return fail("Cette voie n'existe pas.");
+        if (kept[c]) return fail("Une voie ne peut être gardée qu'une fois.");
+        kept[c] = true;
+    }
+
+    auto data = std::make_shared<SampleData>();
+    data->discontinuities = signal.data->discontinuities;
+    data->channels.reserve(channels.size());
+    std::vector<ChannelInfo> infos;
+    infos.reserve(channels.size());
+    for (const std::size_t c : channels)
+    {
+        data->channels.push_back(signal.data->channels[c]);
+        infos.push_back(signal.channels[c]);
+    }
+    // I/Q: whole pairs, I then Q, as they were.
+    if (signal.representation == Representation::IQ)
+    {
+        bool pairs = channels.size() % 2 == 0;
+        for (std::size_t k = 0; pairs && k + 1 < channels.size(); k += 2)
+            pairs = channels[k] % 2 == 0 && channels[k + 1] == channels[k] + 1;
+        if (!pairs) signal.representation = Representation::Real;
+    }
+    std::string gone;
+    std::size_t removed = 0;
+    for (std::size_t c = 0; c < count; ++c)
+    {
+        if (kept[c]) continue;
+        gone += (removed > 0 ? ", " : "") + signal.channels[c].name;
+        ++removed;
+    }
+    if (removed > 0)
+    {
+        if (!signal.notes.empty() && signal.notes.back() != '\n') signal.notes += '\n';
+        signal.notes += (removed > 1 ? "Voies retirées : " : "Voie retirée : ") + gone + ".";
+    }
+    signal.channels = std::move(infos);
+    signal.data = std::move(data);
+    return true;
+}
+
 std::shared_ptr<SampleData> deinterleave(std::span<const double> interleaved, std::size_t channels)
 {
     auto data = std::make_shared<SampleData>();

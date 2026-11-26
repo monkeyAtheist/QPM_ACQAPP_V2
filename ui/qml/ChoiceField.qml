@@ -25,5 +25,8 @@ ColumnLayout {
         currentIndex: root.value
         font.pixelSize: Theme.bodyText
         onActivated: (index) => { if (index !== root.value) root.edited(index) }
+        // A new list of choices puts the box back on its first one, whatever the value: back on the value (the
+        // signals of the session, the channels of one of them: lists that change while the value stays).
+        onModelChanged: currentIndex = Qt.binding(() => root.value)
     }
 }

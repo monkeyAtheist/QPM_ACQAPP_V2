@@ -12,8 +12,11 @@ import Qacq.App
 // ready-made motifs, and its points as text. A recurrence has its input, its variables, the formula of y[n],
 // its initial values, ready-made recurrences and its first values. An operation between channels has its
 // variables, its formula y of v1, v2…, t and x, ready-made operations, and the channels it reads by name. A
-// modulated carrier has its amplitude, frequency and phase, AM, FM or PM and its index or excursion, its
-// variables, its message, ready-made messages.
+// modulated carrier has its amplitude, frequency and phase, how it is modulated (AM, FM, PM, double or single
+// sideband) and its index or excursion, its variables, its message, ready-made messages. A recorded signal has
+// its signal and channel among those of the session, its level (a gain, or a peak), where it is read from, its
+// delay, whether it repeats, and a button that gives the recipe its rate and duration. A line of a digital frame
+// has its own fields (FrameFields).
 Rectangle {
     id: root
     required property var generator
@@ -52,6 +55,12 @@ Rectangle {
     readonly property var operationChoices: operation || modulated
                                             ? (generator.recipe, operation ? generator.operationModels(channel) : generator.messageModels(channel))
                                             : []
+    readonly property bool recorded: waveform === "recorded"
+    // The record it reads among the signals of the session (again when the recipe or the session change).
+    readonly property var sourceState: recorded ? (generator.recipe, generator.sources, generator.sourceInfo(channel, index)) : ({})
+    readonly property string sourceError: sourceState.error ?? ""
+    readonly property bool levelled: wave.normalize === true
+    readonly property bool framed: waveform === "frame"
     readonly property bool recurrent: waveform === "recurrence"
     // What is wrong in it (at once), and its first values as the preview made them.
     readonly property var trace: recurrent ? (generator.recipe, generator.ready, generator.recurrenceInfo(channel, index)) : ({})
@@ -67,6 +76,16 @@ Rectangle {
 
     function set(values) {
         generator.setComponent(channel, index, values)
+    }
+    // Where the record read is in the list of the session's signals (-1: not there).
+    function sourceIndex() {
+        const list = generator.sources
+        const id = sourceState.id ?? 0
+        for (let i = 0; i < list.length; ++i) {
+            if (list[i].id === id)
+                return i
+        }
+        return -1
     }
     // The key of formula i of a series in the recipe (a₀, aₙ, bₙ or the parts of Cₙ).
     function formulaKey(i) {
@@ -139,10 +158,82 @@ Rectangle {
             }
         }
 
+        // ---- A recorded signal: which one ----
+        ColumnLayout {
+            visible: root.recorded
+            Layout.fillWidth: true
+            opacity: root.counted ? 1 : 0.55
+            spacing: 6
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                ChoiceField {
+                    label: qsTr("Signal de la session")
+                    choices: root.recorded ? root.generator.sources.map((s) => s.name) : []
+                    value: root.recorded ? root.sourceIndex() : -1
+                    onEdited: (i) => root.set({ source: root.generator.sources[i].id, sourceChannel: 0 })
+                }
+                ChoiceField {
+                    Layout.fillWidth: false
+                    Layout.preferredWidth: 130
+                    visible: (root.sourceState.channels ?? []).length > 1
+                    label: qsTr("Voie")
+                    choices: root.sourceState.channels ?? []
+                    value: root.sourceState.channel ?? 0
+                    onEdited: (i) => root.set({ sourceChannel: i })
+                }
+            }
+            Label {
+                visible: root.sourceError.length > 0
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: root.sourceError
+                color: Theme.error
+                font.pixelSize: Theme.smallText
+            }
+            RowLayout {
+                visible: root.sourceError.length === 0
+                Layout.fillWidth: true
+                spacing: 6
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: (root.sourceState.summary ?? "")
+                          + (root.sourceState.resampled === true ? qsTr(" — rééchantillonné à %1").arg(Units.compact(root.generator.recipe.sampleRate ?? 48000, "Hz", 6)) : "")
+                    color: Theme.textMuted
+                    font.pixelSize: Theme.smallText
+                }
+                Button {
+                    visible: root.sourceState.differs === true
+                    text: qsTr("Sa fréquence et sa durée")
+                    flat: true
+                    onClicked: root.generator.adoptSourceTiming(root.channel, root.index)
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: qsTr("Le signal généré prend la fréquence d'échantillonnage de cet enregistrement (plus de rééchantillonnage) et sa durée")
+                }
+            }
+        }
+
+        // ---- A line of a digital frame ----
+        Loader {
+            Layout.fillWidth: true
+            visible: root.framed
+            active: root.framed
+            opacity: root.counted ? 1 : 0.55
+            sourceComponent: FrameFields {
+                generator: root.generator
+                channel: root.channel
+                index: root.index
+                wave: root.wave
+                unit: root.unit
+            }
+        }
+
         GridLayout {
-            // (A recurrence or an operation has none of these fields: an empty layout would keep the room of the
-            // ones before.)
-            visible: !root.recurrent && !root.operation
+            // (A recurrence, an operation or a frame has none of these fields: an empty layout would keep the room
+            // of the ones before.)
+            visible: !root.recurrent && !root.operation && !root.framed
             Layout.fillWidth: true
             opacity: root.counted ? 1 : 0.55
             columns: 2
@@ -153,11 +244,14 @@ Rectangle {
                 label: root.waveform === "dc" || root.waveform === "impulse" ? qsTr("Valeur")
                        : root.waveform === "step" ? qsTr("Hauteur")
                        : root.modulated ? qsTr("Amplitude de la porteuse")
+                       : root.recorded ? (root.levelled ? qsTr("Crête ramenée à") : qsTr("Gain (×)"))
                        : root.noise ? (root.wave.noise === "uniform" ? qsTr("Crête (±)") : qsTr("Écart type"))
                        : qsTr("Amplitude crête")
-                unit: root.unit
+                unit: root.recorded && !root.levelled ? "" : root.unit
                 value: root.wave.amplitude ?? 1
                 tip: root.noise ? qsTr("Gaussien : l'écart type, la valeur efficace du bruit ; uniforme : entre −A et +A")
+                     : root.recorded ? (root.levelled ? qsTr("La plus grande valeur absolue de la partie lue devient cette valeur (1 : un message prêt pour une porteuse, dont l'indice m est alors le taux de modulation)")
+                                                      : qsTr("L'enregistrement est multiplié par ce nombre : 1 le laisse tel quel, −1 l'inverse, 0,5 le divise par deux"))
                      : root.modulated ? qsTr("La porteuse A·cos(2π fc t + φ), avant sa modulation")
                      : root.drawn ? qsTr("Le motif va de −A (en bas du dessin) à +A (en haut)")
                      : root.periodic || root.sweep ? qsTr("Valeur crête : 1 V crête, c'est 0,707 V efficaces pour un sinus") : ""
@@ -268,6 +362,37 @@ Rectangle {
                 onEdited: (i) => root.set({ once: i === 1 })
             }
             ChoiceField {
+                visible: root.recorded
+                label: qsTr("Niveau")
+                choices: [qsTr("Tel quel, fois un gain"), qsTr("Crête ramenée à une valeur")]
+                value: root.levelled ? 1 : 0
+                onEdited: (i) => root.set({ normalize: i === 1 })
+            }
+            QuantityField {
+                visible: root.recorded
+                label: qsTr("Lu à partir de")
+                unit: "s"
+                minimum: 0
+                value: root.wave.sourceStart ?? 0
+                tip: qsTr("L'instant de l'enregistrement où la lecture commence (0 : son début)")
+                onEdited: (v) => root.set({ sourceStart: v })
+            }
+            QuantityField {
+                visible: root.recorded
+                label: qsTr("Retard")
+                unit: "s"
+                value: root.wave.time ?? 0
+                tip: qsTr("L'instant du signal généré où l'enregistrement commence (avant : 0), arrondi à l'échantillon")
+                onEdited: (v) => root.set({ time: v })
+            }
+            ChoiceField {
+                visible: root.recorded
+                label: qsTr("Lecture")
+                choices: [qsTr("Une fois (0 ensuite)"), qsTr("En boucle")]
+                value: root.wave.loop === true ? 1 : 0
+                onEdited: (i) => root.set({ loop: i === 1 })
+            }
+            ChoiceField {
                 visible: root.modulated
                 label: qsTr("Modulation")
                 choices: Choices.names(Choices.carrierModulations)
@@ -319,28 +444,29 @@ Rectangle {
                 }
                 Button {
                     id: operationModelButton
+                    visible: root.operation
                     Layout.alignment: Qt.AlignBottom
-                    text: root.operation ? qsTr("Modèles ▾") : qsTr("Message ▾")
+                    text: qsTr("Modèles ▾")
                     flat: true
                     onClicked: operationModelMenu.popup(operationModelButton, 0, operationModelButton.height)
                     ToolTip.visible: hovered
                     ToolTip.delay: 500
-                    ToolTip.text: root.operation ? qsTr("Une opération toute prête des deux premières autres voies : somme, différence, produit, quotient, moyenne, module…")
-                                                 : qsTr("Un message tout prêt : un sinus ou un carré de fréquence fm, les formes d'onde au-dessus, une autre voie")
-                    FitMenu {
-                        id: operationModelMenu
-                        Instantiator {
-                            model: root.operationChoices
-                            delegate: MenuItem {
-                                required property var modelData
-                                text: modelData.name + " : " + modelData.formula
-                                onTriggered: root.operation ? root.generator.applyOperationModel(root.channel, root.index, modelData.key)
-                                                            : root.generator.applyMessageModel(root.channel, root.index, modelData.key)
-                            }
-                            onObjectAdded: (index, object) => operationModelMenu.insertItem(index, object)
-                            onObjectRemoved: (index, object) => operationModelMenu.removeItem(object)
-                        }
+                    ToolTip.text: qsTr("Une opération toute prête des deux premières autres voies : somme, différence, produit, quotient, moyenne, module…")
+                }
+            }
+            // The ready-made operations, or messages (beside the field of the message).
+            FitMenu {
+                id: operationModelMenu
+                Instantiator {
+                    model: root.operationChoices
+                    delegate: MenuItem {
+                        required property var modelData
+                        text: modelData.name + " : " + modelData.formula
+                        onTriggered: root.operation ? root.generator.applyOperationModel(root.channel, root.index, modelData.key)
+                                                    : root.generator.applyMessageModel(root.channel, root.index, modelData.key)
                     }
+                    onObjectAdded: (index, object) => operationModelMenu.insertItem(index, object)
+                    onObjectRemoved: (index, object) => operationModelMenu.removeItem(object)
                 }
             }
             FormulaField {
@@ -358,12 +484,27 @@ Rectangle {
                 tip: qsTr("Une formule des voies : v1 + v2, v1*v2, (1 + 0,5*v2)*v1, abs(v1), sqrt(v1^2 + v2^2), sin(2*pi*50*t)^3…")
                 onEdited: (text) => root.set({ expression: text })
             }
-            FormulaField {
+            RowLayout {
                 visible: root.modulated
-                label: qsTr("Message m(t) =")
-                value: root.wave.message ?? ""
-                tip: qsTr("Ce qui module la porteuse : sin(2*pi*fm*t), v1 (une autre voie), x (les formes d'onde au-dessus de celle-ci)…")
-                onEdited: (text) => root.set({ message: text })
+                Layout.fillWidth: true
+                spacing: 6
+                FormulaField {
+                    Layout.fillWidth: true
+                    label: qsTr("Message m(t) =")
+                    value: root.wave.message ?? ""
+                    tip: qsTr("Ce qui module la porteuse : sin(2*pi*fm*t), v1 (une autre voie), x (les formes d'onde au-dessus de celle-ci)… ou, avec « Message ▾ », un signal de la session")
+                    onEdited: (text) => root.set({ message: text })
+                }
+                Button {
+                    id: messageModelButton
+                    Layout.alignment: Qt.AlignBottom
+                    text: qsTr("Message ▾")
+                    flat: true
+                    onClicked: operationModelMenu.popup(messageModelButton, 0, messageModelButton.height)
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 500
+                    ToolTip.text: qsTr("Le message de la porteuse : un sinus ou un carré de fréquence fm, les formes d'onde au-dessus, une autre voie, ou un signal de la session (ramené à 1 V crête, placé au-dessus de la porteuse)")
+                }
             }
             Label {
                 visible: root.operationError.length > 0

@@ -202,6 +202,59 @@ bool SignalListModel::setChannel(qint64 id, int channel, const QString &name, co
     return replaceSignal(id, std::move(copy), QStringLiteral("Modifier la voie « %1 »").arg(name.trimmed()));
 }
 
+bool SignalListModel::removeChannel(qint64 id, int channel)
+{
+    const model::SignalPtr current = signalById(id);
+    if (!current) return fail("Ce signal n'existe plus.");
+    const int count = static_cast<int>(current->channels.size());
+    if (channel < 0 || channel >= count) return fail("Cette voie n'existe pas.");
+    if (count <= 1) return fail("Un signal garde au moins une voie : supprimez le signal.");
+    QVariantList kept;
+    for (int c = 0; c < count; ++c)
+        if (c != channel) kept.append(c);
+    return keepChannels(id, kept);
+}
+
+bool SignalListModel::keepChannels(qint64 id, const QVariantList &channels)
+{
+    const model::SignalPtr current = signalById(id);
+    if (!current) return fail("Ce signal n'existe plus.");
+    std::vector<std::size_t> kept;
+    for (const QVariant &c : channels)
+    {
+        bool ok = false;
+        const int index = c.toInt(&ok);
+        if (!ok || index < 0) return fail("Cette voie n'existe pas.");
+        kept.push_back(static_cast<std::size_t>(index));
+    }
+    const std::size_t count = current->channels.size();
+    // Every channel, in its order: nothing to do.
+    bool same = kept.size() == count;
+    for (std::size_t k = 0; same && k < count; ++k) same = kept[k] == k;
+    if (same) return true;
+    model::Signal copy = *current;
+    std::string why;
+    if (!model::keepChannels(copy, kept, &why)) return fail(why);
+    QString label;
+    if (kept.size() + 1 == count)
+    {
+        std::vector<bool> stays(count, false);
+        for (const std::size_t k : kept) stays[k] = true;
+        std::size_t gone = 0;
+        while (gone < count && stays[gone]) ++gone;
+        label = QStringLiteral("Supprimer la voie « %1 »").arg(toQString(current->channels[std::min(gone, count - 1)].name));
+    }
+    else if (kept.size() < count)
+    {
+        label = QStringLiteral("Supprimer %1 voies de « %2 »").arg(static_cast<int>(count - kept.size())).arg(toQString(current->name));
+    }
+    else
+    {
+        label = QStringLiteral("Ranger les voies de « %1 »").arg(toQString(current->name));
+    }
+    return replaceSignal(id, std::move(copy), label);
+}
+
 bool SignalListModel::setTiming(qint64 id, double sampleRateHz, double startSeconds)
 {
     const model::SignalPtr current = signalById(id);

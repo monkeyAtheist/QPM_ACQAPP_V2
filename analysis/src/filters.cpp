@@ -404,6 +404,7 @@ double FilterDesign::largestPoleRadius() const noexcept
 
 bool applicationAllowed(FilterKind kind, FilterApplication application) noexcept
 {
+    if (kind == FilterKind::None) return application == FilterApplication::Causal; // nothing to apply otherwise
     return application != FilterApplication::Aligned || kind != FilterKind::Iir;
 }
 
@@ -1049,6 +1050,14 @@ FilterDesign designFilter(const FilterRecipe &recipe)
     d.recipe.gainDb = std::clamp(d.recipe.gainDb, -kMaximumFilterGainDb, kMaximumFilterGainDb);
     d.gain = std::pow(10.0, d.recipe.gainDb / 20.0);
     const FilterRecipe &r = d.recipe;
+    if (r.kind == FilterKind::None)
+    {
+        // No filter: one coefficient, 1 (the output is the input), no zero to find.
+        d.recipe.fromTemplate = false;
+        d.taps = {1.0};
+        d.rootsKnown = true;
+        return d;
+    }
     if (r.kind == FilterKind::Typed)
     {
         designTyped(d);
@@ -1308,7 +1317,7 @@ BandLevels bandLevels(const FilterDesign &d, double low, double high, const std:
 
 bool templateFromDesign(const FilterDesign &d, FilterRecipe &r)
 {
-    if (!d.ok() || d.recipe.kind == FilterKind::Typed || r.response != d.recipe.response) return false;
+    if (!d.ok() || !designedKind(d.recipe.kind) || r.response != d.recipe.response) return false;
     FilterRecipe levels = r;
     levels.kind = d.recipe.kind;
     const TemplateZones z = templateZones(levels);
@@ -2096,6 +2105,7 @@ std::string templateText(const FilterRecipe &r)
 
 std::string filterText(const FilterRecipe &r)
 {
+    if (r.kind == FilterKind::None) return "Aucun filtre" + (r.gainDb != 0.0 ? ", gain " + filterGainText(r.gainDb) : std::string());
     if (r.kind == FilterKind::Typed)
         return typedText(r) + (r.gainDb != 0.0 ? ", gain " + filterGainText(r.gainDb) : std::string());
     const std::string gain = r.gainDb != 0.0 ? ", gain " + filterGainText(r.gainDb) : std::string();
@@ -2143,6 +2153,7 @@ std::string filterGainText(double gainDb)
 
 std::string filterShortText(const FilterRecipe &r)
 {
+    if (r.kind == FilterKind::None) return "sans filtre" + (r.gainDb != 0.0 ? ", " + filterGainText(r.gainDb) : std::string());
     if (r.kind == FilterKind::Typed)
         return "coefficients tapés" + (r.gainDb != 0.0 ? ", " + filterGainText(r.gainDb) : std::string());
     std::string edges = edgesText(r);
@@ -2175,6 +2186,16 @@ std::vector<std::string> designSummary(const FilterDesign &d)
 {
     std::vector<std::string> lines;
     if (!d.ok()) return lines;
+    if (d.recipe.kind == FilterKind::None)
+    {
+        lines.push_back("Aucun filtre : la sortie est l'entrée (H(z) = 1), sans retard ni déphasage" +
+                        (d.recipe.gainDb != 0.0 ? ", multipliée par le gain en sortie (" + filterGainText(d.recipe.gainDb) + ")."
+                                                : std::string(".")));
+        lines.push_back("Pour en concevoir un : ruban ▸ Filtre, un RII (Butterworth, Chebyshev, Bessel, elliptique), un RIF ou des "
+                        "coefficients tapés ; ou un exemple (Recette ▸ Exemples). Le premier choisi part d'un passe-bas à " +
+                        quantity(d.recipe.frequency1Hz, "Hz") + ".");
+        return lines;
+    }
     const double fs = d.recipe.sampleRateHz;
     const bool typed = d.recipe.kind == FilterKind::Typed;
     // Where it passes (coefficients typed: no response said): at 0 Hz if it passes there (within 3 dB of its
@@ -2491,6 +2512,7 @@ std::string_view filterKindKey(FilterKind kind) noexcept
     {
         case FilterKind::Fir: return "fir";
         case FilterKind::Typed: return "typed";
+        case FilterKind::None: return "none";
         case FilterKind::Iir: break;
     }
     return "iir";
@@ -2610,7 +2632,7 @@ FilterRecipe filterRecipeFromJson(const model::Json &j)
     FilterRecipe r;
     if (!j.isObject()) return r;
     const std::string kind = j["kind"].toString();
-    r.kind = kind == "fir" ? FilterKind::Fir : kind == "typed" ? FilterKind::Typed : FilterKind::Iir;
+    r.kind = kind == "fir" ? FilterKind::Fir : kind == "typed" ? FilterKind::Typed : kind == "none" ? FilterKind::None : FilterKind::Iir;
     const std::string family = j["family"].toString();
     for (dsp::FilterFamily f : {dsp::FilterFamily::Butterworth, dsp::FilterFamily::ChebyshevI, dsp::FilterFamily::ChebyshevII,
                                 dsp::FilterFamily::Bessel, dsp::FilterFamily::Elliptic})
@@ -2681,6 +2703,13 @@ FilterRecipe defaultFilterRecipe(double sampleRateHz)
     r.frequency1Hz = std::min(1000.0, niceFloor(fs / 10.0));
     r.frequency2Hz = 2.0 * r.frequency1Hz;
     r.transitionHz = r.frequency1Hz / 5.0;
+    return r;
+}
+
+FilterRecipe blankFilterRecipe(double sampleRateHz)
+{
+    FilterRecipe r = defaultFilterRecipe(sampleRateHz);
+    r.kind = FilterKind::None;
     return r;
 }
 

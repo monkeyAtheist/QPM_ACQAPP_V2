@@ -462,6 +462,13 @@ Canvas {
             c.font = "bold 9px sans-serif"
             c.fillText(icon.name === "iir" ? "RII" : "RIF", 2, 15)
             break
+        case "nofilter":
+            // A gain flat across the band (H = 1), between the axes.
+            c.lineWidth = 1.2
+            line([3, 3, 3, 21, 21, 21], false)
+            c.lineWidth = 1.7
+            line([3, 10, 21, 10], false)
+            break
         case "template":
             // A low-pass template: the pass band between two bounds, the stop band under one, a gain going
             // through between them.
@@ -625,10 +632,101 @@ Canvas {
             c.fillText("01", 3, 11)
             c.fillText("10", 9, 21)
             break
+        case "modulate": {
+            // A carrier whose amplitude follows its message: the envelope, thin, around it.
+            const envelope = (t) => 1.5 + 6 * (0.5 - 0.5 * Math.cos(2 * Math.PI * t))
+            c.beginPath()
+            for (let i = 0; i <= 96; ++i) {
+                const t = i / 96
+                const y = 12 - envelope(t) * Math.sin(2 * Math.PI * 6 * t)
+                if (i === 0)
+                    c.moveTo(2 + 20 * t, y)
+                else
+                    c.lineTo(2 + 20 * t, y)
+            }
+            c.stroke()
+            c.lineWidth = 0.9
+            for (let side = -1; side <= 1; side += 2) {
+                c.beginPath()
+                for (let i = 0; i <= 24; ++i) {
+                    const t = i / 24
+                    const y = 12 + side * envelope(t)
+                    if (i === 0)
+                        c.moveTo(2 + 20 * t, y)
+                    else
+                        c.lineTo(2 + 20 * t, y)
+                }
+                c.stroke()
+            }
+            break
+        }
         case "carrier":
             // A carrier whose phase jumps.
             wave(2, 12, 12, 6, 2)
             wave(12, 22, 12, -6, 2)
+            break
+        case "receiver":
+            // An antenna on its mast.
+            line([12, 21, 12, 4], false)
+            line([5, 4, 12, 11, 19, 4], false)
+            line([8, 21, 16, 21], false)
+            break
+        case "rawpoints":
+            // The I/Q plane, the points turning on their ring: before synchronization.
+            c.lineWidth = 1.0
+            line([2, 12, 22, 12], false)
+            line([12, 2, 12, 22], false)
+            for (let k = 0; k < 8; ++k) {
+                const a = (k + 0.5) * Math.PI / 4
+                circle(12 + 7.5 * Math.cos(a), 12 - 7.5 * Math.sin(a), 1.3, true)
+            }
+            break
+        case "paths":
+            // The same pulse arriving several times, weaker each time.
+            c.lineWidth = 1.0
+            line([2, 20, 22, 20], false)
+            c.lineWidth = 1.8
+            line([5, 20, 5, 5], false)
+            line([12, 20, 12, 11], false)
+            line([19, 20, 19, 15], false)
+            circle(5, 5, 1.6, true)
+            circle(12, 11, 1.6, true)
+            circle(19, 15, 1.6, true)
+            break
+        case "fading": {
+            // A gain that wanders, and now and then plunges (Rayleigh).
+            c.beginPath()
+            for (let i = 0; i <= 60; ++i) {
+                const t = i / 60
+                const g = Math.abs(Math.cos(2 * Math.PI * 1.3 * t + 0.4) + 0.75 * Math.cos(2 * Math.PI * 2.1 * t + 2.2))
+                const y = 20 - 9 * g
+                if (i === 0)
+                    c.moveTo(2 + 20 * t, y)
+                else
+                    c.lineTo(2 + 20 * t, y)
+            }
+            c.stroke()
+            c.lineWidth = 0.9
+            line([2, 20.5, 22, 20.5], false)
+            break
+        }
+        case "equalizer":
+            // Sliders, each at its own level.
+            c.lineWidth = 1.2
+            line([5, 3, 5, 21], false)
+            line([12, 3, 12, 21], false)
+            line([19, 3, 19, 21], false)
+            c.lineWidth = 2.6
+            line([2.8, 9, 7.2, 9], false)
+            line([9.8, 16, 14.2, 16], false)
+            line([16.8, 7, 21.2, 7], false)
+            break
+        case "syncerror":
+            // An error wandering about its zero line, symbol after symbol.
+            c.lineWidth = 1.0
+            line([2, 12, 22, 12], false)
+            c.lineWidth = 1.6
+            line([2, 6, 4.5, 15, 7, 10, 9.5, 13.5, 12, 11, 14.5, 12.8, 17, 11.4, 19.5, 12.4, 22, 11.8], false)
             break
         }
     }

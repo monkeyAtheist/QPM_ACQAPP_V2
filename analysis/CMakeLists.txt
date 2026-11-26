@@ -8,6 +8,7 @@ add_library(qacq_analysis STATIC
     src/expression.cpp
     src/filter_code.cpp
     src/filters.cpp
+    src/frames.cpp
     src/link.cpp
     src/generation.cpp
     src/measures.cpp

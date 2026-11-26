@@ -5,8 +5,9 @@ import QtQuick.Layouts
 import Qacq.App
 
 // Text field for a quantity: shows "48 kHz", accepts "44,1 kHz", "2 ms", "3,3e-3 V", "115 200" or a bare
-// number (read with the prefix currently shown: "44,1" over "48 kHz" is 44,1 kHz). Emits edited(value)
-// only for a valid, changed value; `minimum` and `maximum` bound it.
+// number (read with the prefix currently shown: "44,1" over "48 kHz" is 44,1 kHz; with `plainNumbers`, in the
+// unit itself: "115200" over "9,6 kbit/s" is 115 200 bit/s). Emits edited(value) only for a valid, changed
+// value; `minimum` and `maximum` bound it.
 ColumnLayout {
     id: root
     property string label
@@ -17,6 +18,8 @@ ColumnLayout {
     property real maximum: Number.MAX_VALUE
     property string tip: ""
     property int fieldWidth: -1
+    // A number typed without unit is in the unit itself, not in the multiple shown (a bit rate: 9600, 115200).
+    property bool plainNumbers: false
     // Being typed in: a value set from outside meanwhile would replace what is typed.
     readonly property bool editing: field.activeFocus
     signal edited(real value)
@@ -61,7 +64,7 @@ ColumnLayout {
                 invalid = false
                 return
             }
-            const r = Units.parse(text, root.unit, Units.shownFactor(root.value, root.unit))
+            const r = Units.parse(text, root.unit, root.plainNumbers ? 1 : Units.shownFactor(root.value, root.unit))
             if (!r.ok) {
                 invalid = true
                 errorTip.text = r.error

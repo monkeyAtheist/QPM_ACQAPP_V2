@@ -557,6 +557,16 @@ ApplicationWindow {
                     onCollapseRequested: window.signalsPanelOpen = false
                     onImportRequested: importDialog.open()
                     onExportRequested: (id) => { exportDialog.signalId = id; exportDialog.open() }
+                    onGeneratorRequested: (id, use) => {
+                        // A channel of the generator's recipe made of this signal (or of a carrier it modulates).
+                        const index = window.generator.useSignal(id, use)
+                        if (index >= 0) {
+                            window.generatorChannel = index
+                            window.inspectorTab = 0
+                            window.inspectorOpen = true
+                            window.switchModule(2)
+                        }
+                    }
                 }
 
                 // Centre: the view of the module.

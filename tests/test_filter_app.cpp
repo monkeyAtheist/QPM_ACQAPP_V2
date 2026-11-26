@@ -73,7 +73,18 @@ TEST_CASE("Filter controller: the design follows the recipe, and says what it is
 {
     Session session;
     FilterController filter(&session);
+    // A blank page: no filter, one coefficient 1; nothing to write in C.
     QVariantMap design = filter.designInfo();
+    CHECK(filter.recipe().value(QStringLiteral("kind")).toString() == QStringLiteral("none"));
+    CHECK(design.value(QStringLiteral("ok")).toBool());
+    CHECK(design.value(QStringLiteral("text")).toString() == QStringLiteral("Aucun filtre"));
+    CHECK(design.value(QStringLiteral("tapCount")).toInt() == 1);
+    CHECK(design.value(QStringLiteral("coefficients")).toString() == QStringLiteral("h[0] = 1"));
+    CHECK(design.value(QStringLiteral("summary")).toStringList().value(0).startsWith(QStringLiteral("Aucun filtre : la sortie est l'entrée")));
+    CHECK(!filter.code({}).value(QStringLiteral("ok")).toBool());
+    // A kind chosen: the usual first filter.
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")}});
+    design = filter.designInfo();
     CHECK(design.value(QStringLiteral("ok")).toBool());
     CHECK(design.value(QStringLiteral("text")).toString() == QStringLiteral("Passe-bas Butterworth d'ordre 4, 1 kHz"));
     CHECK(design.value(QStringLiteral("sections")).toList().size() == 2);
@@ -186,9 +197,10 @@ TEST_CASE("Filter controller: the design follows the recipe, and says what it is
     CHECK(filter.recipe().value(QStringLiteral("frequency2")).toDouble() > 1000.0);
     CHECK(filter.designInfo().value(QStringLiteral("ok")).toBool());
 
-    // Text, and back.
+    // Text, and back; « Par défaut »: the blank page again.
     const QString text = filter.recipeText();
     filter.reset();
+    CHECK(filter.recipe().value(QStringLiteral("kind")).toString() == QStringLiteral("none"));
     CHECK(filter.recipe().value(QStringLiteral("response")).toString() == QStringLiteral("lowpass"));
     filter.restoreRecipe(text);
     CHECK(filter.recipe().value(QStringLiteral("response")).toString() == QStringLiteral("bandpass"));
@@ -219,6 +231,7 @@ TEST_CASE("Filter controller: an order computed from a template, and back", "[ap
 {
     Session session;
     FilterController filter(&session);
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")}}); // from the blank page
     const auto value = [&filter](const char *key) { return filter.recipe().value(QString::fromLatin1(key)); };
     // The recipe as designed: what the template computed.
     const auto designed = [&filter](const char *key) {
@@ -289,6 +302,12 @@ TEST_CASE("Filter controller: tried on a signal, before and after, then into the
     FilterController filter(&session);
     filter.addToSession(); // no signal chosen yet
     CHECK(filter.lastError().contains(QStringLiteral("Choisissez")));
+    // A signal chosen, no filter yet: nothing to add.
+    filter.setInputId(id);
+    filter.addToSession();
+    CHECK(filter.lastError().startsWith(QStringLiteral("Aucun filtre : le signal resterait le même.")));
+    filter.setInputId(0);
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")}});
 
     // The signal's rate taken by the design; the preview of its first channel.
     filter.setInputId(id);
@@ -370,6 +389,7 @@ TEST_CASE("Filter controller: a long signal previewed on its start, the module a
     const qint64 id = list->addSignal(twoTones(48000.0, n), QStringLiteral("Ajouter"));
     REQUIRE(id > 0);
     FilterController filter(&session);
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")}}); // from the blank page
     filter.setActive(false);
     filter.setInputId(id);
     filter.waitForIdle();
@@ -394,7 +414,7 @@ TEST_CASE("Filter controller: a long signal previewed on its start, the module a
 TEST_CASE("Filter controller: the C for a microcontroller, shown and saved", "[app]")
 {
     FilterController filter(nullptr);
-    filter.setRecipe({{QStringLiteral("order"), 4}, {QStringLiteral("frequency1"), 1000.0}});
+    filter.setRecipe({{QStringLiteral("kind"), QStringLiteral("iir")}, {QStringLiteral("order"), 4}, {QStringLiteral("frequency1"), 1000.0}});
     const QVariantMap options{{QStringLiteral("format"), QStringLiteral("q15")}, {QStringLiteral("name"), QStringLiteral("pb")}};
     const QVariantMap code = filter.code(options);
     REQUIRE(code.value(QStringLiteral("ok")).toBool());

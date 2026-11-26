@@ -1,11 +1,15 @@
 #include "qacq/dsp/modulation.h"
 
 #include "qacq/dsp/constants.h"
+#include "qacq/dsp/rotator.h"
 #include "qacq/dsp/filtering.h"
 #include "qacq/dsp/random.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <mutex>
+#include <utility>
 
 namespace qacq::dsp
 {
@@ -52,6 +56,20 @@ int bitsPerSymbol(Modulation modulation) noexcept
 bool hasConstellation(Modulation modulation) noexcept
 {
     return !isAnalog(modulation) && modulation != Modulation::Fsk;
+}
+
+double rotationalSymmetryDegrees(Modulation modulation) noexcept
+{
+    switch (modulation)
+    {
+        case Modulation::Bpsk: return 180.0;
+        case Modulation::Psk8: return 45.0;
+        case Modulation::Qpsk:
+        case Modulation::Qam16:
+        case Modulation::Qam64:
+        case Modulation::Qam256: return 90.0;
+        default: return 0.0;
+    }
 }
 
 std::size_t grayCode(std::size_t value) noexcept
@@ -195,6 +213,34 @@ std::vector<std::uint8_t> randomBits(std::size_t count, std::uint64_t seed)
     return bits;
 }
 
+namespace
+{
+// The root raised cosine t symbols from its peak, before it is scaled.
+double rootRaisedValue(double beta, double t) noexcept
+{
+    if (std::abs(t) < 1e-12) return 1.0 - beta + 4.0 * beta / kPi;
+    if (beta > 0.0 && std::abs(std::abs(t) - 1.0 / (4.0 * beta)) < 1e-9)
+        return beta / std::sqrt(2.0) * ((1.0 + 2.0 / kPi) * std::sin(kPi / (4.0 * beta)) + (1.0 - 2.0 / kPi) * std::cos(kPi / (4.0 * beta)));
+    return (std::sin(kPi * t * (1.0 - beta)) + 4.0 * beta * t * std::cos(kPi * t * (1.0 + beta))) /
+           (kPi * t * (1.0 - (4.0 * beta * t) * (4.0 * beta * t)));
+}
+
+// A pulse h of sps samples per symbol through itself: the pair at the instants of the other symbols (k sps from
+// the peak) against the peak, in power, dB.
+double pairInterferenceDb(const std::vector<double> &h, std::size_t sps) noexcept
+{
+    double own = 0.0, others = 0.0;
+    for (double v : h) own += v * v;
+    for (std::size_t k = 1; sps > 0 && k * sps < h.size(); ++k)
+    {
+        double g = 0.0;
+        for (std::size_t n = 0; n + k * sps < h.size(); ++n) g += h[n] * h[n + k * sps];
+        others += 2.0 * g * g;
+    }
+    return own > 0.0 && others > 0.0 ? 10.0 * std::log10(others / (own * own)) : -std::numeric_limits<double>::infinity();
+}
+} // namespace
+
 std::vector<double> rootRaisedCosine(double beta, std::size_t sps, std::size_t span)
 {
     if (sps == 0) return {1.0};
@@ -204,23 +250,57 @@ std::vector<double> rootRaisedCosine(double beta, std::size_t sps, std::size_t s
     const double centre = 0.5 * static_cast<double>(length);
     std::vector<double> h(taps);
     for (std::size_t i = 0; i < taps; ++i)
-    {
-        const double t = (static_cast<double>(i) - centre) / static_cast<double>(sps); // in symbols
-        double v;
-        if (std::abs(t) < 1e-12)
-            v = 1.0 - beta + 4.0 * beta / kPi;
-        else if (beta > 0.0 && std::abs(std::abs(t) - 1.0 / (4.0 * beta)) < 1e-9)
-            v = beta / std::sqrt(2.0) *
-                ((1.0 + 2.0 / kPi) * std::sin(kPi / (4.0 * beta)) + (1.0 - 2.0 / kPi) * std::cos(kPi / (4.0 * beta)));
-        else
-            v = (std::sin(kPi * t * (1.0 - beta)) + 4.0 * beta * t * std::cos(kPi * t * (1.0 + beta))) /
-                (kPi * t * (1.0 - (4.0 * beta * t) * (4.0 * beta * t)));
-        h[i] = v;
-    }
+        h[i] = rootRaisedValue(beta, (static_cast<double>(i) - centre) / static_cast<double>(sps)); // t in symbols
     double energy = 0.0;
     for (double v : h) energy += v * v;
     for (double &v : h) v /= std::sqrt(energy);
     return h;
+}
+
+double rootRaisedCosineInterferenceDb(double rolloff, std::size_t samplesPerSymbol, std::size_t spanSymbols)
+{
+    if (samplesPerSymbol == 0) return -std::numeric_limits<double>::infinity();
+    return pairInterferenceDb(rootRaisedCosine(rolloff, samplesPerSymbol, spanSymbols), samplesPerSymbol);
+}
+
+std::size_t rootRaisedCosineSpan(double rolloff)
+{
+    const double beta = std::isfinite(rolloff) ? std::clamp(rolloff, 0.0, 1.0) : 0.35;
+    // The spans already found (a link asks for its own several times, a curve of the bit error rate at each point).
+    static std::mutex mutex;
+    static std::vector<std::pair<double, std::size_t>> found;
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        for (const auto &[b, span] : found)
+            if (b == beta) return span;
+    }
+    // The pulse once to the longest span, one side of it (it is even); each shorter one is its middle.
+    constexpr std::size_t sps = 16;
+    const std::size_t reach = kMaximumPulseSpanSymbols / 2 * sps;
+    std::vector<double> side(reach + 1);
+    for (std::size_t i = 0; i <= reach; ++i) side[i] = rootRaisedValue(beta, static_cast<double>(i) / static_cast<double>(sps));
+    std::size_t span = kMaximumPulseSpanSymbols;
+    std::vector<double> h;
+    for (std::size_t s = kMinimumPulseSpanSymbols; s < kMaximumPulseSpanSymbols; s += 2)
+    {
+        const std::size_t half = s / 2 * sps;
+        h.assign(2 * half + 1, 0.0);
+        for (std::size_t i = 0; i <= 2 * half; ++i) h[i] = side[i >= half ? i - half : half - i];
+        if (pairInterferenceDb(h, sps) <= kPulseInterferenceTargetDb)
+        {
+            span = s;
+            break;
+        }
+    }
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (found.size() >= 64) found.erase(found.begin());
+    found.emplace_back(beta, span);
+    return span;
+}
+
+std::size_t pulseSpanSymbolsOf(std::size_t given, double rolloff)
+{
+    return given > 0 ? given : rootRaisedCosineSpan(rolloff);
 }
 
 namespace
@@ -351,13 +431,20 @@ ModulatedSignal modulate(const ModulationSpec &spec)
 
         if (spec.type == Modulation::Fsk)
         {
+            // The phase runs on from one sample to the next (continuous phase); its phasor from the angle every
+            // Rotator::kBlock samples, and in between turned by the step of the bit.
             double theta = 0.0;
+            const double step = kTwoPi * spec.fskDeviationHz / fs;
+            const std::complex<double> up(std::cos(step), std::sin(step)), down = std::conj(up);
+            std::complex<double> phasor;
             for (std::size_t i = 0; i < n; ++i)
             {
                 const std::size_t k = symbolIndex(i);
-                b[i] = std::polar(a, theta);
-                const double f = out.bits[k] ? spec.fskDeviationHz : -spec.fskDeviationHz;
-                theta = std::remainder(theta + kTwoPi * f / fs, kTwoPi);
+                if (i % Rotator::kBlock == 0) phasor = std::polar(a, theta);
+                b[i] = phasor;
+                const bool one = out.bits[k] != 0;
+                theta = std::remainder(theta + (one ? step : -step), kTwoPi);
+                phasor = turned(phasor, one ? up : down);
             }
             for (std::size_t k = 0; k < symbolCount; ++k) out.symbols.emplace_back(out.bits[k] ? 1.0 : -1.0, 0.0);
             out.occupiedBandwidthHz = 2.0 * spec.fskDeviationHz + 2.0 * rs;
@@ -388,7 +475,8 @@ ModulatedSignal modulate(const ModulationSpec &spec)
                 // The pulses one after the other, each centred on its symbol (k sps): the filter of the impulses
                 // at the symbol instants, as firFilterAligned would give it, but only where there are impulses
                 // (one sample in sps: sps times less work).
-                const std::vector<double> h = rootRaisedCosine(spec.rolloff, spsInteger, spec.pulseSpanSymbols);
+                const std::vector<double> h =
+                    rootRaisedCosine(spec.rolloff, spsInteger, pulseSpanSymbolsOf(spec.pulseSpanSymbols, spec.rolloff));
                 const double gain = a * std::sqrt(static_cast<double>(spsInteger));
                 const std::size_t delay = (h.size() - 1) / 2;
                 for (std::size_t k = 0; k < symbolCount && k * spsInteger < n; ++k)
@@ -415,9 +503,12 @@ ModulatedSignal modulate(const ModulationSpec &spec)
     if (passband)
     {
         out.passband.resize(n);
-        const double ratio = spec.carrierFrequencyHz / fs;
+        Rotator carrier(spec.carrierFrequencyHz / fs);
         for (std::size_t i = 0; i < n; ++i)
-            out.passband[i] = (b[i] * std::polar(1.0, kTwoPi * fraction(ratio * static_cast<double>(i)))).real();
+        {
+            const std::complex<double> c = carrier.next();
+            out.passband[i] = b[i].real() * c.real() - b[i].imag() * c.imag();
+        }
         const double lower = spec.carrierFrequencyHz - 0.5 * out.occupiedBandwidthHz;
         const double upper = spec.carrierFrequencyHz + 0.5 * out.occupiedBandwidthHz;
         if (lower < 0.0 || upper > 0.5 * fs)

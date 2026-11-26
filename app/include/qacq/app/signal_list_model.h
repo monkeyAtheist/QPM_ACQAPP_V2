@@ -11,6 +11,7 @@
 #include <QAbstractListModel>
 #include <QHash>
 #include <QString>
+#include <QVariantList>
 #include <QVariantMap>
 
 #include <vector>
@@ -83,6 +84,10 @@ public:
     Q_INVOKABLE bool moveSignal(int from, int to);
     Q_INVOKABLE bool setNotes(qint64 id, const QString &notes);
     Q_INVOKABLE bool setChannel(qint64 id, int channel, const QString &name, const QString &unit);
+    // A channel taken out of a signal, or only some of its channels kept (their indices, in the order they
+    // will have): one step of the history each. A signal keeps at least one channel.
+    Q_INVOKABLE bool removeChannel(qint64 id, int channel);
+    Q_INVOKABLE bool keepChannels(qint64 id, const QVariantList &channels);
     // Dragged values (a spin box held down) merge into one undo step until endMerge().
     Q_INVOKABLE bool setTiming(qint64 id, double sampleRateHz, double startSeconds);
     // A curve computed from a signal (qacq/analysis/calculus.h), added just after it as one step of the

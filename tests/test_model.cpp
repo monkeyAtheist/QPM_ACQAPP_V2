@@ -204,6 +204,108 @@ TEST_CASE("Signals: validation, channel names, deinterleaving", "[model]")
     CHECK(data->discontinuities == std::vector<std::size_t>{1});
 }
 
+TEST_CASE("Signals: channels taken out of a signal, the others kept in the order asked", "[model]")
+{
+    Signal s = makeSignal("a", 3);
+    s.id = 7;
+    s.channels[0].name = "sin";
+    s.channels[1].name = "cos";
+    s.channels[2].name = "s";
+    s.notes = "Généré à 1 kHz.";
+    s.provenance = Json::object();
+    s.provenance["generator"] = "recette";
+    auto broken = std::make_shared<SampleData>(*s.data);
+    broken->discontinuities = {10, 50};
+    s.data = broken;
+    const Signal before = s;
+
+    // One channel out: the two others, their samples, what else the signal says.
+    std::string why;
+    Signal two = s;
+    const std::size_t keepTwo[] = {0, 2};
+    REQUIRE(keepChannels(two, keepTwo, &why));
+    CHECK(why.empty());
+    CHECK(validateSignal(two).empty());
+    REQUIRE(two.channelCount() == 2);
+    CHECK(two.channels[0].name == "sin");
+    CHECK(two.channels[1].name == "s");
+    CHECK(two.channels[1].unit == "V");
+    CHECK((two.data->channels[0] == s.data->channels[0]));
+    CHECK((two.data->channels[1] == s.data->channels[2]));
+    CHECK((two.data->discontinuities == std::vector<std::size_t>{10, 50}));
+    CHECK(two.id == 7);
+    CHECK(two.name == "a");
+    CHECK(two.sampleRateHz == s.sampleRateHz);
+    CHECK(two.provenance["generator"].toString() == "recette");
+    CHECK(two.notes == "Généré à 1 kHz.\nVoie retirée : cos.");
+    // The signal it was made from is untouched (its samples are shared with the history).
+    CHECK(s.channelCount() == 3);
+    CHECK(s.data == before.data);
+    CHECK(s.notes == before.notes);
+
+    // Two out at once; another order, nothing out (no note).
+    Signal one = s;
+    const std::size_t keepOne[] = {2};
+    REQUIRE(keepChannels(one, keepOne));
+    CHECK(one.channelCount() == 1);
+    CHECK(one.channels[0].name == "s");
+    CHECK(one.notes == "Généré à 1 kHz.\nVoies retirées : sin, cos.");
+    Signal turned = s;
+    const std::size_t order[] = {2, 0, 1};
+    REQUIRE(keepChannels(turned, order));
+    CHECK(turned.channels[0].name == "s");
+    CHECK((turned.data->channels[1] == s.data->channels[0]));
+    CHECK(turned.notes == "Généré à 1 kHz.");
+    Signal bare = s;
+    bare.notes.clear();
+    REQUIRE(keepChannels(bare, keepOne));
+    CHECK(bare.notes == "Voies retirées : sin, cos.");
+
+    // What is refused leaves the signal as it was, and says why.
+    Signal same = s;
+    CHECK(!keepChannels(same, std::span<const std::size_t>(), &why));
+    CHECK(why == "Un signal garde au moins une voie.");
+    const std::size_t beyond[] = {0, 3};
+    CHECK(!keepChannels(same, beyond, &why));
+    CHECK(why == "Cette voie n'existe pas.");
+    const std::size_t twice[] = {1, 1};
+    CHECK(!keepChannels(same, twice, &why));
+    CHECK(why == "Une voie ne peut être gardée qu'une fois.");
+    CHECK(!keepChannels(same, twice)); // no text asked
+    CHECK(same.channelCount() == 3);
+    CHECK(same.data == s.data);
+    CHECK(same.notes == s.notes);
+
+    // I/Q: whole pairs stay I/Q, anything else is a real signal.
+    Signal iq = makeSignal("iq", 4);
+    iq.representation = Representation::IQ;
+    iq.channels = defaultChannels(4, "", Representation::IQ);
+    Signal pair = iq;
+    const std::size_t second[] = {2, 3};
+    REQUIRE(keepChannels(pair, second));
+    CHECK(pair.representation == Representation::IQ);
+    CHECK(pair.channels[0].name == "I 2");
+    CHECK(validateSignal(pair).empty());
+    Signal both = iq;
+    const std::size_t swapped[] = {2, 3, 0, 1};
+    REQUIRE(keepChannels(both, swapped));
+    CHECK(both.representation == Representation::IQ);
+    Signal mixed = iq;
+    const std::size_t ins[] = {0, 2};
+    REQUIRE(keepChannels(mixed, ins));
+    CHECK(mixed.representation == Representation::Real);
+    CHECK(validateSignal(mixed).empty());
+    Signal odd = iq;
+    const std::size_t three[] = {0, 1, 2};
+    REQUIRE(keepChannels(odd, three));
+    CHECK(odd.representation == Representation::Real);
+    CHECK(validateSignal(odd).empty());
+    Signal reversed = iq;
+    const std::size_t qi[] = {1, 0};
+    REQUIRE(keepChannels(reversed, qi));
+    CHECK(reversed.representation == Representation::Real);
+}
+
 TEST_CASE("Document: edits, undo, redo, labels and the modified flag", "[model]")
 {
     Document doc;

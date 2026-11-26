@@ -383,3 +383,12 @@ TEST_CASE("code: the C, its names and its self-test", "[code]")
     // Nothing to write: said.
     CHECK(!generateCode(EmbeddedFilter{}, fd).error.empty());
 }
+
+TEST_CASE("code: no filter, nothing to write", "[code]")
+{
+    const FilterDesign none = designFilter(blankFilterRecipe(48000.0));
+    REQUIRE(none.ok());
+    const EmbeddedFilter e = embedFilter(none, CodeOptions{});
+    CHECK(!e.error.empty());
+    CHECK(e.error.find("Aucun filtre : rien à écrire en C.") == 0);
+}
